@@ -29,7 +29,7 @@ use std::sync::OnceLock;
 
 use core_foundation::runloop::{kCFRunLoopCommonModes, CFRunLoop};
 use core_graphics::event::{
-    CGEventFlags, CGEventTap, CGEventTapLocation, CGEventTapOptions, CGEventTapPlacement,
+    CGEventTap, CGEventTapLocation, CGEventTapOptions, CGEventTapPlacement,
     CGEventType, CallbackResult, EventField,
 };
 
@@ -108,6 +108,7 @@ impl Listener {
                 vec![CGEventType::FlagsChanged],
                 move |_proxy, _typ, event| {
                     let code = event.get_integer_value_field(EventField::KEYBOARD_EVENT_KEYCODE);
+                    let _ = code; // 仅用于调试输出，判据不依赖它
                     let raw = event.get_flags().bits();
                     let r_cmd = raw & NX_DEVICE_R_CMD != 0;
 
@@ -119,10 +120,15 @@ impl Listener {
                         );
                     }
 
-                    // 判据优先用设备位（能分左右），keyCode 作为兜底。
-                    // flagsChanged 在按下和松开各来一次，这里做上升沿检测，
-                    // 只在「原本没按 → 现在按下」时触发一次。
-                    let down = r_cmd || code == KVK_RIGHT_COMMAND && raw != 0;
+                    // 判据只看设备位。
+                    //
+                    // 不要再加 `code == KVK_RIGHT_COMMAND` 之类的兜底：松开事件
+                    // 的 keyCode 同样是 54，raw 也非 0（实测 0x10100），那样会把
+                    // 松开也当成按下，状态位永远卡在 true，上升沿再不出现——
+                    // 表现就是「能开始录音但按第二次停不下来」。
+                    //
+                    // flagsChanged 按下/松开各来一次，这里做上升沿检测。
+                    let down = r_cmd;
                     let was = R_CMD_DOWN.swap(down, std::sync::atomic::Ordering::Relaxed);
                     if down && !was {
                         log::debug!("→ 右 Command 按下");
