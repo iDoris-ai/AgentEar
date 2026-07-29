@@ -34,20 +34,51 @@
 
 守护进程本身只有音频缓冲和快捷键监听，**空闲时几乎不占内存**。这是选型换成 SenseVoice 的直接红利——如果还用 Fun-ASR-Nano（冷启动 11.45s），就必须常驻 1.5 GiB。
 
+## 端到端验收（2026-07-29 jason 实测通过）
+
+一次完整录音的实测时间线：
+
+| 阶段 | 耗时 |
+|---|---|
+| 按键 → 麦克风就绪 | **146 ms** |
+| 录音 | 7.4 s |
+| raw 提交（走完整协议） | **28 ms** |
+| 转写 | **0.26 s** |
+| **全程** | **7.8 s** |
+
+转写结果正确进入剪贴板。
+
+### 验收标准对照
+
+- [x] 快捷键 toggle 录音（右 Command）
+- [x] 录音按提交协议落进 `raw/audio/<content_hash>.wav`
+- [x] 崩溃语义：未提交的临时对象下次启动被清理
+      （单元测试 + 一次真实事故双重验证：那次「停不下来」的 27 秒录音
+      正确停留在 `.tmp/`，重启后被自动清理）
+- [x] 转写结果进剪贴板，已过滤特殊 token
+- [x] 按键到开始录音 < 200 ms（实测 146 ms）
+- [x] 常驻内存 ≤ 2 GB（实测空闲 13 MB）
+- [ ] 状态在菜单栏可见 —— **未做**
+
+### 一个实测中发现的问题：蓝牙耳机会被优先选中
+
+实测日志：`输入设备: Bose QC35 II | 16000 Hz, 1 ch, F32`
+
+蓝牙耳机作为输入设备时走 HFP 模式，采样率被压到 16 kHz 且带宽很窄，
+音质明显差于 MacBook 内置麦克风（48 kHz）。**长期使用会拉低 CER。**
+
+当前用的是 `default_input_device()`，跟随系统默认。应当加设备选择，
+或至少在用了蓝牙输入时给出提示。
+
 ## 待办
-
-### 需要 jason 交互验证（我这边跑不了）
-
-1. **按 Ctrl+Shift+R 实测录音**。首次运行时 macOS 会弹麦克风权限请求。
-2. **验证剪贴板**：录完后直接 Cmd+V 看能否粘贴。
-3. **验证按键响应时延** < 200ms（体感即可）。
 
 跑法：
 
 ```bash
 cd /Users/jason/Dev/tools/AgentEar
-./target/release/agentear
-# 按 Ctrl+Shift+R 开始，说几句，再按一次停止
+./target/release/agentear             # 按右 Command 开始/停止
+./target/release/agentear --debug-keys  # 排查按键问题
+./target/release/agentear --diagnose    # 环境自检
 ```
 
 数据落在 `~/.agentear/`（可用 `AGENTEAR_DATA` 覆盖）。
@@ -56,11 +87,27 @@ cd /Users/jason/Dev/tools/AgentEar
 
 - **菜单栏图标与状态显示**。当前是终端程序，状态靠 stdout。
   `milestones.md` 的验收标准要求「状态在菜单栏可见」，这一项还没做。
+- **输入设备选择**。见上方「蓝牙耳机」问题。
+- **右 Command 误触发**。它是常用修饰键，按 ⌘C / ⌘V 时如果用右手那个会误启动录音。
+  备选方案：双击右 Command，或加「按下时无其他键」的判据。
 - **`.app` bundle 打包**。当前从终端跑会继承终端的麦克风权限（TCC），
   这正是 `milestones.md` 里警告过的「我这儿能跑」的假象。
   正式分发必须打 bundle 并在 `Info.plist` 写 `NSMicrophoneUsageDescription`。
 - **`--keep-tags` 的默认行为未实测**。当前 `clean()` 是防御性过滤，
   真实输出里没见到 `/sil` 泄漏，但没有正面确认过运行时的默认行为。
+
+## macOS 上踩过的三个坑（都表现为「按了没反应」）
+
+值得记下来，因为它们的表面症状完全一样，但根因层层递进：
+
+1. **主线程没跑 CFRunLoop。** Carbon 快捷键和 NSEvent 都靠 run loop 派发事件。
+   原来的主循环只是 `sleep` + `try_recv`，事件注册成功但永远送不到。
+2. **`NSEvent addGlobalMonitorForEventsMatchingMask:` 在纯 CLI 二进制里回调永不触发。**
+   它依赖 AppKit 的 `NSApplication` 机制。改用 Quartz 层的 `CGEventTap`，
+   只需一个 CFRunLoop 即可工作。
+3. **松开事件的 keyCode 和按下一样是 54。** 判据里加 `code == 54 && raw != 0`
+   作兜底，会把松开也算成按下，状态位永远卡在 true，上升沿再不出现——
+   表现是「能开始录音但停不下来」。**只看设备位 `NX_DEVICE_R_CMD (0x10)`。**
 
 ## 已知的设计取舍
 
