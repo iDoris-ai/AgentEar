@@ -8,14 +8,15 @@
 1. **M1 只做到转写**，不含 LLM、不含标签路由、不含语音输出
 2. **常驻守护进程用 Rust**（单二进制、无运行时，契合 ASR 的选型理由）
 3. **先做丢弃式 Python spike** 跑基准测试，验证通过再写正式代码
+4. **ASR 用 SenseVoiceSmall q8**（M0 横比后推翻了 Fun-ASR-Nano，见 `docs/decisions/0001-asr-model-selection.md`）
 
 ---
 
 ## M0 · ASR 基准验证（丢弃式 spike）
 
-> ✅ **已完成（2026-07-29）。结果见 `docs/benchmarks.md`。**
-> Fun-ASR-Nano q4km 满足全部硬约束，选型升级为「条件锁定」。
-> 产出四条硬性架构约束，见 `CLAUDE.md`。横比未做，降为低优先级。
+> ✅ **已完成（2026-07-29）。** 结果见 `docs/benchmarks.md`，决策见 `docs/decisions/0001-asr-model-selection.md`。
+> 横比了 Fun-ASR-Nano / SenseVoiceSmall / Paraformer / Qwen3-ASR 四家：**CER 相差不到 1 个百分点，
+> 差异全在工程形态**。最终选定 **SenseVoiceSmall q8**，推翻了初版的 Fun-ASR-Nano。
 
 | | |
 |---|---|
@@ -58,7 +59,7 @@ cpal 采集 16kHz 单声道 PCM
   ↓
 raw/audio/<content_hash>  ← 完整提交协议，零丢失
   ↓
-Fun-ASR-Nano（llama.cpp，Metal）转写
+llama-funasr-sensevoice 子进程转写（冷启动仅 0.2s）
   ↓
 derived/transcripts/
   ↓
@@ -81,11 +82,11 @@ derived/transcripts/
 
 - [ ] 快捷键 toggle 录音，状态在菜单栏可见
 - [ ] 录音文件按提交协议落进 `raw/audio/`，**杀进程测试**：录音中途 `kill -9`，已 fsync 的部分不丢、未提交的临时对象被正确清理
-- [ ] 转写结果进剪贴板，可直接粘贴，且**已过滤 `/sil` 等特殊 token**（M0 实测会泄漏）
+- [ ] 转写结果进剪贴板，可直接粘贴，且**已过滤特殊 token**（`llama-funasr-sensevoice` 有 `--keep-tags` 开关，默认行为需实测确认）
 - [ ] 转写失败时 raw 音频**仍然完好**（手动破坏模型文件来测）
 - [ ] 常驻内存 ≤ 2 GB（复用 M0 的测量方法）
-- [ ] **常驻后**按键到开始录音 < 200ms；开机加载完成 < 15s 且加载中状态在菜单栏可见
-      （M0 实测冷启动载入 910 MiB 权重需 10.5s，原「冷启动 <3 秒」做不到）
+- [ ] 按键到开始录音 < 200ms
+      （改用 SenseVoice 后冷启动仅 0.2s，原为 Fun-ASR-Nano 的 10.5s 加载所写的「开机加载 <15s 且状态可见」不再必要）
 
 **不在 M1 范围内**：LLM、标签路由、TTS、录音笔、网络传输、AEC。
 

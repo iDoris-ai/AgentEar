@@ -2,13 +2,11 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-## 当前状态：设计成型，卡在 M0 门槛，**不要开始写产品代码**
+## 当前状态：M0 已通过，**M1 开发中**
 
-仓库内容：`README.md`（中文构想稿）、`LICENSE`（Apache 2.0）、`docs/milestones.md`（**里程碑，先读这个**）、`docs/asr-selection.md`（ASR 选型）、`docs/ingest-design.md`（音频接入层设计）。**没有任何源码、manifest、lockfile 或构建脚本。**
+文档阅读顺序：`docs/milestones.md`（里程碑）→ `docs/decisions/`（决策记录，**选型结论以此为准**）→ `docs/benchmarks.md`（实测数据）→ `docs/ingest-design.md`（接入层设计）。`docs/asr-selection.md` 是初版调研，其中的选型结论**已被 ADR-0001 推翻**，仅作历史参考。
 
-- 没有 build / test / lint 命令可用 —— 不要凭空编造，也不要假装某个命令存在。
-- 仓库在 GitHub 上（`git@github.com:jhfnetboy/AgentEar.git`，分支 `main`）。
-- 设计经过两轮 Codex 对抗性评审，结论是**只能做验证性 spike，不能做产品代码**，直到 M0 通过。
+仓库在 GitHub 上（`git@github.com:jhfnetboy/AgentEar.git`，分支 `main`）。
 
 ### 已拍板（jason 2026-07-29 确认，不要重开讨论）
 
@@ -16,30 +14,24 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 2. **常驻守护进程用 Rust** —— 单二进制、无运行时，契合 ASR 的选型理由。
 3. **先做丢弃式 Python spike 跑 M0 基准** —— 「不用 Python」的约束针对常驻进程，不针对一次性测量脚本。spike 用完即删。
 
-### 技术栈：暂定，非锁定
+### 技术栈
 
-> 两份设计文档里的选型都是 **provisional**。任何说「已经定了」的表述都以本节为准。
-
-- **ASR 暂定 `Fun-ASR-Nano-2512`（800M，Apache 2.0），走 llama.cpp / GGUF**。选它不是因为准确率最高（FireRedASR2-AED 更高），而是因为它是唯一能做成「单个自包含二进制、无 Python 运行时、内置 FSMN-VAD」的中文流式模型。**但这个结论建立在未实测的二手数字上。**
-- **已知矛盾**：资料称 GGUF 约 484 MB，但 800M 参数在 q8 下应约 800 MB。**在 `ls -l` 之前不要采信任一数字**，≤2 GB 常驻预算可能比预期紧张。
+- **ASR 已定为 `SenseVoiceSmall q8` + FSMN-VAD**，走 `llama-funasr-sensevoice` 单二进制。**决策依据见 `docs/decisions/0001-asr-model-selection.md`，不要重开选型讨论。**
+- **Fun-ASR-Nano 已被推翻**：四模型实测横比后，它是唯一在 30 分钟音频就爆 2 GiB 预算的（16 分钟即破），且冷启动 11.45s。SenseVoice 常驻仅 419 MB（Nano 的 27%）、冷启动 0.2s、术语命中反超。
+- **Qwen3-ASR-0.6B 指标最好但出局**：需 Python + MLX 运行时。若将来出现 GGUF/纯 Rust 路径，应重新评估。
+- **Paraformer 出局**：完全不输出标点。
 - **Whisper 不做主链路**：中文 CER 远差于中文专用模型。但不要重复「差一个数量级」这个说法——那是混用了两种测试集口径。
 - **复用 `ququ/` 仅限配置与思路层面**（模型选择、中文后处理经验），**不继承其运行时**。常驻进程背一个内嵌 Python 环境不划算。`huniu/`、`whisper.cpp/` 同理，是参考不是迁移源。
 - 目标机器 **M1 Max / 64 GB**，常驻内存预算 **≤2 GB**（jason 定的）。64 GB 的余量不是拿来放宽这个预算的。
 
-### M0 已跑完 —— 结果见 `docs/benchmarks.md`，M1 可以开工
+### M0 实测产出的硬约束
 
-Fun-ASR-Nano q4km 在 M1 Max 上**满足全部硬约束**，选型状态从「暂定」升级为「**条件锁定**」（没做横比，所以只能说够用，不能说最优）。
+**SenseVoiceSmall q8 实测关键数字**：权重 242 MiB + VAD 1.6 MiB、**冷启动 0.2s**、RSS 419 MB(2min) / 1.27 GiB(30min)、RTF 0.030–0.033。
 
-**M0 产出的四条架构约束，全部是硬性的：**
-
-1. **长音频必须分段送入 ASR，单段 ≤5 分钟。**
-   RSS 随音频长度线性增长约 **0.56 MB/秒音频**：32s→1.465 GiB、10min→1.771 GiB、**30min→2.452 GiB（爆预算）**，外推 60min→3.42 GiB。
-   影响 `ingest-design.md` 的**路径 A**（录音笔长录音）——整文件喂进去会吃掉数 GiB。路径 B 受定长时间片保护，M1 的快捷键录音不受影响。
-2. **冷启动 10.5 秒**（载入 910 MiB 权重）。M1 的验收标准已从「冷启动 <3s」改为「常驻后按键响应 <200ms」+「开机加载 <15s 且状态可见」。
-3. **`/sil` 特殊 token 会泄漏进输出**，M1 必须做后处理过滤，否则粘进用户剪贴板。
-4. **中英混杂技术术语的识别不可靠**（`raw`→`road`、`knowledge base`→`闹铃是base`），而 jason 的使用场景恰恰全是技术术语。**术语纠错是 M2 的职责**，用本地 LLM 结合上下文纠正，不要指望换 ASR 模型解决。
-
-**实测关键数字**：权重 910 MiB（encoder 447.6 + decoder 461.8，另需单独下 `fsmn-vad.gguf` 1.6 MiB）、RTF 0.032–0.074、常规录音 RSS ~1.5 GiB、Metal 未被使用（CPU 已 13–31 倍实时，GPU 空闲留给 M2 的 LLM）。
+1. **冷启动 0.2 秒 → M1 不需要常驻模型服务。** 每次录音直接 `Command::new()` 调 `llama-funasr-sensevoice` 子进程即可，无需链接 C++ 库、无需 server 模式。（这是换掉 Fun-ASR-Nano 的直接红利——Nano 冷启动要 11.45s，必须常驻。）
+2. **长音频仍需分段送入 ASR，单段建议 ≤5 分钟。** RSS 随音频长度增长 0.52 MB/s，54 分钟破 2 GiB。影响 `ingest-design.md` 的**路径 A**；M1 的快捷键录音不受影响。
+3. **特殊 token 需过滤。** `llama-funasr-sensevoice` 有 `--keep-tags` 开关，默认行为**需在 M1 中实测确认**，别让 `/sil` 之类粘进剪贴板。
+4. **中英混杂技术术语不可靠。** 实测 `raw` 一词四个模型全错（row/road/ro/roll）。**术语纠错是 M2 的职责**，不要指望换 ASR 解决。
 
 ### M1 的两个红利，不要提前破坏
 
@@ -66,7 +58,7 @@ jason 要的「边说边理解、可互相打断」是全双工 speech-to-speech
 
 ### 未验证前提
 
-1. ASR 的全部性能数字（见上方门槛）
+1. SenseVoice 的准确率仅基于**单个样本**，样本量不足；且现有语料均为安静环境
 2. 那支爱国者录音笔的能力 —— **机器没到手，`docs/ingest-design.md` §0 的「实时互斥」是条件式结论**。到手当天先做 §1.0 的刻画清单，它可能推翻整个坞站方案。
 3. AEC 方案是否够用
 
@@ -93,7 +85,7 @@ routes/ → 存入 knowledge base / 触发调研并出 report / 查日程并给�
 
 几个实现上要留意的点，都是 README 里已经定调的：
 
-- **raw 优先**：原始**音频**必须在 ASR 之前就落盘，转写失败、VAD 切错段、进程 OOM 都不能毁掉唯一一份忠实记录。注意 README 的口述稿里 raw 是排在转写之后的，**以本文件和 `docs/asr-selection.md` §5 为准**。
+- **raw 优先**：原始**音频**必须在 ASR 之前就落盘，转写失败、VAD 切错段、进程 OOM 都不能毁掉唯一一份忠实记录。注意 README 的口述稿里 raw 是排在转写之后的，**以本文件为准**。
 - **分支路由由语音内容里的标签驱动** —— 用户说"这是一个 idea"/"这是一个任务"，系统据此选下游分支。这意味着 ASR 之后需要一层意图/标签识别。
 - **录音笔的可改造性未知**：那支爱国者录音笔还没到手，是否能加 WiFi、能否自动传输数据，都还没验证。任何依赖"录音笔能主动推送数据"的设计都是未经证实的假设；先做的是**手机 / MacBook 这条链路**（README 明确说了先完成这个）。
 - **Mac mini 中转是后期选项**，不是第一版目标。
@@ -102,4 +94,4 @@ routes/ → 存入 knowledge base / 触发调研并出 report / 查日程并给�
 
 `ququ/`（FunASR 语音输入，Electron + 内嵌 Python）已经解决了"本地 ASR"这一段，`huniu/`（本地语音助手）和 `whisper.cpp/` 在同一片领域。
 
-**这三个是参考资料，不是迁移源。** 可以复用的是**配置与思路层面**的东西：模型选择的经验、中文后处理、VAD 参数、踩过的坑。**不要继承它们的运行时** —— 尤其不要为了复用 ququ 而把内嵌 Python 环境搬进来，常驻守护进程背一个 Python 栈不划算（见上方技术栈一节）。任何"直接复用某段实现"的想法都要先过 §5.1 的基准测试。
+**这三个是参考资料，不是迁移源。** 可以复用的是**配置与思路层面**的东西：模型选择的经验、中文后处理、VAD 参数、踩过的坑。**不要继承它们的运行时** —— 尤其不要为了复用 ququ 而把内嵌 Python 环境搬进来，常驻守护进程背一个 Python 栈不划算（见上方技术栈一节）。任何"直接复用某段实现"的想法都要先过 `docs/benchmarks.md` 的实测。

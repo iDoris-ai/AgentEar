@@ -1,4 +1,10 @@
-# 本地 ASR 选型报告
+# 本地 ASR 选型报告（初版调研，结论已被推翻）
+
+> ⚠️ **本文档的选型结论已作废。**
+> 它是基于二手资料的初版调研，其中「主链路选 Fun-ASR-Nano」的结论**已被四模型实测横比推翻**。
+> **当前有效的选型见 [`docs/decisions/0001-asr-model-selection.md`](decisions/0001-asr-model-selection.md)**（结论：SenseVoiceSmall q8）。
+> 本文保留作为调研过程的历史记录，其中的架构分析（双工、路径分层）仍然有效。
+
 
 调研日期：2026-07-29
 目标机器：MacBook Pro，Apple M1 Max，10 核（8P+2E），**64 GB 统一内存**
