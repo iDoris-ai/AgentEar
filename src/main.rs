@@ -50,6 +50,12 @@ fn main() -> Result<()> {
         return diagnose(&vendor);
     }
 
+    // 打印每一个修饰键事件，确认按键到底有没有被收到
+    if args.iter().any(|a| a == "--debug-keys") {
+        hotkey::set_debug_keys(true);
+        log::info!("已开启按键调试：将打印每一个 flagsChanged 事件");
+    }
+
     let data_root = data_root()?;
     let store = store::Store::open(&data_root)?;
     log::info!("数据目录: {}", store.root().display());
