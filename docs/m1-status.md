@@ -58,7 +58,7 @@
 - [x] 转写结果进剪贴板，已过滤特殊 token
 - [x] 按键到开始录音 < 200 ms（实测 146 ms）
 - [x] 常驻内存 ≤ 2 GB（实测空闲 13 MB）
-- [ ] 状态在菜单栏可见 —— **未做**
+- [x] 状态在菜单栏可见（`🎙` 空闲 / `● Ns` 录音中 / `◌ 转写中`）
 
 ### 一个实测中发现的问题：蓝牙耳机会被优先选中
 
@@ -83,10 +83,38 @@ cd /Users/jason/Dev/tools/AgentEar
 
 数据落在 `~/.agentear/`（可用 `AGENTEAR_DATA` 覆盖）。
 
+## 打包
+
+```bash
+scripts/bundle.sh          # → dist/AgentEar.app（248 MB，模型占 242 MB）
+open dist/AgentEar.app
+```
+
+bundle 做了这几件事：`LSUIElement=true`（只在菜单栏、不占 Dock）、
+`NSMicrophoneUsageDescription`（**缺了这条系统会直接拒绝而不是弹窗询问**）、
+ad-hoc 签名、把 `vendor/` 放进 `Contents/Resources/`。
+
+`vendor_root()` 的查找顺序：环境变量 → bundle 的 Resources → 源码树。
+
+### ⚠️ bundle 的权限与终端是分开的
+
+打包后第一次运行立刻验证了这一点——日志显示：
+
+```
+WARN 辅助功能权限：未授予 → 降级为 Ctrl+Shift+R
+```
+
+从终端跑二进制时继承的是**终端**的 TCC 授权，`.app` 是独立主体，
+麦克风和辅助功能都要**再单独授权一次**，且辅助功能授权后**必须重启程序**。
+
+### 日志
+
+日志同时写 stderr 和 `~/.agentear/agentear.log`。从 Finder 启动 `.app` 时
+stderr 无处可去，文件日志是唯一能看到发生了什么的途径——对一个没有主窗口
+的菜单栏程序这是刚需。
+
 ### 未实现
 
-- **菜单栏图标与状态显示**。当前是终端程序，状态靠 stdout。
-  `milestones.md` 的验收标准要求「状态在菜单栏可见」，这一项还没做。
 - **输入设备选择**。见上方「蓝牙耳机」问题。
 - **右 Command 误触发**。它是常用修饰键，按 ⌘C / ⌘V 时如果用右手那个会误启动录音。
   备选方案：双击右 Command，或加「按下时无其他键」的判据。

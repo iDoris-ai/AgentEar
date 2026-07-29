@@ -9,6 +9,7 @@ mod asr;
 mod audio;
 mod hotkey;
 mod store;
+mod tray;
 
 use anyhow::{Context, Result};
 use std::path::PathBuf;
@@ -24,10 +25,7 @@ enum State {
 }
 
 fn main() -> Result<()> {
-    // 默认 debug 级别：M1 阶段需要看得见每一步在干什么
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("debug"))
-        .format_timestamp_millis()
-        .init();
+    init_logging();
 
     let args: Vec<String> = std::env::args().collect();
     let vendor = vendor_root()?;
@@ -60,11 +58,13 @@ fn main() -> Result<()> {
     let store = store::Store::open(&data_root)?;
     log::info!("数据目录: {}", store.root().display());
 
-    // 权限引导：想用右 Command 就必须有辅助功能权限
+    // 权限引导：想用右 Command 就必须有辅助功能权限。
+    // 用 log:: 而非 println!，因为从 Finder 启动 .app 时 stdout 无处可去。
     if !hotkey::is_accessibility_trusted() {
-        println!("\n⚠️  未获得「辅助功能」权限，无法监听单独的右 Command 键。");
-        println!("    正在弹出系统授权对话框——授权后请重启本程序。");
-        println!("    路径：系统设置 → 隐私与安全性 → 辅助功能\n");
+        log::warn!("未获得「辅助功能」权限，无法监听单独的右 Command 键");
+        log::warn!("  正在弹出系统授权对话框——授权后**必须重启本程序**才生效");
+        log::warn!("  路径：系统设置 → 隐私与安全性 → 辅助功能");
+        log::warn!("  注意：.app 的权限与终端是分开的，各自要授权一次");
         hotkey::prompt_accessibility();
     }
 
@@ -89,9 +89,13 @@ fn main() -> Result<()> {
         }
     });
 
-    log::debug!("主线程进入 CFRunLoop，等待按键事件……");
-    core_foundation::runloop::CFRunLoop::run_current();
-    Ok(())
+    // 菜单栏必须在主线程装，且要在 NSApplication::run() 之前
+    let mtm = objc2::MainThreadMarker::new().expect("install 必须在主线程");
+    let _tray = tray::install(mtm);
+    log::debug!("菜单栏图标已安装");
+
+    log::debug!("主线程进入 AppKit 事件循环……");
+    tray::run(mtm)
 }
 
 fn worker(
@@ -113,6 +117,7 @@ fn worker(
                 session.write(&pcm)?;
             }
             // 每秒报一次时长，让「正在录」这件事可见
+            tray::set_secs(session.duration_secs() as u32);
             if last_heartbeat.elapsed() >= Duration::from_secs(1) {
                 log::info!("● 录音中 {:.0}s", session.duration_secs());
                 last_heartbeat = Instant::now();
@@ -153,6 +158,7 @@ fn begin(store: &store::Store) -> Result<State> {
     log::debug!("打开麦克风……（首次运行时 macOS 会在此弹出权限请求）");
     let recorder = audio::Recorder::start()?;
     let session = store.begin()?;
+    tray::set(tray::Status::Recording);
     println!("● 开始录音…… 再按一次停止");
     log::debug!("录音启动耗时 {:.0}ms", t0.elapsed().as_secs_f32() * 1000.0);
     Ok(State::Recording {
@@ -182,8 +188,10 @@ fn finish(state: State, asr: &asr::Asr) -> Result<State> {
     let secs = session.duration_secs();
     if secs < 0.3 {
         log::warn!("录音过短（{secs:.1}s），丢弃");
+        tray::set(tray::Status::Idle);
         return Ok(State::Idle);
     }
+    tray::set(tray::Status::Transcribing);
 
     // raw 先落盘并走完提交协议，再谈转写。
     // 转写失败不能影响原始音频——这是 README「先存后分流」的执行点。
@@ -214,6 +222,7 @@ fn finish(state: State, asr: &asr::Asr) -> Result<State> {
         Err(e) => log::error!("转写失败（raw 音频已保留，可重试）: {e:#}"),
     }
 
+    tray::set(tray::Status::Idle);
     Ok(State::Idle)
 }
 
@@ -271,6 +280,41 @@ fn diagnose(vendor: &std::path::Path) -> Result<()> {
     Ok(())
 }
 
+/// 日志同时写 stderr 和 `~/.agentear/agentear.log`。
+///
+/// 从 Finder / `open` 启动 .app 时 stderr 无处可去，只有文件日志能看到
+/// 发生了什么——这对一个没有主窗口的菜单栏程序是刚需。
+fn init_logging() {
+    struct Tee(std::fs::File);
+    impl std::io::Write for Tee {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            let _ = std::io::Write::write_all(&mut std::io::stderr(), buf);
+            self.0.write(buf)
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            let _ = std::io::Write::flush(&mut std::io::stderr());
+            self.0.flush()
+        }
+    }
+
+    let mut b = env_logger::Builder::from_env(
+        env_logger::Env::default().default_filter_or("debug"),
+    );
+    b.format_timestamp_millis();
+
+    if let Ok(root) = data_root() {
+        let _ = std::fs::create_dir_all(&root);
+        if let Ok(f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(root.join("agentear.log"))
+        {
+            b.target(env_logger::Target::Pipe(Box::new(Tee(f))));
+        }
+    }
+    b.init();
+}
+
 fn copy_to_clipboard(text: &str) -> Result<()> {
     let mut cb = arboard::Clipboard::new()?;
     cb.set_text(text.to_string())?;
@@ -286,11 +330,23 @@ fn data_root() -> Result<PathBuf> {
         .join(".agentear"))
 }
 
-/// vendor/ 里放 ASR 二进制和模型。开发时用仓库内的，
-/// 打包成 .app 之后应改为读 bundle 内的 Resources。
+/// vendor/ 里放 ASR 二进制和模型。
+///
+/// 查找顺序：环境变量 → .app bundle 内的 Resources → 源码树。
+/// 打包后可执行文件在 `AgentEar.app/Contents/MacOS/`，
+/// vendor 在 `AgentEar.app/Contents/Resources/vendor`。
 fn vendor_root() -> Result<PathBuf> {
     if let Ok(p) = std::env::var("AGENTEAR_VENDOR") {
         return Ok(PathBuf::from(p));
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        // .../Contents/MacOS/AgentEar → .../Contents/Resources/vendor
+        if let Some(contents) = exe.parent().and_then(|p| p.parent()) {
+            let bundled = contents.join("Resources/vendor");
+            if bundled.exists() {
+                return Ok(bundled);
+            }
+        }
     }
     Ok(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("vendor"))
 }

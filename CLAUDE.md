@@ -11,7 +11,19 @@ cargo build --release
 cargo test                                    # 8 个测试：提交协议、崩溃语义、token 过滤
 ./target/release/agentear                     # 守护进程，Ctrl+Shift+R 开始/停止录音
 ./target/release/agentear --transcribe x.wav  # 离线转写，不占麦克风，用于验证 ASR 链路
+./target/release/agentear --diagnose          # 环境自检：权限、音频设备、ASR 依赖
+./target/release/agentear --debug-keys        # 打印每个修饰键事件，排查按键问题
+scripts/bundle.sh                             # 打 .app bundle → dist/
 ```
+
+日志同时写 stderr 和 `~/.agentear/agentear.log`。
+
+**macOS 上按键相关的三个坑**（症状都是「按了没反应」，见 `docs/m1-status.md`）：
+主线程必须跑 AppKit/CFRunLoop 事件循环；`NSEvent` 全局监听在纯 CLI 二进制里回调
+永不触发（用 `CGEventTap`）；修饰键的松开事件 keyCode 与按下相同，判据只能看
+设备位 `NX_DEVICE_R_CMD (0x10)`。
+
+**TCC 权限不会从终端带到 .app**：两者是独立主体，麦克风与辅助功能各自要授权一次。
 
 数据落在 `~/.agentear/`（`AGENTEAR_DATA` 可覆盖）；ASR 二进制与模型在 `vendor/`（`AGENTEAR_VENDOR` 可覆盖，**不入库**）。
 
