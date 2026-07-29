@@ -1,0 +1,32 @@
+[package]
+name = "agentear"
+version = "0.1.0"
+edition = "2021"
+description = "本地语音采集与转写守护进程（M1：按快捷键录音 → raw 落盘 → 转写 → 剪贴板）"
+license = "Apache-2.0"
+
+[dependencies]
+# 音频采集
+cpal = "0.15"
+hound = "3.5"
+
+# 全局快捷键（Carbon RegisterEventHotKey，不需要辅助功能权限）
+global-hotkey = "0.6"
+
+# 剪贴板
+arboard = "3.4"
+
+# 内容寻址（提交协议）
+sha2 = "0.10"
+
+# 基础设施
+anyhow = "1"
+log = "0.4"
+env_logger = "0.11"
+dirs = "5"
+libc = "0.2.189"
+
+[profile.release]
+opt-level = 3
+lto = true
+strip = true

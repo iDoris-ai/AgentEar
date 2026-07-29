@@ -1,5 +1,10 @@
+/target
 spike/models/
 spike/bin/
 spike/audio/
+spike/.venv/
+spike/out_*
+vendor/bin/
+vendor/models/
 *.gguf
 *.wav

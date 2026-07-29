@@ -2,7 +2,18 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-## 当前状态：M0 已通过，**M1 开发中**
+## 当前状态：M0 已通过，**M1 开发中**（进度见 `docs/m1-status.md`）
+
+**构建与测试**：
+
+```bash
+cargo build --release
+cargo test                                    # 8 个测试：提交协议、崩溃语义、token 过滤
+./target/release/agentear                     # 守护进程，Ctrl+Shift+R 开始/停止录音
+./target/release/agentear --transcribe x.wav  # 离线转写，不占麦克风，用于验证 ASR 链路
+```
+
+数据落在 `~/.agentear/`（`AGENTEAR_DATA` 可覆盖）；ASR 二进制与模型在 `vendor/`（`AGENTEAR_VENDOR` 可覆盖，**不入库**）。
 
 文档阅读顺序：`docs/milestones.md`（里程碑）→ `docs/decisions/`（决策记录，**选型结论以此为准**）→ `docs/benchmarks.md`（实测数据）→ `docs/ingest-design.md`（接入层设计）。`docs/asr-selection.md` 是初版调研，其中的选型结论**已被 ADR-0001 推翻**，仅作历史参考。
 
