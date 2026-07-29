@@ -26,11 +26,20 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - **复用 `ququ/` 仅限配置与思路层面**（模型选择、中文后处理经验），**不继承其运行时**。常驻进程背一个内嵌 Python 环境不划算。`huniu/`、`whisper.cpp/` 同理，是参考不是迁移源。
 - 目标机器 **M1 Max / 64 GB**，常驻内存预算 **≤2 GB**（jason 定的）。64 GB 的余量不是拿来放宽这个预算的。
 
-### 开始写产品代码的前置门槛（M0）
+### M0 已跑完 —— 结果见 `docs/benchmarks.md`，M1 可以开工
 
-**必须先跑完 `docs/asr-selection.md` §5.1 的基准表**：真实中文/口音语料上的 CER、模型实际体积、峰值与稳态 RSS、RTF、30–60 分钟长跑稳定性、热行为；并与 Paraformer 流式、SenseVoice/ONNX、mlx-audio 的 Qwen3-ASR、FireRedASR2 横比。产出 `docs/benchmarks.md`。
+Fun-ASR-Nano q4km 在 M1 Max 上**满足全部硬约束**，选型状态从「暂定」升级为「**条件锁定**」（没做横比，所以只能说够用，不能说最优）。
 
-**当前阻塞项：需要 jason 提供真实中文语料**（本人口音 + 目标场景，含至少一段嘈杂环境）。
+**M0 产出的四条架构约束，全部是硬性的：**
+
+1. **长音频必须分段送入 ASR，单段 ≤5 分钟。**
+   RSS 随音频长度线性增长约 **0.56 MB/秒音频**：32s→1.465 GiB、10min→1.771 GiB、**30min→2.452 GiB（爆预算）**，外推 60min→3.42 GiB。
+   影响 `ingest-design.md` 的**路径 A**（录音笔长录音）——整文件喂进去会吃掉数 GiB。路径 B 受定长时间片保护，M1 的快捷键录音不受影响。
+2. **冷启动 10.5 秒**（载入 910 MiB 权重）。M1 的验收标准已从「冷启动 <3s」改为「常驻后按键响应 <200ms」+「开机加载 <15s 且状态可见」。
+3. **`/sil` 特殊 token 会泄漏进输出**，M1 必须做后处理过滤，否则粘进用户剪贴板。
+4. **中英混杂技术术语的识别不可靠**（`raw`→`road`、`knowledge base`→`闹铃是base`），而 jason 的使用场景恰恰全是技术术语。**术语纠错是 M2 的职责**，用本地 LLM 结合上下文纠正，不要指望换 ASR 模型解决。
+
+**实测关键数字**：权重 910 MiB（encoder 447.6 + decoder 461.8，另需单独下 `fsmn-vad.gguf` 1.6 MiB）、RTF 0.032–0.074、常规录音 RSS ~1.5 GiB、Metal 未被使用（CPU 已 13–31 倍实时，GPU 空闲留给 M2 的 LLM）。
 
 ### M1 的两个红利，不要提前破坏
 
