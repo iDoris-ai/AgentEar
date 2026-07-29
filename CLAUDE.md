@@ -2,13 +2,19 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-## 当前状态：设计成型，尚未通过验证门槛，**不要开始写产品代码**
+## 当前状态：设计成型，卡在 M0 门槛，**不要开始写产品代码**
 
-仓库内容：`README.md`（中文构想稿）、`LICENSE`（Apache 2.0）、`docs/asr-selection.md`（ASR 选型）、`docs/ingest-design.md`（音频接入层设计）。**没有任何源码、manifest、lockfile 或构建脚本。**
+仓库内容：`README.md`（中文构想稿）、`LICENSE`（Apache 2.0）、`docs/milestones.md`（**里程碑，先读这个**）、`docs/asr-selection.md`（ASR 选型）、`docs/ingest-design.md`（音频接入层设计）。**没有任何源码、manifest、lockfile 或构建脚本。**
 
 - 没有 build / test / lint 命令可用 —— 不要凭空编造，也不要假装某个命令存在。
 - 仓库在 GitHub 上（`git@github.com:jhfnetboy/AgentEar.git`，分支 `main`）。
-- 这套设计经过一轮 Codex 对抗性评审，结论是**只能开始做验证性 spike，不能开始做产品代码**。门槛见下。
+- 设计经过两轮 Codex 对抗性评审，结论是**只能做验证性 spike，不能做产品代码**，直到 M0 通过。
+
+### 已拍板（jason 2026-07-29 确认，不要重开讨论）
+
+1. **M1 只做到转写** —— 快捷键 toggle 录音 → raw 落盘 → 转写 → 文字进剪贴板。不含 LLM、路由、TTS。
+2. **常驻守护进程用 Rust** —— 单二进制、无运行时，契合 ASR 的选型理由。
+3. **先做丢弃式 Python spike 跑 M0 基准** —— 「不用 Python」的约束针对常驻进程，不针对一次性测量脚本。spike 用完即删。
 
 ### 技术栈：暂定，非锁定
 
@@ -20,11 +26,20 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - **复用 `ququ/` 仅限配置与思路层面**（模型选择、中文后处理经验），**不继承其运行时**。常驻进程背一个内嵌 Python 环境不划算。`huniu/`、`whisper.cpp/` 同理，是参考不是迁移源。
 - 目标机器 **M1 Max / 64 GB**，常驻内存预算 **≤2 GB**（jason 定的）。64 GB 的余量不是拿来放宽这个预算的。
 
-### 开始写产品代码的前置门槛
+### 开始写产品代码的前置门槛（M0）
 
-**必须先跑完 `docs/asr-selection.md` §5.1 的基准表**：真实中文/口音语料上的 CER、模型实际体积、峰值与稳态 RSS、RTF、30–60 分钟长跑稳定性、热行为；并与 Paraformer 流式、SenseVoice/ONNX、mlx-audio 的 Qwen3-ASR、FireRedASR2 横比。
+**必须先跑完 `docs/asr-selection.md` §5.1 的基准表**：真实中文/口音语料上的 CER、模型实际体积、峰值与稳态 RSS、RTF、30–60 分钟长跑稳定性、热行为；并与 Paraformer 流式、SenseVoice/ONNX、mlx-audio 的 Qwen3-ASR、FireRedASR2 横比。产出 `docs/benchmarks.md`。
 
-在此之前只做验证性 spike。
+**当前阻塞项：需要 jason 提供真实中文语料**（本人口音 + 目标场景，含至少一段嘈杂环境）。
+
+### M1 的两个红利，不要提前破坏
+
+选择「M1 只到转写」让 M1 恰好绕开了两个最难的部分：
+
+- **不需要 AEC**（没有 TTS 播放，麦克风不会收到自己的声音）
+- **不需要流式 raw 语义**（快捷键的按下/再按天然给出段边界，每次录音就是一个有头有尾的文件对象，可直接用 `ingest-design.md` §3.3 的零丢失提交协议）
+
+**不要在 M1 里提前引入 TTS 或无边界流**，那会把这两块难度一起拽进来。它们属于 M3。
 
 ### 存储语义（已定，不要在实现时重新解释）
 
