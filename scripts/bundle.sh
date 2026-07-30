@@ -26,6 +26,7 @@ cp "$ROOT/target/release/agentear" "$APP/Contents/MacOS/AgentEar"
 # ASR 二进制与模型随 bundle 走，运行时从 Resources/vendor 读
 if [ -d "$ROOT/vendor" ]; then
   cp -R "$ROOT/vendor" "$APP/Contents/Resources/vendor"
+  cp "$ROOT/LICENSE" "$ROOT/NOTICE" "$APP/Contents/Resources/"
 else
   echo "!! 缺少 vendor/，打出来的 app 跑不起来" >&2
   exit 1
@@ -68,6 +69,39 @@ echo '</plist>' >> "$APP/Contents/Info.plist"
 # 让它至少能在本机正常运行。正式分发需要开发者证书 + 公证。
 echo "==> ad-hoc 签名"
 codesign --force --deep --sign - "$APP" 2>&1 | sed 's/^/    /'
+
+# 架构一致性校验。ASR 运行时（FunASR 官方 macOS 版）只有 arm64，
+# 所以整个 app 是 Apple Silicon only——做通用二进制没有意义，
+# Intel 机器上 ASR 子进程照样跑不起来。
+echo "==> 架构校验"
+APP_ARCH="$(lipo -archs "$APP/Contents/MacOS/AgentEar")"
+ASR_ARCH="$(lipo -archs "$APP/Contents/Resources/vendor/bin/llama-funasr-sensevoice")"
+echo "    AgentEar:              $APP_ARCH"
+echo "    llama-funasr-sensevoice: $ASR_ARCH"
+if [ "$APP_ARCH" != "$ASR_ARCH" ]; then
+  echo "!! 架构不一致，ASR 子进程会起不来" >&2
+  exit 1
+fi
+
+# 冒烟测试：确认打出来的 app 能找到 bundle 内的 vendor 并跑通自检
+echo "==> 冒烟测试"
+# 先把输出收进变量再匹配。不要写成 `... | grep -q`：grep -q 命中即退出
+# 并关闭管道，上游收到 SIGPIPE 返回非零，被 pipefail 判成整条失败。
+SMOKE="$("$APP/Contents/MacOS/AgentEar" --diagnose 2>&1 || true)"
+if grep -q "Resources/vendor" <<<"$SMOKE"; then
+  echo "    ✅ bundle 内 vendor 解析正确"
+else
+  echo "!! bundle 找不到 Resources/vendor" >&2
+  echo "$SMOKE" | sed 's/^/    /' >&2
+  exit 1
+fi
+
+# 发布用压缩包。用 ditto 而非 zip，它会保留资源分支与签名
+echo "==> 打包发布件"
+ZIP="$OUT/AgentEar-$VERSION-macos-arm64.zip"
+rm -f "$ZIP"
+ditto -c -k --sequesterRsrc --keepParent "$APP" "$ZIP"
+echo "    $ZIP ($(du -h "$ZIP" | cut -f1))"
 
 echo "==> 完成: $APP"
 echo

@@ -1,0 +1,29 @@
+AgentEar
+Copyright 2026 jhfnetboy
+
+本产品包含以下第三方组件。发布用的 .app bundle 内置了它们的二进制与权重
+（位于 `Contents/Resources/vendor/`），各自的许可条款如下。
+
+--------------------------------------------------------------------------------
+
+FunASR llama.cpp runtime  (`llama-funasr-sensevoice`)
+  来源：https://github.com/modelscope/FunASR
+  版本：runtime-llamacpp-v0.1.9
+  许可：MIT License
+
+--------------------------------------------------------------------------------
+
+SenseVoiceSmall  (`sensevoice-small-q8.gguf`)
+  来源：https://huggingface.co/FunAudioLLM/SenseVoiceSmall-GGUF
+  上游模型：https://github.com/QwenAudio/SenseVoice
+  许可：Apache License 2.0
+
+--------------------------------------------------------------------------------
+
+FSMN-VAD  (`fsmn-vad.gguf`)
+  来源：https://huggingface.co/FunAudioLLM/fsmn-vad-GGUF
+  许可：Apache License 2.0
+
+--------------------------------------------------------------------------------
+
+Rust 依赖的许可信息见 `Cargo.toml` 与各 crate 自身声明。

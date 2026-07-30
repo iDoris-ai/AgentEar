@@ -4,6 +4,14 @@
 <dict>
 	<key>files</key>
 	<dict>
+		<key>Resources/LICENSE</key>
+		<data>
+		ffBZWXCZu33PJdKprt+vRGX3LY0=
+		</data>
+		<key>Resources/NOTICE</key>
+		<data>
+		Fv+yEOPqK0t9IPlfZDOzhICtF8w=
+		</data>
 		<key>Resources/vendor/bin/llama-funasr-sensevoice</key>
 		<data>
 		rq3NOB5E82dzzgq0d8VSzV2Rcnw=
@@ -19,6 +27,20 @@
 	</dict>
 	<key>files2</key>
 	<dict>
+		<key>Resources/LICENSE</key>
+		<dict>
+			<key>hash2</key>
+			<data>
+			xx0jnfkXJvxRnG63LTGOxlggYnIysveWIZ6H3PNdCrQ=
+			</data>
+		</dict>
+		<key>Resources/NOTICE</key>
+		<dict>
+			<key>hash2</key>
+			<data>
+			2Z8bUHNYbJvqSSrJmD/15s/EyY33ugGs0sqvPjrkqC4=
+			</data>
+		</dict>
 		<key>Resources/vendor/bin/llama-funasr-sensevoice</key>
 		<dict>
 			<key>hash2</key>
