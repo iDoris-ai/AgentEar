@@ -110,7 +110,7 @@ derived/transcripts/
 | 本地 LLM | **Ornith-1.0-9B MLX 6bit**（7.65 GiB），mlx-dspark 提供 HTTP，**常驻** |
 | 内存预算 | 从 ≤2 GiB 放宽到 **≤9 GiB**（LLM 常驻 + ASR 子进程尖峰） |
 | 标签体系 | 一级封闭集合 8 个（idea/task/note/question/reference/journal/command/unknown）+ 二级自由词表 |
-| knowledge base | **独立模块**，24h 采集 agent，本机 + 远程 server，**经 MCP 对接**。AgentEar 只负责投递 |
+| knowledge base | **独立模块**，双适配器可自由切换（见 [ADR-0003](decisions/0003-knowledge-base-adapters.md)）：个人档 = Markdown + Git；组织档 = Memos（MIT / Go 单二进制）。投递走原生接口，**MCP 用于反向检索** |
 
 **约束**：
 - 下游路由只消费 committed 的转写

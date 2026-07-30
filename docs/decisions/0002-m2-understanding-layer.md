@@ -156,6 +156,11 @@ AgentEar（本 ADR 范围）
                           采集 / 订阅 / 分发
 ```
 
+> ⚠️ **本节的 MCP 用法已由 [ADR-0003](0003-knowledge-base-adapters.md) §4.3 修正。**
+> 调研发现现有 KB 的 MCP server 全都不成熟，投递改走各适配器的原生接口
+> （文件写入 / memos REST）；**MCP 用在反方向**——AgentEar 提供 MCP server
+> 供 Claude 等检索历史笔记。原来的设计把 MCP 用错了方向。
+
 ### 5.1 为什么用 MCP 而不是直接写文件或 HTTP
 
 - 知识库未来要装到**别人的机器**上，接口必须是协议而非路径约定
