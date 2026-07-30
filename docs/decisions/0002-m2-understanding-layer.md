@@ -180,7 +180,39 @@ MCP 目标可能不在线（远程 server、笔记本休眠）。所以：
 | `ADR-0001` | 判 Qwen3-ASR 出局的「需 Python」理由在新措辞下失效，但不重开 ASR 选型（见 §2.3） |
 | `milestones.md` | M2 三项空白（LLM / 标签词表 / knowledge base 指向）由本 ADR 填上 |
 
-## 7. 待验证
+## 7. 实测修订（2026-07-30，见 `docs/benchmarks-m2.md`）
+
+| 项 | 本 ADR 原文 | 实测 |
+|---|---|---|
+| 术语纠错 | 待验证 | **11/11 = 100%** —— M2 的核心价值成立 |
+| 标签分类 | 待验证 | 6/8 = 75%，两处失败均为**词表边界不清**，非模型问题 |
+| 常驻 + 尖峰 | ~9 GiB | **7.54 GiB**（LLM 7.17 + ASR 子进程 0.41） |
+| KV cache | ~1 GiB（按 64K 估） | 远低于此 —— Gemma 4 是混合线性注意力，**64 层只有 16 层持 KV** |
+| 速度 | 博文 61 tok/s（M4 Pro 8bit + 投机解码） | 36 tok/s（M1 Max 6bit + lookup 模式） |
+
+### 运行时参数（实测踩坑后确定）
+
+```bash
+mlx-dspark serve --model <path> --mode lookup --no-thinking --context-window 32768
+```
+
+- **必须 `--mode lookup`**：默认模式要求注册过的 drafter，本地模型路径没有
+- **必须 `--no-thinking`**：Ornith 默认吐 `Thinking Process:`，会污染结构化输出
+- **不能用 `--kv-bits`**：与混合线性注意力模型不兼容
+
+### §3.1 标签定义需要修订
+
+实测暴露两组边界重叠，**要改的是词表不是模型**：
+
+- **note vs journal** → 判据改为「是否含主观状态」：陈述客观事实 = note；
+  带情绪、体力、心境 = journal
+- **command vs task** → 判据改为「谁来做」：让助理立刻执行 = command；
+  记下来自己以后做 = task
+- prompt 里补 few-shot，把这两组边界用例显式写进去
+
+这正好印证 jason 说的「标签是可维护、动态积累形成的」——边界靠用例喂出来。
+
+## 8. 待验证
 
 - Ornith-9B 6bit 在 M1 Max 上的实测：常驻 RSS、tok/s、首 token 延迟
 - 术语纠错的实际命中率（用 M0 那段 ground truth 语料测）

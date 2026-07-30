@@ -80,6 +80,16 @@ def chat(url, messages, max_tokens=512, timeout=300):
     return text, dt, usage.get("completion_tokens", 0)
 
 
+def norm(s):
+    return re.sub(r"[\s\-_]", "", s.lower())
+
+
+def last_line(s):
+    """取最后一行非空输出，即模型的最终答案。"""
+    lines = [l.strip() for l in s.strip().splitlines() if l.strip()]
+    return lines[-1] if lines else ""
+
+
 def bench_terms(url):
     print("\n=== 1. 术语纠错 ===")
     glossary = "、".join(GLOSSARY)
@@ -93,10 +103,16 @@ def bench_terms(url):
             f"原文：{sent}"
         )
         out, dt, _ = chat(url, [{"role": "user", "content": prompt}], max_tokens=128)
-        out = out.strip()
-        ok = right.lower().replace(" ", "") in out.lower().replace(" ", "")
+        out = last_line(out)
+        # 只看最终纠正后的句子。不能用「目标词出现在输出任意位置」做判据——
+        # 模型如果吐推理过程，过程里自然会提到目标词，那是假阳性。
+        # 「原错词不应残留」这道保险杠要用词边界，不能用裸子串：
+        # norm("这是一个ID")="这是一个id" 是 norm("这是一个idea") 的前缀，
+        # 裸子串判据会把纠对的案例误判成失败。
+        residual = re.search(rf"{re.escape(norm(wrong))}(?![a-z])", norm(out))
+        ok = norm(right) in norm(out) and not residual
         hit += ok
-        print(f"  {'✅' if ok else '❌'} {wrong:14s} → 期望 {right:16s} | {out[:48]}")
+        print(f"  {'✅' if ok else '❌'} {wrong:14s} → 期望 {right:16s} | {out[:52]}")
     print(f"  命中 {hit}/{len(TERM_CASES)} = {hit/len(TERM_CASES)*100:.0f}%")
     return hit / len(TERM_CASES)
 
@@ -111,7 +127,7 @@ def bench_tags(url):
             f"只输出类名，不要解释。\n\n{text}"
         )
         out, _, _ = chat(url, [{"role": "user", "content": prompt}], max_tokens=16)
-        got = re.sub(r"[^a-z]", "", out.strip().lower())
+        got = re.sub(r"[^a-z]", "", last_line(out).lower())
         ok = got == want
         hit += ok
         print(f"  {'✅' if ok else '❌'} {text[:26]:28s} 期望 {want:10s} 得到 {got}")
