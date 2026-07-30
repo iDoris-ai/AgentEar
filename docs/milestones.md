@@ -103,12 +103,20 @@ derived/transcripts/
 
 **M2 多了一项 M0 发现的职责：技术术语纠错。** 实测 ASR 会把 `raw` 转成 `road`、`knowledge base` 转成 `闹铃是base`，而 jason 的场景全是技术术语。用本地 LLM 结合上下文纠正，比换 ASR 模型划算。
 
-**开工前必须先定**（现在都是空白）：
-- 用哪个本地 LLM，以及它和 ASR 怎么分 2 GB 预算（很可能要改成「按需加载、用完卸载」）
-- 标签词表：idea / task / note / question / …
-- 下游「knowledge base」到底指什么——`mempalace_rust/`？`Seeder/`？还是本地目录？
+**三项空白已由 [ADR-0002](decisions/0002-m2-understanding-layer.md) 填上：**
 
-**约束**：下游路由只消费 committed 的转写。
+| | 决定 |
+|---|---|
+| 本地 LLM | **Ornith-1.0-9B MLX 6bit**（7.65 GiB），mlx-dspark 提供 HTTP，**常驻** |
+| 内存预算 | 从 ≤2 GiB 放宽到 **≤9 GiB**（LLM 常驻 + ASR 子进程尖峰） |
+| 标签体系 | 一级封闭集合 8 个（idea/task/note/question/reference/journal/command/unknown）+ 二级自由词表 |
+| knowledge base | **独立模块**，24h 采集 agent，本机 + 远程 server，**经 MCP 对接**。AgentEar 只负责投递 |
+
+**约束**：
+- 下游路由只消费 committed 的转写
+- `routes/` 是本地权威记录，**先落盘再投递**；MCP 投递失败进重试队列，不阻塞主链路
+- 显式标记（用户说「这是一个 idea」）优先于模型推断
+- 纠错后必须保留原始转写——纠错是有损操作
 
 ---
 

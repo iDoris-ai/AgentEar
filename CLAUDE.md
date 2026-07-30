@@ -39,13 +39,19 @@ scripts/bundle.sh                             # 打 .app bundle → dist/
 
 ### 技术栈
 
+- **LLM 已定为 `Ornith-1.0-9B` MLX 6bit**，经 mlx-dspark 提供 HTTP 服务，**常驻**。见 `docs/decisions/0002-m2-understanding-layer.md`。注意 GGUF 的 Q5_K_M 与 MLX 格式不兼容，MLX 侧的对应档是 6bit。
 - **ASR 已定为 `SenseVoiceSmall q8` + FSMN-VAD**，走 `llama-funasr-sensevoice` 单二进制。**决策依据见 `docs/decisions/0001-asr-model-selection.md`，不要重开选型讨论。**
 - **Fun-ASR-Nano 已被推翻**：四模型实测横比后，它是唯一在 30 分钟音频就爆 2 GiB 预算的（16 分钟即破），且冷启动 11.45s。SenseVoice 常驻仅 419 MB（Nano 的 27%）、冷启动 0.2s、术语命中反超。
 - **Qwen3-ASR-0.6B 指标最好但出局**：需 Python + MLX 运行时。若将来出现 GGUF/纯 Rust 路径，应重新评估。
 - **Paraformer 出局**：完全不输出标点。
 - **Whisper 不做主链路**：中文 CER 远差于中文专用模型。但不要重复「差一个数量级」这个说法——那是混用了两种测试集口径。
 - **复用 `ququ/` 仅限配置与思路层面**（模型选择、中文后处理经验），**不继承其运行时**。常驻进程背一个内嵌 Python 环境不划算。`huniu/`、`whisper.cpp/` 同理，是参考不是迁移源。
-- 目标机器 **M1 Max / 64 GB**，常驻内存预算 **≤2 GB**（jason 定的）。64 GB 的余量不是拿来放宽这个预算的。
+- 目标机器 **M1 Max / 64 GB**。
+  **常驻内存预算：M1 阶段 ≤2 GiB；M2 起放宽到 ≤9 GiB**（引入常驻 LLM，见 ADR-0002）。
+  放宽只针对 LLM 这一项，ASR 侧仍按原标准要求。
+- **「不背 Python 运行时」的精确措辞**（ADR-0002 修订）：**Rust 守护进程自身**不内嵌
+  Python 运行时；**外部推理服务**的实现语言不受限，但必须是独立进程 + 明确协议边界
+  （可独立重启、独立崩溃）。M2 的 mlx-dspark 就是这样的边车。
 
 ### M0 实测产出的硬约束
 
