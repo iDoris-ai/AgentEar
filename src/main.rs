@@ -8,6 +8,7 @@
 mod asr;
 mod audio;
 mod hotkey;
+mod paste;
 mod store;
 mod tray;
 
@@ -70,10 +71,33 @@ fn main() -> Result<()> {
 
     let mut listener = hotkey::Listener::start()?;
 
+    // 自动上屏。默认开，`--no-auto-paste` 或 AGENTEAR_AUTO_PASTE=0 关掉。
+    //
+    // 同样吃辅助功能权限：CGEventPost 未授权时**静默失败**——不报错、什么也
+    // 不发生。所以这里主动降级，不然用户会看到「转写成功但没上屏」且日志无痕。
+    let want_paste = !args.iter().any(|a| a == "--no-auto-paste")
+        && !matches!(
+            std::env::var("AGENTEAR_AUTO_PASTE").as_deref(),
+            Ok("0") | Ok("false") | Ok("no")
+        );
+    let can_paste = want_paste && hotkey::is_accessibility_trusted();
+    if want_paste && !can_paste {
+        log::warn!("自动上屏需要辅助功能权限，未授予 → 只写剪贴板，请手动 ⌘V");
+    }
+    paste::set_enabled(can_paste);
+
     println!("\n╭─────────────────────────────────────────────╮");
     println!("│  AgentEar M1 已就绪                          │");
     println!("╰─────────────────────────────────────────────╯");
     println!("  触发键：{}（按一下开始，再按一下停止）", listener.describe());
+    println!(
+        "  上屏：  {}",
+        if can_paste {
+            "自动粘贴到当前窗口（不会替你按回车）"
+        } else {
+            "仅写剪贴板，手动 ⌘V"
+        }
+    );
     println!("  数据：  {}", store.root().display());
     println!("  退出：  Ctrl+C\n");
 
@@ -208,12 +232,27 @@ fn finish(state: State, asr: &asr::Asr) -> Result<State> {
     match asr.transcribe(&committed.path) {
         Ok(text) if !text.is_empty() => {
             log::debug!("转写耗时 {:.2}s", t_asr.elapsed().as_secs_f32());
+            let text = paste::sanitize(&text);
             println!("\n{text}\n");
+            // 先进剪贴板再谈上屏。上屏失败还能手动 ⌘V，顺序反过来就没有退路了。
             match copy_to_clipboard(&text) {
-                Ok(()) => println!(
-                    "（已复制到剪贴板，全程 {:.1}s）\n",
-                    started.elapsed().as_secs_f32()
-                ),
+                Ok(()) => {
+                    let pasted = if paste::enabled() {
+                        match paste::paste() {
+                            Ok(()) => " → 已上屏",
+                            Err(e) => {
+                                log::error!("自动上屏失败（文本仍在剪贴板，可手动 ⌘V）: {e:#}");
+                                ""
+                            }
+                        }
+                    } else {
+                        ""
+                    };
+                    println!(
+                        "（已复制到剪贴板{pasted}，全程 {:.1}s）\n",
+                        started.elapsed().as_secs_f32()
+                    );
+                }
                 Err(e) => log::error!("写剪贴板失败: {e:#}"),
             }
         }

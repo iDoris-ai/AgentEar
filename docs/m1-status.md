@@ -111,6 +111,80 @@ WARN 辅助功能权限：未授予 → 降级为 Ctrl+Shift+R
 从终端跑二进制时继承的是**终端**的 TCC 授权，`.app` 是独立主体，
 麦克风和辅助功能都要**再单独授权一次**，且辅助功能授权后**必须重启程序**。
 
+### ⚠️ 每次重新打包，辅助功能授权都会失效
+
+2026-08-07 部署时实测到的坑，**症状具有欺骗性**：系统设置里 AgentEar
+的开关看着是打开的，TCC 数据库里也确实有 `auth_value=2`（已允许），
+但程序启动仍然报「未授予」并降级到 Ctrl+Shift+R。
+
+根因：`bundle.sh` 里的 `codesign --force --deep --sign -` 每次都会生成新的
+cdhash，而 TCC 那条记录把签名标识**钉死在旧 cdhash 上**。签名对不上，
+授权就不生效——但旧记录还在，所以 UI 上看不出任何异常。
+
+诊断（读的是**系统级** TCC 库，不是 `~/Library/` 下那个；需要终端有完全磁盘访问权限）：
+
+```bash
+sqlite3 "/Library/Application Support/com.apple.TCC/TCC.db" \
+  "select client,auth_value,datetime(last_modified,'unixepoch','localtime')
+   from access where service='kTCCServiceAccessibility' and client like '%gentear%';"
+```
+
+如果 `last_modified` 早于最近一次 `bundle.sh`，那这条记录就是死的。修复：
+
+```bash
+tccutil reset Accessibility ai.idoris.agentear
+# 然后在 系统设置 → 隐私与安全性 → 辅助功能 重新用 + 添加 /Applications/AgentEar.app
+launchctl kickstart -k gui/$(id -u)/ai.idoris.agentear
+```
+
+日志里出现这一行才算真的成功：
+
+```
+INFO agentear::hotkey: 辅助功能权限：已授予 → 使用「单独按右 Command」触发
+DEBUG agentear::hotkey: CGEventTap 已挂载到监听线程的 run loop
+```
+
+**降级路径是有效的兜底**：没有辅助功能权限时 `Ctrl+Shift+R` 走 Carbon 注册，
+不需要该权限，功能完全可用——只是丢了右 Command 这个更顺手的触发方式。
+
+## 部署：launchd 常驻
+
+日常使用不要从 `dist/` 里直接跑——那个目录会被 `bundle.sh` 整个 `rm -rf`。
+
+```bash
+cp -R dist/AgentEar.app /Applications/
+```
+
+`~/Library/LaunchAgents/ai.idoris.agentear.plist`：
+
+```xml
+<key>ProgramArguments</key>
+<array><string>/Applications/AgentEar.app/Contents/MacOS/AgentEar</string></array>
+<key>RunAtLoad</key><true/>
+<key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>
+<key>StandardErrorPath</key><string>/Users/jason/.agentear/launchd.err.log</string>
+```
+
+`KeepAlive` 必须写成 `SuccessfulExit: false` 而**不是** `<true/>`——写成 `true`
+的话，从菜单栏正常退出也会被 launchd 立刻拉起来，程序关不掉。
+
+launchd 直接执行 bundle 内的二进制（而非 `open -a`）是刻意的：`open` 起的进程
+不归 launchd 管，`KeepAlive` 就失去意义。TCC 仍按 bundle 归属，不受影响；
+`Info.plist` 的 `LSUIElement` 也照常生效，不会跳出 Dock 图标。
+
+```bash
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/ai.idoris.agentear.plist
+launchctl kickstart -k gui/$(id -u)/ai.idoris.agentear   # 重启
+launchctl print    gui/$(id -u)/ai.idoris.agentear       # 看状态
+launchctl bootout  gui/$(id -u)/ai.idoris.agentear       # 停掉并取消开机自启
+```
+
+`bootstrap` 报 `5: Input/output error` 时，先确认 plist 文件真的存在且
+`plutil -lint` 通过——这个错误码不区分「文件不存在」和「格式错误」。
+
+**更新流程**：`scripts/bundle.sh` → `cp -R dist/AgentEar.app /Applications/`
+→ `tccutil reset` + 重新授权（见上）→ `launchctl kickstart -k`。
+
 ### 日志
 
 日志同时写 stderr 和 `~/.agentear/agentear.log`。从 Finder 启动 `.app` 时
@@ -122,9 +196,8 @@ stderr 无处可去，文件日志是唯一能看到发生了什么的途径—�
 - **输入设备选择**。见上方「蓝牙耳机」问题。
 - **右 Command 误触发**。它是常用修饰键，按 ⌘C / ⌘V 时如果用右手那个会误启动录音。
   备选方案：双击右 Command，或加「按下时无其他键」的判据。
-- **`.app` bundle 打包**。当前从终端跑会继承终端的麦克风权限（TCC），
-  这正是 `milestones.md` 里警告过的「我这儿能跑」的假象。
-  正式分发必须打 bundle 并在 `Info.plist` 写 `NSMicrophoneUsageDescription`。
+  2026-08-07 起已是日常常驻的默认触发键，这个问题变成实际可感知的了
+  （变通办法：粘贴时用左 Command）。
 - **`--keep-tags` 的默认行为未实测**。当前 `clean()` 是防御性过滤，
   真实输出里没见到 `/sil` 泄漏，但没有正面确认过运行时的默认行为。
 
