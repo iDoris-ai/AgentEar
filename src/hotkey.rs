@@ -22,19 +22,35 @@
 //!   适合没有 GUI 主体的守护进程。当前用的是这条。
 //!
 //! 无论哪条路，都必须有线程在跑 CFRunLoop，否则事件不会派发。
+//!
+//! ## 「轻点一下」的判据（v0.2 修掉的误触发）
+//!
+//! 右 Command 是常用修饰键。最初的实现在**按下**的瞬间就触发，于是用右手
+//! 按 ⌘C / ⌘V 每次都会顺带启动一次录音。
+//!
+//! 现在改成在**松开**时判定，且要同时满足：
+//!
+//! 1. 按下期间没有任何普通键按下（所以 ⌘V 不会触发）
+//! 2. 按下期间没有其他修饰键参与（所以 ⌘⇧… 不会触发）
+//! 3. 按下到松开不超过 `TAP_MAX`（所以「按住右 Cmd 想快捷键」不会触发）
+//!
+//! 判据 1 要求 tap 也订阅 `KeyDown`。**注意这是键盘记录器形状的能力**：
+//! 这里只读「有没有键按下」这一个 bool，**从不读键码、不记录、不落盘**，
+//! 键码只有 `--debug-keys` 显式打开时才会打印。改这段代码时请保持这个边界。
 
 use anyhow::{Context, Result};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::OnceLock;
+use std::time::{Duration, Instant};
 
 use core_foundation::runloop::{kCFRunLoopCommonModes, CFRunLoop};
 use core_graphics::event::{
-    CGEventTap, CGEventTapLocation, CGEventTapOptions, CGEventTapPlacement,
-    CGEventType, CallbackResult, EventField,
+    CGEventTap, CGEventTapLocation, CGEventTapOptions, CGEventTapPlacement, CGEventType,
+    CallbackResult, EventField,
 };
 
-/// 右 Command 的 virtual keycode（`Events.h` 里的 `kVK_RightCommand`）。
-const KVK_RIGHT_COMMAND: i64 = 54;
+pub use crate::config::Trigger;
 
 /// macOS 在事件 flags 的低位里用独立比特区分左右修饰键
 /// （`IOKit/hidsystem/IOLLEvent.h` 的 `NX_DEVICE*KEYMASK`）。
@@ -42,11 +58,19 @@ const KVK_RIGHT_COMMAND: i64 = 54;
 const NX_DEVICE_L_CMD: u64 = 0x0000_0008;
 const NX_DEVICE_R_CMD: u64 = 0x0000_0010;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Trigger {
-    RightCommand,
-    ComboCtrlShiftR,
-}
+/// 「同时按着别的修饰键」的判据。左 Command 也算——右手按右 Cmd 的同时
+/// 左手按左 Cmd，那显然不是想录音。
+const F_SHIFT: u64 = 0x0002_0000;
+const F_CONTROL: u64 = 0x0004_0000;
+const F_ALTERNATE: u64 = 0x0008_0000;
+const F_SECONDARY_FN: u64 = 0x0080_0000;
+const OTHER_MODS: u64 = F_SHIFT | F_CONTROL | F_ALTERNATE | F_SECONDARY_FN | NX_DEVICE_L_CMD;
+
+/// 「轻点一下」的最长时长。超过就认为是在把右 Command 当修饰键用。
+///
+/// 500ms 是个折中：短于 300ms 会误伤按得慢的人，长于 800ms 就盖不住
+/// 「按住右 Cmd 犹豫要按什么」这种情况了。
+const TAP_MAX: Duration = Duration::from_millis(500);
 
 pub struct Listener {
     rx: Option<Receiver<()>>,
@@ -56,9 +80,14 @@ pub struct Listener {
 
 static TX: OnceLock<Sender<()>> = OnceLock::new();
 
-/// 右 Command 当前是否按下。用于上升沿检测——flagsChanged 按下/松开
-/// 各来一次，不做边沿检测会触发两次。
-static R_CMD_DOWN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// 右 Command 当前是否按下。flagsChanged 按下/松开各来一次，靠它做边沿检测。
+static R_CMD_DOWN: AtomicBool = AtomicBool::new(false);
+/// 本次按下至今是否仍是「干净的一次轻点」。任何普通键或其他修饰键都会弄脏它。
+static CLEAN: AtomicBool = AtomicBool::new(false);
+/// 按下时刻，相对 `START` 的毫秒数。用原子量而非 Mutex——KeyDown 回调在
+/// 每一次敲键时都会跑，不能在那条路径上加锁。
+static DOWN_AT_MS: AtomicU64 = AtomicU64::new(0);
+static START: OnceLock<Instant> = OnceLock::new();
 
 /// 打印每一个修饰键事件，用于排查「按了没反应」。由 `--debug-keys` 打开。
 static DEBUG_KEYS: OnceLock<bool> = OnceLock::new();
@@ -71,29 +100,43 @@ fn debug_keys() -> bool {
     *DEBUG_KEYS.get().unwrap_or(&false)
 }
 
+fn now_ms() -> u64 {
+    START.get_or_init(Instant::now).elapsed().as_millis() as u64
+}
+
+fn fire() {
+    if let Some(tx) = TX.get() {
+        let _ = tx.send(());
+    }
+}
+
 impl Listener {
-    /// 优先用右 Command；权限不足或启动失败时降级到组合键。
-    pub fn start() -> Result<Self> {
-        if is_accessibility_trusted() {
-            log::info!("辅助功能权限：已授予 → 使用「单独按右 Command」触发");
-            match Self::start_right_command() {
-                Ok(l) => Ok(l),
-                Err(e) => {
-                    log::error!("右 Command 监听启动失败：{e:#}");
-                    log::warn!("降级为 Ctrl+Shift+R");
-                    Self::start_combo()
-                }
-            }
-        } else {
+    /// 按配置选触发方式。要用右 Command 但没有辅助功能权限时降级到组合键。
+    pub fn start(want: Trigger) -> Result<Self> {
+        if want == Trigger::CtrlShiftR {
+            log::info!("触发键：Ctrl+Shift+R（配置指定）");
+            return Self::start_combo();
+        }
+        if !is_accessibility_trusted() {
             log::warn!("辅助功能权限：未授予 → 降级为 Ctrl+Shift+R");
             log::warn!("  想用右 Command：系统设置 → 隐私与安全性 → 辅助功能，勾选本程序后重启");
-            Self::start_combo()
+            return Self::start_combo();
+        }
+        log::info!("辅助功能权限：已授予 → 使用「轻点一下右 Command」触发");
+        match Self::start_right_command() {
+            Ok(l) => Ok(l),
+            Err(e) => {
+                log::error!("右 Command 监听启动失败：{e:#}");
+                log::warn!("降级为 Ctrl+Shift+R");
+                Self::start_combo()
+            }
         }
     }
 
     fn start_right_command() -> Result<Self> {
         let (tx, rx) = channel();
         TX.set(tx).ok();
+        START.get_or_init(Instant::now);
 
         // event tap 必须在跑 run loop 的那个线程上创建并挂载。
         // 放到独立线程，让它自带 run loop。
@@ -105,36 +148,62 @@ impl Listener {
                 CGEventTapPlacement::HeadInsertEventTap,
                 // ListenOnly：只观察不吞事件，右 Command 仍能正常当修饰键使用
                 CGEventTapOptions::ListenOnly,
-                vec![CGEventType::FlagsChanged],
-                move |_proxy, _typ, event| {
-                    let code = event.get_integer_value_field(EventField::KEYBOARD_EVENT_KEYCODE);
-                    let _ = code; // 仅用于调试输出，判据不依赖它
-                    let raw = event.get_flags().bits();
-                    let r_cmd = raw & NX_DEVICE_R_CMD != 0;
-
-                    if debug_keys() {
-                        log::debug!(
-                            "flagsChanged: keyCode={code} raw=0x{raw:x} \
-                             左Cmd={} 右Cmd={r_cmd}",
-                            raw & NX_DEVICE_L_CMD != 0
-                        );
-                    }
-
-                    // 判据只看设备位。
-                    //
-                    // 不要再加 `code == KVK_RIGHT_COMMAND` 之类的兜底：松开事件
-                    // 的 keyCode 同样是 54，raw 也非 0（实测 0x10100），那样会把
-                    // 松开也当成按下，状态位永远卡在 true，上升沿再不出现——
-                    // 表现就是「能开始录音但按第二次停不下来」。
-                    //
-                    // flagsChanged 按下/松开各来一次，这里做上升沿检测。
-                    let down = r_cmd;
-                    let was = R_CMD_DOWN.swap(down, std::sync::atomic::Ordering::Relaxed);
-                    if down && !was {
-                        log::debug!("→ 右 Command 按下");
-                        if let Some(tx) = TX.get() {
-                            let _ = tx.send(());
+                vec![CGEventType::FlagsChanged, CGEventType::KeyDown],
+                move |_proxy, typ, event| {
+                    match typ {
+                        // 有普通键按下 → 这次右 Command 是在当修饰键用，作废。
+                        // 只读「有没有」，不读是哪个键。
+                        CGEventType::KeyDown => {
+                            if R_CMD_DOWN.load(Ordering::Relaxed) {
+                                CLEAN.store(false, Ordering::Relaxed);
+                            }
                         }
+                        CGEventType::FlagsChanged => {
+                            let raw = event.get_flags().bits();
+                            let r_cmd = raw & NX_DEVICE_R_CMD != 0;
+
+                            if debug_keys() {
+                                let code = event
+                                    .get_integer_value_field(EventField::KEYBOARD_EVENT_KEYCODE);
+                                log::debug!(
+                                    "flagsChanged: keyCode={code} raw=0x{raw:x} \
+                                     左Cmd={} 右Cmd={r_cmd}",
+                                    raw & NX_DEVICE_L_CMD != 0
+                                );
+                            }
+
+                            // 判据只看设备位。
+                            //
+                            // 不要再加 `code == 54` 之类的兜底：松开事件的 keyCode
+                            // 同样是 54，raw 也非 0（实测 0x10100），那样会把松开
+                            // 也当成按下，状态位永远卡在 true，上升沿再不出现——
+                            // 表现就是「能开始录音但按第二次停不下来」。
+                            let was = R_CMD_DOWN.swap(r_cmd, Ordering::Relaxed);
+
+                            if r_cmd && !was {
+                                // 按下：开始计时。按下的同时已有别的修饰键就直接作废。
+                                DOWN_AT_MS.store(now_ms(), Ordering::Relaxed);
+                                CLEAN.store(raw & OTHER_MODS == 0, Ordering::Relaxed);
+                            } else if !r_cmd && was {
+                                // 松开：这里才判定
+                                let held = now_ms().saturating_sub(
+                                    DOWN_AT_MS.load(Ordering::Relaxed),
+                                );
+                                let clean = CLEAN.load(Ordering::Relaxed);
+                                if is_tap(held, clean) {
+                                    log::debug!("→ 右 Command 轻点（{held}ms）");
+                                    fire();
+                                } else if debug_keys() {
+                                    log::debug!(
+                                        "→ 右 Command 松开但不算轻点（{held}ms, clean={clean}）"
+                                    );
+                                }
+                            } else if r_cmd && raw & OTHER_MODS != 0 {
+                                // 仍按住，但期间又按下了别的修饰键 → 作废
+                                CLEAN.store(false, Ordering::Relaxed);
+                            }
+                        }
+                        _ => {}
                     }
                     CallbackResult::Keep
                 },
@@ -199,16 +268,14 @@ impl Listener {
             while let Ok(ev) = carbon_rx.recv() {
                 log::debug!("Carbon 事件: id={} state={:?}", ev.id, ev.state);
                 if ev.state == global_hotkey::HotKeyState::Pressed {
-                    if let Some(tx) = TX.get() {
-                        let _ = tx.send(());
-                    }
+                    fire();
                 }
             }
         });
 
         Ok(Self {
             rx: Some(rx),
-            trigger: Trigger::ComboCtrlShiftR,
+            trigger: Trigger::CtrlShiftR,
             _carbon: Some(manager),
         })
     }
@@ -219,8 +286,8 @@ impl Listener {
 
     pub fn describe(&self) -> &'static str {
         match self.trigger {
-            Trigger::RightCommand => "右 Command 键",
-            Trigger::ComboCtrlShiftR => "Ctrl+Shift+R",
+            Trigger::RightCommand => "轻点右 Command",
+            Trigger::CtrlShiftR => "Ctrl+Shift+R",
         }
     }
 }
@@ -251,4 +318,40 @@ fn check_accessibility(prompt: bool) -> bool {
     let val = CFBoolean::from(prompt);
     let opts = CFDictionary::from_CFType_pairs(&[(key.as_CFType(), val.as_CFType())]);
     unsafe { AXIsProcessTrustedWithOptions(opts.as_concrete_TypeRef()) }
+}
+
+/// 轻点判据的纯函数版本，便于测试真值表。
+///
+/// 事件回调本身依赖 CGEventTap 跑不了单测，但判据是这里最容易出错的部分
+/// （误触发就是它错了），所以把它单独提出来测。
+pub fn is_tap(held_ms: u64, clean: bool) -> bool {
+    clean && held_ms <= TAP_MAX.as_millis() as u64
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn quick_clean_press_is_a_tap() {
+        assert!(is_tap(120, true));
+    }
+
+    #[test]
+    fn cmd_v_is_not_a_tap() {
+        // 按住右 Cmd 再按 V：CLEAN 被 KeyDown 打掉
+        assert!(!is_tap(120, false));
+    }
+
+    #[test]
+    fn long_hold_is_not_a_tap() {
+        // 按住右 Cmd 不放当修饰键用
+        assert!(!is_tap(1500, true));
+    }
+
+    #[test]
+    fn boundary_is_inclusive() {
+        assert!(is_tap(TAP_MAX.as_millis() as u64, true));
+        assert!(!is_tap(TAP_MAX.as_millis() as u64 + 1, true));
+    }
 }

@@ -7,6 +7,7 @@
 
 mod asr;
 mod audio;
+mod config;
 mod hotkey;
 mod paste;
 mod store;
@@ -58,10 +59,20 @@ fn main() -> Result<()> {
     let data_root = data_root()?;
     let store = store::Store::open(&data_root)?;
     log::info!("数据目录: {}", store.root().display());
+    tray::set_data_root(data_root.clone());
+
+    let cfg = config::load(&data_root);
+    log::debug!("配置: {cfg:?}");
+
+    // 启动时清一次过期 raw。之后由工作线程每 6 小时再查一次——守护进程
+    // 一开就是几周，只在启动时清等于对常开的机器不生效。
+    if let Err(e) = store.purge_older_than(cfg.retention_days) {
+        log::error!("清理过期 raw 音频失败: {e:#}");
+    }
 
     // 权限引导：想用右 Command 就必须有辅助功能权限。
     // 用 log:: 而非 println!，因为从 Finder 启动 .app 时 stdout 无处可去。
-    if !hotkey::is_accessibility_trusted() {
+    if cfg.trigger == config::Trigger::RightCommand && !hotkey::is_accessibility_trusted() {
         log::warn!("未获得「辅助功能」权限，无法监听单独的右 Command 键");
         log::warn!("  正在弹出系统授权对话框——授权后**必须重启本程序**才生效");
         log::warn!("  路径：系统设置 → 隐私与安全性 → 辅助功能");
@@ -69,13 +80,15 @@ fn main() -> Result<()> {
         hotkey::prompt_accessibility();
     }
 
-    let mut listener = hotkey::Listener::start()?;
+    let mut listener = hotkey::Listener::start(cfg.trigger)?;
 
-    // 自动上屏。默认开，`--no-auto-paste` 或 AGENTEAR_AUTO_PASTE=0 关掉。
+    // 自动上屏。配置里的开关优先，`--no-auto-paste` / AGENTEAR_AUTO_PASTE=0
+    // 作为一次性覆盖（不写回配置，重启即恢复菜单里的设置）。
     //
     // 同样吃辅助功能权限：CGEventPost 未授权时**静默失败**——不报错、什么也
     // 不发生。所以这里主动降级，不然用户会看到「转写成功但没上屏」且日志无痕。
-    let want_paste = !args.iter().any(|a| a == "--no-auto-paste")
+    let want_paste = cfg.auto_paste
+        && !args.iter().any(|a| a == "--no-auto-paste")
         && !matches!(
             std::env::var("AGENTEAR_AUTO_PASTE").as_deref(),
             Ok("0") | Ok("false") | Ok("no")
@@ -99,7 +112,15 @@ fn main() -> Result<()> {
         }
     );
     println!("  数据：  {}", store.root().display());
-    println!("  退出：  Ctrl+C\n");
+    println!(
+        "  留档：  {}",
+        match cfg.retention_days {
+            0 => "原始音频永久保留".to_string(),
+            d => format!("原始音频保留 {d} 天，过期自动清理"),
+        }
+    );
+    println!("  设置：  菜单栏图标 → 触发键 / 输入设备 / 自动上屏 / 保留期");
+    println!("  退出：  菜单栏「退出 AgentEar」或 Ctrl+C\n");
 
     // macOS 的关键约束：Carbon 快捷键和 NSEvent 全局监听都靠 CFRunLoop 派发事件。
     // 主线程必须跑 run loop，否则事件注册成功但永远送不到——这正是最初
@@ -129,8 +150,22 @@ fn worker(
 ) -> Result<()> {
     let mut state = State::Idle;
     let mut last_heartbeat = Instant::now();
+    let mut last_purge = Instant::now();
+    /// 过期 raw 的复查间隔。守护进程一开就是几周，只在启动时清等于对
+    /// 常开的机器永远不生效。
+    const PURGE_EVERY: Duration = Duration::from_secs(6 * 3600);
 
     loop {
+        // 录音期间不做清理：删文件的 IO 会和写 WAV 抢盘,
+        // 而这条循环每 20ms 就要把采样搬进 session 一次
+        if matches!(state, State::Idle) && last_purge.elapsed() >= PURGE_EVERY {
+            last_purge = Instant::now();
+            // 每次都重读配置，菜单里改了保留期不用重启
+            if let Err(e) = store.purge_older_than(config::get().retention_days) {
+                log::error!("清理过期 raw 音频失败: {e:#}");
+            }
+        }
+
         // 录音期间持续把采样搬进 session，避免 channel 无限堆积
         if let State::Recording {
             session, recorder, ..
@@ -180,7 +215,8 @@ fn worker(
 fn begin(store: &store::Store) -> Result<State> {
     let t0 = Instant::now();
     log::debug!("打开麦克风……（首次运行时 macOS 会在此弹出权限请求）");
-    let recorder = audio::Recorder::start()?;
+    // 每次录音才读配置，所以菜单里换设备立刻生效，不用重启
+    let recorder = audio::Recorder::start(config::get().input_device.as_deref())?;
     let session = store.begin()?;
     tray::set(tray::Status::Recording);
     println!("● 开始录音…… 再按一次停止");
@@ -263,6 +299,49 @@ fn finish(state: State, asr: &asr::Asr) -> Result<State> {
 
     tray::set(tray::Status::Idle);
     Ok(State::Idle)
+}
+
+/// launchd 的 job label，`scripts/bundle.sh` 与 plist 里保持一致。
+const LAUNCHD_LABEL: &str = "ai.idoris.agentear";
+
+/// 重启自己。改触发键时用——`CGEventTap` 挂在一个跑 `CFRunLoop` 的线程上，
+/// 运行时换不掉。
+///
+/// 两条路径：**由 launchd 托管时必须走 `kickstart`**，因为自己 fork 一个新
+/// 实例再退出会绕开 launchd 的单实例保证，落得两个进程同时抢热键；
+/// 从终端裸跑时才 re-exec。
+pub fn restart_self() {
+    let target = format!("gui/{}/{}", unsafe { libc::getuid() }, LAUNCHD_LABEL);
+    let managed = std::process::Command::new("/bin/launchctl")
+        .args(["print", &target])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+
+    if managed {
+        log::info!("由 launchd 托管，用 kickstart 重启");
+        // kickstart -k 会先杀掉当前实例再拉起，所以这行之后本进程就没了
+        if let Err(e) = std::process::Command::new("/bin/launchctl")
+            .args(["kickstart", "-k", &target])
+            .spawn()
+        {
+            log::error!("launchctl kickstart 失败: {e}");
+        }
+        return;
+    }
+
+    match std::env::current_exe() {
+        Ok(exe) => {
+            log::info!("非 launchd 托管，re-exec {}", exe.display());
+            match std::process::Command::new(exe).spawn() {
+                Ok(_) => std::process::exit(0),
+                Err(e) => log::error!("re-exec 失败: {e}"),
+            }
+        }
+        Err(e) => log::error!("拿不到自身路径，无法重启: {e}。请手动重启 AgentEar"),
+    }
 }
 
 /// 环境自检。「按了没反应」时先跑这个。

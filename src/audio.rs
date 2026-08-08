@@ -16,26 +16,74 @@ pub struct Recorder {
     rx: Receiver<Vec<i16>>,
 }
 
+/// 列出可用的输入设备名，供菜单栏选择。
+///
+/// 每次调用都重新枚举，不缓存——耳机插拔后列表要立刻是对的。
+pub fn list_input_devices() -> Vec<String> {
+    let host = cpal::default_host();
+    match host.input_devices() {
+        Ok(it) => it.filter_map(|d| d.name().ok()).collect(),
+        Err(e) => {
+            log::error!("枚举输入设备失败: {e}");
+            Vec::new()
+        }
+    }
+}
+
+/// 当前系统默认输入设备名，用于在菜单里标注「系统默认（XXX）」。
+pub fn default_input_name() -> Option<String> {
+    cpal::default_host()
+        .default_input_device()
+        .and_then(|d| d.name().ok())
+}
+
 impl Recorder {
-    /// 打开默认输入设备并开始采集。返回后即有数据流入。
-    pub fn start() -> Result<Self> {
+    /// 打开输入设备并开始采集。返回后即有数据流入。
+    ///
+    /// `want` 为 `None` 时跟随系统默认。**指定的设备找不到时退回默认而不是
+    /// 报错**——设备是可拔的，为了一个拔掉的耳机让录音直接失败不划算，
+    /// 但要把降级这件事明确写进日志。
+    pub fn start(want: Option<&str>) -> Result<Self> {
         let host = cpal::default_host();
-        let device = host
-            .default_input_device()
-            .ok_or_else(|| anyhow!("找不到默认输入设备（麦克风权限被拒？）"))?;
+        let device = match want {
+            Some(name) => match host
+                .input_devices()
+                .ok()
+                .and_then(|mut it| it.find(|d| d.name().map(|n| n == name).unwrap_or(false)))
+            {
+                Some(d) => d,
+                None => {
+                    log::warn!("配置的输入设备「{name}」不在线，退回系统默认");
+                    host.default_input_device()
+                        .ok_or_else(|| anyhow!("找不到默认输入设备（麦克风权限被拒？）"))?
+                }
+            },
+            None => host
+                .default_input_device()
+                .ok_or_else(|| anyhow!("找不到默认输入设备（麦克风权限被拒？）"))?,
+        };
         let config = device
             .default_input_config()
             .context("读取输入设备默认配置失败")?;
 
         let src_rate = config.sample_rate().0;
         let channels = config.channels() as usize;
+        let name = device.name().unwrap_or_else(|_| "?".into());
         log::info!(
             "输入设备: {} | {} Hz, {} ch, {:?}",
-            device.name().unwrap_or_else(|_| "?".into()),
+            name,
             src_rate,
             channels,
             config.sample_format()
         );
+        // 蓝牙耳机当输入时走 HFP，采样率被压到 16 kHz 且带宽很窄，
+        // 明显差于内置麦克风（48 kHz）。长期使用会拉低 CER，值得提醒一次。
+        if src_rate <= 16_000 && channels == 1 {
+            log::warn!(
+                "「{name}」以 {src_rate} Hz 采集,像是蓝牙耳机的 HFP 模式,识别质量会下降。\
+                 可在菜单栏「输入设备」里改选内置麦克风"
+            );
+        }
 
         let (tx, rx) = channel::<Vec<i16>>();
         let err_fn = |e| log::error!("音频流错误: {e}");

@@ -84,6 +84,70 @@ impl Store {
     pub fn root(&self) -> &Path {
         &self.root
     }
+
+    /// 删除 `raw/audio/` 下超过 `days` 天未修改的音频，返回删除数量。
+    /// `days == 0` 表示永不清理，直接返回。
+    ///
+    /// **这是真实且不可逆的数据删除。** raw 是「丢了不可重建」的那一份
+    /// （见 CLAUDE.md 的存储语义），所以这里刻意保守：
+    ///
+    /// - 只动 `raw/audio/` 下的 `*.wav`，不递归、不碰其他扩展名、不碰目录
+    /// - `derived/transcripts/` 一律保留——它体积小，而且正是留档的价值所在，
+    ///   过期的是几十 MB 的音频，不是几 KB 的文字
+    /// - 单个文件删失败只记日志、继续处理其余的，不让一个坏文件卡住整轮清理
+    ///
+    /// 已知取舍：`raw/manifest.jsonl` 里对应的行不会被删掉，清理后清单会指向
+    /// 不存在的对象。M1 没有消费清单的代码，等 M4 换成 SQLite 时一并处理。
+    pub fn purge_older_than(&self, days: u32) -> Result<usize> {
+        if days == 0 {
+            return Ok(0);
+        }
+        let dir = self.root.join("raw/audio");
+        let cutoff = std::time::SystemTime::now()
+            .checked_sub(std::time::Duration::from_secs(days as u64 * 86_400))
+            .context("保留天数过大，时间计算溢出")?;
+
+        let mut n = 0usize;
+        let mut bytes = 0u64;
+        for entry in fs::read_dir(&dir).with_context(|| format!("读取 {} 失败", dir.display()))? {
+            let entry = entry?;
+            let path = entry.path();
+            if !path.is_file() || path.extension().and_then(|s| s.to_str()) != Some("wav") {
+                continue;
+            }
+            let meta = match entry.metadata() {
+                Ok(m) => m,
+                Err(e) => {
+                    log::error!("读取 {} 的元数据失败，跳过: {e}", path.display());
+                    continue;
+                }
+            };
+            let modified = match meta.modified() {
+                Ok(t) => t,
+                Err(e) => {
+                    log::error!("读取 {} 的修改时间失败，跳过: {e}", path.display());
+                    continue;
+                }
+            };
+            if modified >= cutoff {
+                continue;
+            }
+            match fs::remove_file(&path) {
+                Ok(()) => {
+                    n += 1;
+                    bytes += meta.len();
+                }
+                Err(e) => log::error!("删除 {} 失败: {e}", path.display()),
+            }
+        }
+        if n > 0 {
+            log::info!(
+                "已清理 {n} 个超过 {days} 天的 raw 音频，释放 {:.1} MB",
+                bytes as f64 / 1_048_576.0
+            );
+        }
+        Ok(n)
+    }
 }
 
 pub fn wav_spec() -> hound::WavSpec {
@@ -270,6 +334,68 @@ mod tests {
         let _s2 = Store::open(&root).unwrap();
         assert_eq!(fs::read_dir(root.join("raw/.tmp")).unwrap().count(), 0);
         assert_eq!(fs::read_dir(root.join("raw/audio")).unwrap().count(), 0);
+        fs::remove_dir_all(&root).ok();
+    }
+
+    /// 把文件的 mtime 改到 `days` 天前。测试保留策略用。
+    fn age_file(p: &Path, days: u64) {
+        let secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+            - days * 86_400;
+        let tv = libc::timeval {
+            tv_sec: secs as libc::time_t,
+            tv_usec: 0,
+        };
+        let times = [tv, tv];
+        let c = std::ffi::CString::new(p.to_str().unwrap()).unwrap();
+        assert_eq!(unsafe { libc::utimes(c.as_ptr(), times.as_ptr()) }, 0);
+    }
+
+    fn commit_one(s: &Store, sample: i16) -> PathBuf {
+        let mut sess = s.begin().unwrap();
+        sess.write(&vec![sample; 800]).unwrap();
+        sess.commit().unwrap().path
+    }
+
+    #[test]
+    fn purge_removes_only_expired_audio() {
+        let root = tmpdir();
+        let s = Store::open(&root).unwrap();
+        let old = commit_one(&s, 1);
+        let fresh = commit_one(&s, 2);
+        age_file(&old, 40);
+
+        assert_eq!(s.purge_older_than(30).unwrap(), 1);
+        assert!(!old.exists(), "40 天前的应被删除");
+        assert!(fresh.exists(), "新录的必须留下");
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn purge_zero_days_never_deletes() {
+        let root = tmpdir();
+        let s = Store::open(&root).unwrap();
+        let old = commit_one(&s, 3);
+        age_file(&old, 9999);
+
+        // 0 = 永不清理。这是关掉保留策略的唯一开关，必须真的什么都不做。
+        assert_eq!(s.purge_older_than(0).unwrap(), 0);
+        assert!(old.exists());
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn purge_leaves_transcripts_alone() {
+        let root = tmpdir();
+        let s = Store::open(&root).unwrap();
+        let t = root.join("derived/transcripts/old.txt");
+        fs::write(&t, "转写结果可重算,但删了也没必要").unwrap();
+        age_file(&t, 400);
+
+        s.purge_older_than(30).unwrap();
+        assert!(t.exists(), "清理只针对 raw 音频,不碰派生数据");
         fs::remove_dir_all(&root).ok();
     }
 
