@@ -12,8 +12,28 @@ use std::sync::mpsc::{channel, Receiver, Sender};
 pub const TARGET_RATE: u32 = 16_000;
 
 pub struct Recorder {
-    _stream: Stream,
+    stream: Stream,
     rx: Receiver<Vec<i16>>,
+}
+
+impl Drop for Recorder {
+    /// **释放前必须显式 stop，否则麦克风指示器不灭。**
+    ///
+    /// cpal 0.15 的 macOS 后端没有 `impl Drop for Stream`，它指望 coreaudio-rs
+    /// 的 `AudioUnit` 析构去收尾。但 `StreamInner.playing` 始终是 `true`——
+    /// AudioUnit 在「还在跑」的状态下被 dispose，macOS 会继续把麦克风算作被
+    /// 本进程占用。
+    ///
+    /// 症状很误导：程序自己认为已经空闲（菜单栏显示 🎙），日志里录音也早已
+    /// 结束，但系统菜单栏的橙色话筒常亮，点开显示占用者是 AgentEar。
+    /// 对一个隐私优先的录音工具来说，这是不能留的——用户没法相信它真的停了。
+    fn drop(&mut self) {
+        if let Err(e) = self.stream.pause() {
+            log::error!("停止音频流失败，麦克风指示器可能不熄灭: {e}");
+        } else {
+            log::debug!("音频流已停止，麦克风释放");
+        }
+    }
 }
 
 /// 列出可用的输入设备名，供菜单栏选择。
@@ -114,7 +134,7 @@ impl Recorder {
 
         stream.play().context("启动音频流失败")?;
         Ok(Self {
-            _stream: stream,
+            stream,
             rx,
         })
     }

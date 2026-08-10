@@ -32,6 +32,13 @@ else
   exit 1
 fi
 
+# 图标缺失不致命，但会在控制中心/权限列表里显示成空白方块
+if [ -f "$ROOT/assets/AgentEar.icns" ]; then
+  cp "$ROOT/assets/AgentEar.icns" "$APP/Contents/Resources/"
+else
+  echo "!! 缺少 assets/AgentEar.icns，图标会是空白方块（跑 scripts/make-icon.py 生成）" >&2
+fi
+
 cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -48,6 +55,10 @@ cat > "$APP/Contents/Info.plist" <<PLIST
     <key>CFBundleShortVersionString</key>
     <string>$VERSION</string>
     <key>CFBundleExecutable</key>
+    <string>AgentEar</string>
+    <!-- 没有图标时，控制中心的麦克风占用面板、系统设置的权限列表里都只显示
+         一个空白方块——「某个没有图标的东西在用你的麦克风」 -->
+    <key>CFBundleIconFile</key>
     <string>AgentEar</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
