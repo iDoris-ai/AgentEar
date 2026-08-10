@@ -85,6 +85,26 @@ impl Store {
         &self.root
     }
 
+    /// 把转写结果写到 `derived/transcripts/<content_hash>.txt`。
+    ///
+    /// 文件名用 raw 对象的 content hash，所以转写和它的音频天然对得上，
+    /// 不需要额外的索引。内容寻址的另一个红利：同一段音频重复转写会覆盖
+    /// 同一个文件，不会堆出一堆重复。
+    ///
+    /// **刻意不走 raw 那套提交协议**：派生数据丢了可以从 raw 重算，
+    /// 为它 fsync 是浪费。但仍然走临时文件 + rename，避免留下半截文件
+    /// 让人误以为转写内容就那么短。
+    ///
+    /// 写失败不应该影响主链路——调用方只记日志，不要往上抛。
+    pub fn write_transcript(&self, content_hash: &str, text: &str) -> Result<PathBuf> {
+        let dir = self.root.join("derived/transcripts");
+        let path = dir.join(format!("{content_hash}.txt"));
+        let tmp = dir.join(format!(".{content_hash}.tmp"));
+        fs::write(&tmp, text).with_context(|| format!("写 {} 失败", tmp.display()))?;
+        fs::rename(&tmp, &path).context("rename 转写文件失败")?;
+        Ok(path)
+    }
+
     /// 删除 `raw/audio/` 下超过 `days` 天未修改的音频，返回删除数量。
     /// `days == 0` 表示永不清理，直接返回。
     ///
@@ -357,6 +377,26 @@ mod tests {
         let mut sess = s.begin().unwrap();
         sess.write(&vec![sample; 800]).unwrap();
         sess.commit().unwrap().path
+    }
+
+    #[test]
+    fn transcript_is_named_after_its_audio() {
+        let root = tmpdir();
+        let s = Store::open(&root).unwrap();
+        let mut sess = s.begin().unwrap();
+        sess.write(&vec![5i16; 800]).unwrap();
+        let c = sess.commit().unwrap();
+
+        let p = s.write_transcript(&c.content_hash, "你好，世界。").unwrap();
+        // 文件名就是音频的 content hash，转写和音频天然对得上，不需要索引
+        assert_eq!(p.file_name().unwrap(), format!("{}.txt", c.content_hash).as_str());
+        assert_eq!(fs::read_to_string(&p).unwrap(), "你好，世界。");
+
+        // 重转写覆盖同一个文件，不堆重复
+        s.write_transcript(&c.content_hash, "改好了。").unwrap();
+        assert_eq!(fs::read_to_string(&p).unwrap(), "改好了。");
+        assert_eq!(fs::read_dir(root.join("derived/transcripts")).unwrap().count(), 1);
+        fs::remove_dir_all(&root).ok();
     }
 
     #[test]

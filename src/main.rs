@@ -186,7 +186,7 @@ fn worker(
                     "录音超过 {:.0} 秒上限，自动停止（见 ADR-0001 §5）",
                     asr::MAX_SEGMENT_SECS
                 );
-                state = finish(state, &asr)?;
+                state = finish(state, &store, &asr)?;
                 continue;
             }
         }
@@ -204,7 +204,7 @@ fn worker(
                         State::Idle
                     }
                 },
-                s @ State::Recording { .. } => finish(s, &asr)?,
+                s @ State::Recording { .. } => finish(s, &store, &asr)?,
             };
         } else {
             std::thread::sleep(Duration::from_millis(20));
@@ -228,7 +228,7 @@ fn begin(store: &store::Store) -> Result<State> {
     })
 }
 
-fn finish(state: State, asr: &asr::Asr) -> Result<State> {
+fn finish(state: State, store: &store::Store, asr: &asr::Asr) -> Result<State> {
     let State::Recording {
         mut session,
         recorder,
@@ -270,6 +270,12 @@ fn finish(state: State, asr: &asr::Asr) -> Result<State> {
             log::debug!("转写耗时 {:.2}s", t_asr.elapsed().as_secs_f32());
             let text = paste::sanitize(&text);
             println!("\n{text}\n");
+            // 派生数据落盘。失败只记日志——raw 还在，随时可以重算，
+            // 不值得为它中断上屏
+            match store.write_transcript(&committed.content_hash, &text) {
+                Ok(p) => log::debug!("转写已存 {}", p.display()),
+                Err(e) => log::error!("写转写文件失败（不影响剪贴板与上屏）: {e:#}"),
+            }
             // 先进剪贴板再谈上屏。上屏失败还能手动 ⌘V，顺序反过来就没有退路了。
             match copy_to_clipboard(&text) {
                 Ok(()) => {

@@ -51,6 +51,9 @@ static DATA_ROOT: OnceLock<PathBuf> = OnceLock::new();
 static DEVICE_SNAPSHOT: Mutex<Vec<String>> = Mutex::new(Vec::new());
 
 // 菜单项的 tag。用一个 action 加 tag 分发，省掉十几个 ObjC 方法。
+/// 开始 / 停止录音。放在菜单第一项——**这是触发键失灵时唯一的出路**，
+/// v0.2.0 漏了它，结果录音开起来就只能靠快捷键停，或者干脆退出程序。
+const TAG_TOGGLE: isize = 0;
 const TAG_AUTO_PASTE: isize = 1;
 const TAG_OPEN_DATA: isize = 2;
 const TAG_OPEN_LOG: isize = 3;
@@ -166,6 +169,22 @@ fn populate(menu: &NSMenu, mtm: MainThreadMarker, target: &MenuTarget) {
     // 有 target 的项也判成不可用
     menu.setAutoenablesItems(false);
 
+    // —— 录音开关。第一项，因为它是唯一「正在发生的事」——
+    // 设置项什么时候点都行，录音停不下来是急事。
+    match STATUS.load(Ordering::Relaxed) {
+        1 => menu.addItem(&item(
+            mtm,
+            target,
+            &format!("■ 停止录音（已录 {}s）", SECS.load(Ordering::Relaxed)),
+            TAG_TOGGLE,
+            false,
+        )),
+        // 转写中不能打断：raw 已提交，此刻再发触发事件只会开一段新录音
+        2 => menu.addItem(&item(mtm, target, "◌ 转写中……", -1, false)),
+        _ => menu.addItem(&item(mtm, target, "● 开始录音", TAG_TOGGLE, false)),
+    }
+    menu.addItem(&NSMenuItem::separatorItem(mtm));
+
     menu.addItem(&item(
         mtm,
         target,
@@ -271,6 +290,7 @@ fn populate(menu: &NSMenu, mtm: MainThreadMarker, target: &MenuTarget) {
 
 fn handle(tag: isize, mtm: MainThreadMarker) {
     match tag {
+        TAG_TOGGLE => crate::hotkey::trigger_now(),
         TAG_AUTO_PASTE => {
             let on = !config::get().auto_paste;
             config::update(|c| c.auto_paste = on);

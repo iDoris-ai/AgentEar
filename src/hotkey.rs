@@ -110,6 +110,15 @@ fn fire() {
     }
 }
 
+/// 从菜单栏手动触发一次「开始/停止」，等价于按了一下触发键。
+///
+/// 走的是**同一条 channel**，所以状态机只有一个入口——菜单和快捷键不会
+/// 各自维护一份状态而对不上。触发键失灵时这也是唯一能停下录音的出路。
+pub fn trigger_now() {
+    log::debug!("菜单手动触发");
+    fire();
+}
+
 impl Listener {
     /// 按配置选触发方式。要用右 Command 但没有辅助功能权限时降级到组合键。
     pub fn start(want: Trigger) -> Result<Self> {

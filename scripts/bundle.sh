@@ -65,10 +65,32 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 PLIST
 echo '</plist>' >> "$APP/Contents/Info.plist"
 
-# 未签名的 app 在部分 macOS 版本上启动会被拦。做一次 ad-hoc 签名，
-# 让它至少能在本机正常运行。正式分发需要开发者证书 + 公证。
-echo "==> ad-hoc 签名"
-codesign --force --deep --sign - "$APP" 2>&1 | sed 's/^/    /'
+# 签名。**必须用固定身份，不要用 ad-hoc（`-`）**。
+#
+# ad-hoc 签名没有稳定的代码标识：每次 codesign 都产生新的 cdhash，而 TCC 把
+# 「辅助功能」授权钉死在 cdhash 上。后果是每次重新打包，授权都会静默失效——
+# 系统设置里开关看着是开的、TCC 库里 auth_value=2，程序却报未授予。
+# 详见 docs/m1-status.md 的「每次重新打包，辅助功能授权都会失效」。
+#
+# 用固定证书后，designated requirement 变成「identifier + 证书哈希」，
+# 跨重建稳定，授权一次就一直有效。
+# 证书用 scripts/make-signing-cert.sh 创建。
+SIGN_ID="${AGENTEAR_SIGN_ID:-AgentEar Local Signing}"
+if security find-identity -v -p codesigning 2>/dev/null | grep -qF "$SIGN_ID"; then
+  # 必须写成 ${SIGN_ID}：macOS 自带 bash 3.2 会把紧跟其后的全角括号的
+  # 首字节当成变量名的一部分，裸写 $SIGN_ID 会报 unbound variable
+  echo "==> 签名（${SIGN_ID}）"
+else
+  echo "!! 找不到签名身份 \"$SIGN_ID\"，退回 ad-hoc" >&2
+  echo "!! 后果：每次重新打包都要手动重新授权辅助功能" >&2
+  echo "!! 修复：scripts/make-signing-cert.sh" >&2
+  SIGN_ID="-"
+fi
+codesign --force --deep --sign "$SIGN_ID" "$APP" 2>&1 | sed 's/^/    /'
+
+# 打印 designated requirement。它跨重建是否稳定，决定了要不要重新授权。
+echo "    designated requirement:"
+codesign -d -r- "$APP" 2>&1 | grep '^designated' | sed 's/^/      /'
 
 # 架构一致性校验。ASR 运行时（FunASR 官方 macOS 版）只有 arm64，
 # 所以整个 app 是 Apple Silicon only——做通用二进制没有意义，
