@@ -69,12 +69,47 @@ cat > "$APP/Contents/Info.plist" <<PLIST
     <key>LSUIElement</key>
     <true/>
 
-    <!-- 麦克风用途说明。没有这一条，系统会直接拒绝而不是弹窗询问 -->
+    <!-- 麦克风用途说明。没有这一条，系统会直接拒绝而不是弹窗询问。
+         这里是**英文兜底**，实际显示的文案由 Resources/*.lproj/InfoPlist.strings
+         按系统语言挑（不是按 app 里的界面语言设置——这是系统弹窗）。 -->
     <key>NSMicrophoneUsageDescription</key>
-    <string>AgentEar 需要访问麦克风来录制你的语音并在本地转写成文字。录音和转写全部在本机完成，不会上传到任何服务器。</string>
+    <string>AgentEar needs microphone access to record your voice and transcribe it locally. Recording and transcription happen entirely on this Mac; nothing is uploaded to any server.</string>
+
+    <!-- 声明支持的本地化，否则系统只认 development region 那一种 -->
+    <key>CFBundleDevelopmentRegion</key>
+    <string>en</string>
+    <key>CFBundleLocalizations</key>
+    <array>
+        <string>en</string>
+        <string>zh-Hans</string>
+        <string>th</string>
+    </array>
 </dict>
 PLIST
 echo '</plist>' >> "$APP/Contents/Info.plist"
+
+# 权限弹窗的本地化文案。
+#
+# 注意这**不跟随 app 里的「界面语言」设置**：TCC 弹窗是系统画的，
+# 系统按用户的 macOS 语言挑 .lproj，我们无从干预，也不该干预——
+# 用户的系统是什么语言，系统弹窗就该是什么语言。
+echo "==> 写入权限文案本地化"
+write_infoplist_strings() {
+  local lproj="$APP/Contents/Resources/$1.lproj"
+  mkdir -p "$lproj"
+  # 无 BOM 的 UTF-8 就够（plutil -lint 会在下面把关）。
+  # 文案里不能出现未转义的双引号，.strings 的语法会被打断。
+  printf '%s\n' "\"NSMicrophoneUsageDescription\" = \"$2\";" > "$lproj/InfoPlist.strings"
+  # 格式错了不会报错，只会静默退回 Info.plist 里的英文兜底——
+  # 那种失败没人会发现，所以在这里挡住
+  plutil -lint "$lproj/InfoPlist.strings" > /dev/null
+}
+write_infoplist_strings en \
+  "AgentEar needs microphone access to record your voice and transcribe it locally. Recording and transcription happen entirely on this Mac; nothing is uploaded to any server."
+write_infoplist_strings zh-Hans \
+  "AgentEar 需要访问麦克风来录制你的语音并在本地转写成文字。录音和转写全部在本机完成，不会上传到任何服务器。"
+write_infoplist_strings th \
+  "AgentEar ต้องการเข้าถึงไมโครโฟนเพื่อบันทึกเสียงของคุณและถอดความในเครื่อง การบันทึกและถอดความทั้งหมดทำงานบน Mac เครื่องนี้ ไม่มีการอัปโหลดไปยังเซิร์ฟเวอร์ใด ๆ"
 
 # 签名。**必须用固定身份，不要用 ad-hoc（`-`）**。
 #

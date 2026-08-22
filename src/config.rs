@@ -5,13 +5,34 @@
 //! 输入设备和自动上屏都是下一次录音/下一次上屏时读取，无需重启。
 
 use anyhow::{Context, Result};
-use serde::{Deserialize, Serialize};
+use serde::de::DeserializeOwned;
+use serde::{Deserialize, Deserializer, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::{OnceLock, RwLock};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+use crate::i18n::Lang;
+
+/// 单个字段解析失败时退回默认值，**而不是让整份配置解析失败**。
+///
+/// `#[serde(default)]` 只挡字段缺失，挡不住取值非法：配置里出现
+/// `"ui_lang": "fr"` 或 `"retention_days": "三十"`，整个 `Config` 就
+/// 反序列化失败，而 `load()` 的兜底是「退回默认配置」——用户丢掉的是
+/// **输入设备、触发键、保留期全部**，只因为一个字段坏了。
+///
+/// 先解析成 `Value` 再逐字段尝试，把损坏隔离在字段这一层。
+fn lenient<'de, D, T>(d: D) -> Result<T, D::Error>
+where
+    D: Deserializer<'de>,
+    T: DeserializeOwned + Default,
+{
+    let v = serde_json::Value::deserialize(d)?;
+    Ok(serde_json::from_value(v).unwrap_or_default())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum Trigger {
+    #[default]
     /// 轻点一下右 Command。需要辅助功能权限。
     RightCommand,
     /// Carbon 组合键，不需要辅助功能权限，是无权限时的降级目标。
@@ -27,27 +48,58 @@ impl Trigger {
     }
 }
 
+/// 保留天数的默认值。`Default::default()` 给 0（= 永不清理），
+/// 不是我们要的，所以单列一个。
+fn default_retention_days() -> u32 {
+    30
+}
+
+fn default_auto_paste() -> bool {
+    true
+}
+
+/// 每个字段都走 `lenient`：一个字段坏掉不该连累其他设置。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
     /// 转写完是否自动粘贴到光标处。
+    #[serde(deserialize_with = "lenient_auto_paste")]
     pub auto_paste: bool,
     /// 输入设备名。`None` = 跟随系统默认。
     ///
     /// 存名字而不是索引：设备顺序会随插拔变化，索引存下来就指错了。
+    #[serde(deserialize_with = "lenient")]
     pub input_device: Option<String>,
+    #[serde(deserialize_with = "lenient")]
     pub trigger: Trigger,
     /// `raw/audio/` 的保留天数。**0 = 永不清理。**
+    #[serde(deserialize_with = "lenient_retention")]
     pub retention_days: u32,
+    /// **界面**语言（菜单文案），不影响识别。默认英文。
+    #[serde(deserialize_with = "lenient")]
+    pub ui_lang: Lang,
+}
+
+// 这两个字段的「默认」不是 `Default::default()`，坏值要退回文档里写的默认，
+// 不能退回 0 / false。
+fn lenient_retention<'de, D: Deserializer<'de>>(d: D) -> Result<u32, D::Error> {
+    let v = serde_json::Value::deserialize(d)?;
+    Ok(serde_json::from_value(v).unwrap_or_else(|_| default_retention_days()))
+}
+
+fn lenient_auto_paste<'de, D: Deserializer<'de>>(d: D) -> Result<bool, D::Error> {
+    let v = serde_json::Value::deserialize(d)?;
+    Ok(serde_json::from_value(v).unwrap_or_else(|_| default_auto_paste()))
 }
 
 impl Default for Config {
     fn default() -> Self {
         Self {
-            auto_paste: true,
+            auto_paste: default_auto_paste(),
             input_device: None,
             trigger: Trigger::RightCommand,
-            retention_days: 30,
+            retention_days: default_retention_days(),
+            ui_lang: Lang::default(),
         }
     }
 }
@@ -121,6 +173,72 @@ mod tests {
         assert_eq!(c.input_device, None);
         assert_eq!(c.trigger, Trigger::RightCommand);
         assert_eq!(c.retention_days, 30, "raw 音频默认保留 30 天");
+    }
+
+    /// jason 机器上 v0.2.2 时期真实存在的配置文件，一字不改。
+    /// 升级到带 `ui_lang` 的版本后，原有设置必须一项不丢。
+    #[test]
+    fn real_pre_i18n_config_upgrades_cleanly() {
+        let legacy = r#"{
+  "auto_paste": true,
+  "input_device": "MacBook Pro Microphone",
+  "trigger": "right_command",
+  "retention_days": 30
+}"#;
+        let c: Config = serde_json::from_str(legacy).expect("老配置必须能读");
+        assert!(c.auto_paste);
+        assert_eq!(c.input_device.as_deref(), Some("MacBook Pro Microphone"));
+        assert_eq!(c.trigger, Trigger::RightCommand);
+        assert_eq!(c.retention_days, 30);
+        assert_eq!(c.ui_lang, Lang::En, "没有 ui_lang 字段时应取默认英文");
+    }
+
+    #[test]
+    fn ui_lang_defaults_to_english() {
+        assert_eq!(Config::default().ui_lang, Lang::En);
+        assert_eq!(serde_json::from_str::<Config>("{}").unwrap().ui_lang, Lang::En);
+    }
+
+    #[test]
+    fn ui_lang_roundtrips_all_three() {
+        for want in Lang::ALL {
+            let mut c = Config::default();
+            c.ui_lang = want;
+            let back: Config = serde_json::from_str(&serde_json::to_string(&c).unwrap()).unwrap();
+            assert_eq!(back.ui_lang, want);
+        }
+    }
+
+    /// 一个字段是未知取值，**不能连累其他设置**。
+    ///
+    /// `#[serde(default)]` 只挡字段缺失。没有 `lenient` 的话，
+    /// `"ui_lang": "fr"` 会让整份配置解析失败，load() 退回全默认——
+    /// 用户丢的是输入设备、触发键、保留期，只因为语言写错了。
+    #[test]
+    fn unknown_enum_value_does_not_reset_everything() {
+        let json = r#"{
+            "ui_lang": "fr",
+            "input_device": "MacBook Pro麦克风",
+            "trigger": "ctrl_shift_r",
+            "retention_days": 90,
+            "auto_paste": false
+        }"#;
+        let c: Config = serde_json::from_str(json).expect("坏字段不该让整份配置解析失败");
+        assert_eq!(c.ui_lang, Lang::En, "未知语言退回默认");
+        assert_eq!(c.input_device.as_deref(), Some("MacBook Pro麦克风"), "设备被连累了");
+        assert_eq!(c.trigger, Trigger::CtrlShiftR, "触发键被连累了");
+        assert_eq!(c.retention_days, 90, "保留期被连累了");
+        assert!(!c.auto_paste, "自动上屏被连累了");
+    }
+
+    /// 类型写错也一样，只坏那一个字段，且退回**文档写的默认值**
+    /// （保留期是 30 天，不是 `u32::default()` 的 0——0 是「永不清理」）。
+    #[test]
+    fn wrong_type_falls_back_to_documented_default() {
+        let c: Config = serde_json::from_str(r#"{"retention_days": "三十", "trigger": 42}"#)
+            .expect("类型错误不该让整份配置解析失败");
+        assert_eq!(c.retention_days, 30, "坏值必须退回 30，不能退回 0（=永不清理）");
+        assert_eq!(c.trigger, Trigger::RightCommand);
     }
 
     #[test]

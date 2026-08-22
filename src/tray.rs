@@ -31,6 +31,7 @@ use objc2_app_kit::{
 use objc2_foundation::{NSObjectProtocol, NSString, NSTimer};
 
 use crate::config::{self, Trigger};
+use crate::i18n::{self, Key, Lang};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
@@ -60,14 +61,15 @@ const TAG_OPEN_LOG: isize = 3;
 const TAG_QUIT: isize = 4;
 const TAG_TRIGGER_BASE: isize = 100;
 const TAG_RETENTION_BASE: isize = 200;
+const TAG_UI_LANG_BASE: isize = 300;
 /// `+0` 是「系统默认」，`+1..` 对应 `DEVICE_SNAPSHOT` 的下标。
 const TAG_DEVICE_BASE: isize = 1000;
 
-const RETENTION_CHOICES: [(u32, &str); 4] = [
-    (7, "7 天"),
-    (30, "30 天"),
-    (90, "90 天"),
-    (0, "永不清理"),
+const RETENTION_CHOICES: [(u32, Key); 4] = [
+    (7, Key::Retention7),
+    (30, Key::Retention30),
+    (90, Key::Retention90),
+    (0, Key::RetentionNever),
 ];
 
 pub fn set(s: Status) {
@@ -82,10 +84,12 @@ pub fn set_data_root(p: PathBuf) {
     DATA_ROOT.set(p).ok();
 }
 
-fn title() -> String {
+/// 菜单栏标题。语言显式传入——只有主线程调用它（0.5s 定时器），
+/// 工作线程只更新上面那两个原子量，不碰文案。
+fn title(lang: Lang) -> String {
     match STATUS.load(Ordering::Relaxed) {
         1 => format!("● {}s", SECS.load(Ordering::Relaxed)),
-        2 => "◌ 转写中".to_string(),
+        2 => i18n::t(lang, Key::TitleTranscribing).to_string(),
         _ => "🎙".to_string(),
     }
 }
@@ -164,6 +168,7 @@ fn submenu(mtm: MainThreadMarker, parent: &NSMenuItem, items: Vec<Retained<NSMen
 /// 清空并重新填充菜单。每次展开前调用。
 fn populate(menu: &NSMenu, mtm: MainThreadMarker, target: &MenuTarget) {
     let cfg = config::get();
+    let lang = cfg.ui_lang;
     menu.removeAllItems();
     // 关掉自动启用：我们自己用 setEnabled 控制,免得 AppKit 按响应链把
     // 有 target 的项也判成不可用
@@ -175,13 +180,19 @@ fn populate(menu: &NSMenu, mtm: MainThreadMarker, target: &MenuTarget) {
         1 => menu.addItem(&item(
             mtm,
             target,
-            &format!("■ 停止录音（已录 {}s）", SECS.load(Ordering::Relaxed)),
+            &i18n::stop_recording(lang, SECS.load(Ordering::Relaxed) as u32),
             TAG_TOGGLE,
             false,
         )),
         // 转写中不能打断：raw 已提交，此刻再发触发事件只会开一段新录音
-        2 => menu.addItem(&item(mtm, target, "◌ 转写中……", -1, false)),
-        _ => menu.addItem(&item(mtm, target, "● 开始录音", TAG_TOGGLE, false)),
+        2 => menu.addItem(&item(mtm, target, i18n::t(lang, Key::Transcribing), -1, false)),
+        _ => menu.addItem(&item(
+            mtm,
+            target,
+            i18n::t(lang, Key::StartRecording),
+            TAG_TOGGLE,
+            false,
+        )),
     }
     menu.addItem(&NSMenuItem::separatorItem(mtm));
 
@@ -195,7 +206,7 @@ fn populate(menu: &NSMenu, mtm: MainThreadMarker, target: &MenuTarget) {
     menu.addItem(&NSMenuItem::separatorItem(mtm));
 
     // —— 触发键 ——
-    let trigger_item = item(mtm, target, "触发键", -1, false);
+    let trigger_item = item(mtm, target, i18n::t(lang, Key::TriggerSection), -1, false);
     trigger_item.setEnabled(true);
     let trusted = crate::hotkey::is_accessibility_trusted();
     submenu(
@@ -205,18 +216,21 @@ fn populate(menu: &NSMenu, mtm: MainThreadMarker, target: &MenuTarget) {
             item(
                 mtm,
                 target,
-                if trusted {
-                    "轻点右 Command"
-                } else {
-                    "轻点右 Command（需辅助功能权限）"
-                },
+                i18n::t(
+                    lang,
+                    if trusted {
+                        Key::TriggerRightCommand
+                    } else {
+                        Key::TriggerRightCommandNoPerm
+                    },
+                ),
                 TAG_TRIGGER_BASE,
                 cfg.trigger == Trigger::RightCommand,
             ),
             item(
                 mtm,
                 target,
-                "Ctrl+Shift+R",
+                i18n::t(lang, Key::TriggerCtrlShiftR),
                 TAG_TRIGGER_BASE + 1,
                 cfg.trigger == Trigger::CtrlShiftR,
             ),
@@ -224,13 +238,37 @@ fn populate(menu: &NSMenu, mtm: MainThreadMarker, target: &MenuTarget) {
     );
     menu.addItem(&trigger_item);
 
+    // —— 界面语言 ——
+    // 每个选项都用它自己的语言书写（English / 中文 / ไทย）：在看不懂的
+    // 界面里，用户要靠认出自己的语言名找回来。
+    let lang_item = item(mtm, target, i18n::t(lang, Key::LanguageSection), -1, false);
+    lang_item.setEnabled(true);
+    submenu(
+        mtm,
+        &lang_item,
+        Lang::ALL
+            .iter()
+            .enumerate()
+            .map(|(i, l)| {
+                item(
+                    mtm,
+                    target,
+                    l.endonym(),
+                    TAG_UI_LANG_BASE + i as isize,
+                    *l == lang,
+                )
+            })
+            .collect(),
+    );
+    menu.addItem(&lang_item);
+
     // —— 输入设备 ——
     let devices = crate::audio::list_input_devices();
     let default_name = crate::audio::default_input_name().unwrap_or_else(|| "?".into());
     let mut dev_items = vec![item(
         mtm,
         target,
-        &format!("系统默认（{default_name}）"),
+        &i18n::system_default_device(lang, &default_name),
         TAG_DEVICE_BASE,
         cfg.input_device.is_none(),
     )];
@@ -245,7 +283,7 @@ fn populate(menu: &NSMenu, mtm: MainThreadMarker, target: &MenuTarget) {
     }
     *DEVICE_SNAPSHOT.lock().unwrap() = devices;
 
-    let dev_item = item(mtm, target, "输入设备", -1, false);
+    let dev_item = item(mtm, target, i18n::t(lang, Key::InputDeviceSection), -1, false);
     dev_item.setEnabled(true);
     submenu(mtm, &dev_item, dev_items);
     menu.addItem(&dev_item);
@@ -254,13 +292,13 @@ fn populate(menu: &NSMenu, mtm: MainThreadMarker, target: &MenuTarget) {
     menu.addItem(&item(
         mtm,
         target,
-        "自动上屏（粘到光标处）",
+        i18n::t(lang, Key::AutoPaste),
         TAG_AUTO_PASTE,
         cfg.auto_paste,
     ));
 
     // —— 保留期 ——
-    let ret_item = item(mtm, target, "原始音频保留", -1, false);
+    let ret_item = item(mtm, target, i18n::t(lang, Key::RetentionSection), -1, false);
     ret_item.setEnabled(true);
     submenu(
         mtm,
@@ -268,11 +306,11 @@ fn populate(menu: &NSMenu, mtm: MainThreadMarker, target: &MenuTarget) {
         RETENTION_CHOICES
             .iter()
             .enumerate()
-            .map(|(i, (days, label))| {
+            .map(|(i, (days, key))| {
                 item(
                     mtm,
                     target,
-                    label,
+                    i18n::t(lang, *key),
                     TAG_RETENTION_BASE + i as isize,
                     cfg.retention_days == *days,
                 )
@@ -282,10 +320,22 @@ fn populate(menu: &NSMenu, mtm: MainThreadMarker, target: &MenuTarget) {
     menu.addItem(&ret_item);
 
     menu.addItem(&NSMenuItem::separatorItem(mtm));
-    menu.addItem(&item(mtm, target, "打开数据目录", TAG_OPEN_DATA, false));
-    menu.addItem(&item(mtm, target, "查看日志", TAG_OPEN_LOG, false));
+    menu.addItem(&item(
+        mtm,
+        target,
+        i18n::t(lang, Key::OpenDataDir),
+        TAG_OPEN_DATA,
+        false,
+    ));
+    menu.addItem(&item(
+        mtm,
+        target,
+        i18n::t(lang, Key::ViewLog),
+        TAG_OPEN_LOG,
+        false,
+    ));
     menu.addItem(&NSMenuItem::separatorItem(mtm));
-    menu.addItem(&item(mtm, target, "退出 AgentEar", TAG_QUIT, false));
+    menu.addItem(&item(mtm, target, i18n::t(lang, Key::Quit), TAG_QUIT, false));
 }
 
 fn handle(tag: isize, mtm: MainThreadMarker) {
@@ -321,9 +371,17 @@ fn handle(tag: isize, mtm: MainThreadMarker) {
         t if (TAG_RETENTION_BASE..TAG_RETENTION_BASE + RETENTION_CHOICES.len() as isize)
             .contains(&t) =>
         {
-            let (days, label) = RETENTION_CHOICES[(t - TAG_RETENTION_BASE) as usize];
+            let (days, _) = RETENTION_CHOICES[(t - TAG_RETENTION_BASE) as usize];
             config::update(|c| c.retention_days = days);
-            log::info!("原始音频保留期改为 {label}");
+            log::info!("原始音频保留期改为 {days} 天（0 = 永不清理）");
+        }
+        t if (TAG_UI_LANG_BASE..TAG_UI_LANG_BASE + Lang::ALL.len() as isize).contains(&t) => {
+            let want = Lang::ALL[(t - TAG_UI_LANG_BASE) as usize];
+            config::update(|c| c.ui_lang = want);
+            // 不需要重启：菜单每次展开都走 menuNeedsUpdate: 重建，
+            // 菜单栏标题由 0.5s 定时器刷新。但**当前这个已经打开的菜单
+            // 不会原地重绘**——点完它就关了，下次展开才是新语言。
+            log::info!("界面语言改为 {}（下次展开菜单生效）", want.endonym());
         }
         t if t >= TAG_DEVICE_BASE => {
             let idx = (t - TAG_DEVICE_BASE) as usize;
@@ -369,7 +427,7 @@ pub fn install(mtm: MainThreadMarker) -> Option<Tray> {
     let item = bar.statusItemWithLength(NSVariableStatusItemLength);
 
     if let Some(button) = item.button(mtm) {
-        button.setTitle(&NSString::from_str(&title()));
+        button.setTitle(&NSString::from_str(&title(config::get().ui_lang)));
     }
 
     let target = MenuTarget::new(mtm);
@@ -390,7 +448,8 @@ pub fn install(mtm: MainThreadMarker) -> Option<Tray> {
             &block2::RcBlock::new(move |_t: core::ptr::NonNull<NSTimer>| {
                 let mtm = MainThreadMarker::new_unchecked();
                 if let Some(button) = item_for_timer.button(mtm) {
-                    button.setTitle(&NSString::from_str(&title()));
+                    // 每次都重读语言，这样切换后标题最多 0.5s 就跟上
+                    button.setTitle(&NSString::from_str(&title(config::get().ui_lang)));
                 }
             }),
         )

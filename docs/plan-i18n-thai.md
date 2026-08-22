@@ -173,20 +173,53 @@ jason 提的方向对：**泰语专用模型比通用 whisper 更小更准**。�
 候选集变了——关键在于**这些泰语模型多数就是 Whisper 架构的微调版，
 可以转成 GGML 用同一个 whisper.cpp 二进制跑，不引入任何新运行时**。
 
-| 候选 | 架构 | 规模 | 许可 | 英语 | 备注 |
+#### 判据一：decoder 层数预测「还认不认得英语」
+
+这是选型的核心，先说清楚，否则会照着体积表选错。
+
+Whisper 的 encoder 做声学建模（语言无关），**decoder 做语言建模**。
+泰语微调把 decoder 往泰语上拽；decoder 层数越少，容量越小，
+**留给其他语言的余地就越少**。所以：
+
+| 架构 | decoder 层数 | 泰语速度 | 英语/code-switch 保留 |
+|---|---|---|---|
+| Whisper medium | 24 | 慢 | **最好** |
+| large-v3-turbo | 4 | 快 | 差 |
+| distil-large-v3 | ~2 | 最快 | 最差 |
+
+`typhoon-whisper-turbo` 被官方标成「泰语专用、不为英语设计」，
+**根因就是 4 层 decoder**，不是训练数据的选择。
+
+jason 的实际场景是**泰国同学说泰语时夹英文技术词**，
+所以「英语保留」不是可选项，是需求。
+
+#### 候选表
+
+| 候选 | 架构 | 参数 | 许可 | 泰语指标 | decoder |
 |---|---|---|---|---|---|
-| **typhoon-whisper-turbo** | Whisper large-v3-turbo（解码器仅 4 层，标准版 32 层） | 0.8B | MIT | **不支持，泰语专用** | 11000 小时泰语训练；turbo 架构 whisper.cpp 官方已支持 |
-| typhoon-whisper-large-v3 | Whisper large-v3 | 1.55B | MIT | 弱 | 精度更高但体积翻倍 |
-| Thonburian（biodatlab/whisper-th-medium-combined） | Whisper medium | 0.8B | Apache-2.0 | 弱 | CV13 WER 7.42（Deepcut 分词） |
-| typhoon-asr-realtime | NeMo FastConformer | — | — | 否 | CER 0.0984、CPU 上 4097x 实时，**但要 Python/NeMo 运行时，不符合约束** |
-| 原版 whisper large-v3 | Whisper | 1.55B | MIT | 是 | 泰语最差、体积最大，**只作对照基线** |
+| **Thonburian medium** | Whisper medium | 764M | Apache-2.0 | WER 7.42 | **24 层** |
+| **Thonburian distil-large-v3** | 蒸馏 large-v3 | 809M | Apache-2.0 | **WER 6.82** | ~2 层 |
+| **typhoon-whisper-turbo** | large-v3-turbo | 809M | MIT | 未公布可比数字 | 4 层 |
+| Thonburian large-v3 | Whisper large-v3 | 1540M | Apache-2.0 | WER 6.59 | 32 层 |
+| typhoon-whisper-large-v3 | Whisper large-v3 | 1550M | MIT | 未公布可比数字 | 32 层 |
+| typhoon-asr-realtime | NeMo FastConformer | — | — | CER 0.0984 | **要 Python/NeMo，出局** |
+| 原版 whisper large-v3 | Whisper | 1540M | MIT | 最差 | 32 层 | 
 
-**`typhoon-whisper-turbo` 是当前首选**：泰语专用、MIT、0.8B（GGML q5 量化后
-预计 500–600 MB，远小于原计划设想的 1.5–3 GB）、turbo 架构解码器只有 4 层
-所以快。
+⚠️ **两家的数字不可直接横比**：Thonburian 报的是 Common Voice 13 + Deepcut
+分词的 WER，typhoon 报的是 Gigaspeech2 / TVSpeech / Fleurs 的 CER。
+口径不同，**必须在自己的语料上重测才能横比**——这正是 M0 的教训。
 
-**但它明确是泰语专用、不为英语设计** —— 这一点与「泰语模型可能顺带认点英语」
-的期待相反，**需要 jason 拍板**（见 §6）。
+**两家都没有公布 code-switch 表现**，所以「夹英文时谁更好」是纯经验问题，
+只能测。
+
+#### C1 要测的三个（都是 ~0.8B，同一条转换流水线，边际成本很低）
+
+1. **Thonburian medium** —— 24 层 decoder，英语保留的最优候选
+2. **Thonburian distil-large-v3** —— 同尺寸下泰语 WER 最好（6.82）
+3. **typhoon-whisper-turbo** —— 泰语训练数据最多（11000 小时）
+
+三个都量化到 q5/q8，测泰语纯句 + **泰英夹杂句**两组。
+如果 medium 的英语保留明显更好而泰语差距不大，它就是答案。
 
 转换路径：`whisper.cpp/models/convert-h5-to-ggml.py` 把 HF 格式转 GGML，
 再用 `build/bin/quantize` 量化。whisper.cpp 已构建（HEAD `7de8dd78`，

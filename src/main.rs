@@ -9,6 +9,7 @@ mod asr;
 mod audio;
 mod config;
 mod hotkey;
+mod i18n;
 mod paste;
 mod store;
 mod tray;
