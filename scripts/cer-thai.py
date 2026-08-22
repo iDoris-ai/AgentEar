@@ -124,6 +124,11 @@ def main() -> int:
     first = sorted(refs)[0]
     transcribe(cli, model, f"{data}/wav/{first}.wav")
 
+    # 归一化后参考文本的指纹。cer-stats.py 拿它判断两份结果能不能配对——
+    # **只比长度不够**：两段不同的文本完全可能等长，那样就会拿不同参考的
+    # 结果做「配对」而检查不出来。
+    ref_fp = _refs_fingerprint(refs)
+
     per, empty, t0 = {}, 0, time.time()
     for name in sorted(refs):
         hyp = transcribe(cli, model, f"{data}/wav/{name}.wav")
@@ -142,6 +147,7 @@ def main() -> int:
         "model_sha256_12": _sha12(model),
         "cli_sha256_12": _sha12(cli),
         "norm": "NFC|lower|strip-space|strip-unicode-P|keep-ฯ",
+        "refs_norm_sha256_16": ref_fp,
         "n": len(per),
         "empty_output": empty,
         "elapsed_s": round(time.time() - t0, 1),
@@ -155,6 +161,14 @@ def main() -> int:
     print(f"{tag:24s} CER_cp={cp:.4f}  CER_bcm={bcm:.4f}  "
           f"空输出={empty}/{len(per)}  耗时={res['elapsed_s']:.0f}s  → {path}")
     return 0
+
+
+def _refs_fingerprint(refs: dict) -> str:
+    """归一化后参考序列的指纹（含样本名，所以顺序也在内）。"""
+    import hashlib
+    blob = json.dumps([[k, norm(refs[k]["transcription"])] for k in sorted(refs)],
+                      ensure_ascii=False).encode()
+    return hashlib.sha256(blob).hexdigest()[:16]
 
 
 def _sha12(p: str) -> str:

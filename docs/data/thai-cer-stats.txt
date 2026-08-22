@@ -1,7 +1,7 @@
 # scripts/cer-stats.py 的输出（ADR-0004 §4 的 CI 与配对比较由此而来）
 # 重算：python3 scripts/cer-stats.py docs/data/thai-cer-per-sample 4000
 
-n=80 句，自助法 4000 次，粒度 cp，种子 CI=20260822/配对=20260823
+n=80 条录音，自助法 4000 次，粒度 cp，种子 CI=20260822/配对=20260823
 
 模型                            CER                95% CI     空输出        sha256
 ggml-medium-q8_0           0.0608  [0.0441, 0.0789]     0/80  a2e7ef6b1eee

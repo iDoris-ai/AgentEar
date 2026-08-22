@@ -11,12 +11,14 @@ ADR-0004 §4 的 CI 和「显著/不显著」由本脚本产出。**种子固定
 
 CER 是语料级 micro average：`sum(edits) / sum(reference_len)`。
 
-**按句自助法（cluster bootstrap）**：以句子为单位有放回重采样，
+**按录音自助法（cluster bootstrap）**：以录音为单位有放回重采样，
 每次在样本内重算这个比值。这保留了句内字符错误的相关性，
 比把每个字符当独立观测更合适。
 
-**推断单位是句子**，不是说话人。若要推广到「新说话人」，
-应按说话人重采样——当前 FLEURS 子集没有说话人标注，做不到。
+**推断单位是录音（utterance）**，不是说话人、也不是「独立句子」——
+评测集里有 4 条与其他条目共用 prompt。若要推广到「新说话人」应按说话人
+重采样（FLEURS 子集没有说话人标注，做不到）；若要推广到「新文本内容」，
+应按 `fleurs_id` 聚类重采样。
 
 **配对比较**用同一组重采样索引同时算两个模型，这样抵掉了句子难度带来的
 共同波动。
@@ -108,14 +110,30 @@ def main() -> int:
         if sorted(r["per_sample"]) != names:
             print(f"!! {tag} 的样本集与其他不一致，配对比较无效", file=sys.stderr)
             return 1
-        # 参考长度必须一致，否则是拿不同 normalization/reference 的结果在「配对」
-        for k in names:
-            if r["per_sample"][k]["cp_len"] != baseline["per_sample"][k]["cp_len"]:
-                print(f"!! {tag} 的参考长度与 {baseline_tag} 不一致（{k}），"
-                      f"归一化口径可能不同，配对无效", file=sys.stderr)
+        # 配对的前提是两份结果用的是**同一批参考文本、同一套归一化**。
+        # 首选比对参考指纹；只比长度是不够的——两段不同的文本可以等长。
+        fa, fb = r.get("refs_norm_sha256_16"), baseline.get("refs_norm_sha256_16")
+        if fa and fb:
+            if fa != fb:
+                print(f"!! {tag} 的参考指纹与 {baseline_tag} 不一致"
+                      f"（{fa} vs {fb}），配对无效", file=sys.stderr)
                 return 1
+        else:
+            # 旧结果文件没有指纹字段，退回长度校验并明确说它挡不住什么
+            print(f"   注：{tag} 或 {baseline_tag} 缺 refs_norm_sha256_16，"
+                  f"退回长度校验（挡不住等长的不同参考）", file=sys.stderr)
+        if r.get("norm") != baseline.get("norm"):
+            print(f"!! {tag} 的归一化口径与 {baseline_tag} 不同"
+                  f"（{r.get('norm')} vs {baseline.get('norm')}）", file=sys.stderr)
+            return 1
+        for k in names:
+            for fld in ("cp_len", "bcm_len"):
+                if r["per_sample"][k][fld] != baseline["per_sample"][k][fld]:
+                    print(f"!! {tag} 的 {fld} 与 {baseline_tag} 不一致（{k}）",
+                          file=sys.stderr)
+                    return 1
 
-    print(f"n={len(names)} 句，自助法 {n_boot} 次，粒度 {KIND}，"
+    print(f"n={len(names)} 条录音，自助法 {n_boot} 次，粒度 {KIND}，"
           f"种子 CI={SEED_CI}/配对={SEED_PAIRED}\n")
     print(f"{'模型':24s} {'CER':>8s}  {'95% CI':>20s}  {'空输出':>6s}  {'sha256':>12s}")
     for tag in sorted(res, key=lambda t: cer(res[t]["per_sample"], names, KIND)):

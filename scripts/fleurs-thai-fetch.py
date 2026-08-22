@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """取 FLEURS 泰语 test 的固定评测子集。
 
-ADR-0004 §4 的准确率数字建立在这个子集上。**采样是确定性的**（等距，无随机数），
-所以任何人重跑都能得到同一批句子。
+ADR-0004 §4 的准确率数字建立在这个子集上。**采样是确定性的**
+（固定步长，无随机数），所以任何人重跑都能得到同一批录音。
+注意是**固定步长**而非覆盖全区间的等距采样，尾部若干行抽不到，详见下方注释。
 
 数据源：`google/fleurs`，配置 `th_th`，split `test`，CC-BY-4.0。
 音频不入库（几百 MB），入库的是 `scripts/fleurs-thai-manifest.json`——
@@ -95,17 +96,26 @@ def main() -> int:
     if n_uniq != len(manifest):
         print(f"   注：{len(manifest) - n_uniq} 条与其他条目共用 prompt（同文本的不同录音）")
 
+    pq_sha = hashlib.sha256(open(pq_path, "rb").read()).hexdigest()
+
     if os.path.exists(MANIFEST):
         ref = json.load(open(MANIFEST))
+        # 两个判断分开报，不要混成一个：
+        #   子集指纹 —— 决定 CER 数字还可不可比（**这条不过就是硬错误**）
+        #   parquet 全文件 sha —— 决定整个上游文件是否原样（只改了没抽中的行
+        #                        时子集仍一致，那不影响可比性，所以只提示）
         if ref.get("refs_sha256_16") != digest:
-            print(f"!! 与入库 manifest 不符（入库 {ref.get('refs_sha256_16')}）——"
-                  f"上游数据可能变了，ADR-0004 §4 的数字不可比", file=sys.stderr)
+            print(f"!! 评测子集与入库 manifest 不符（入库 {ref.get('refs_sha256_16')}，"
+                  f"本次 {digest}）——ADR-0004 §4 的数字不可比", file=sys.stderr)
             return 1
-        print("✓ 与入库 manifest 一致")
+        print("✓ 评测子集与入库 manifest 一致")
+        if ref.get("parquet_sha256") and ref["parquet_sha256"] != pq_sha:
+            print("   注：上游 parquet 整体已变（但抽中的 80 条未变，数字仍可比）",
+                  file=sys.stderr)
     else:
         json.dump({"n": len(manifest), "step": step, "refs_sha256_16": digest,
                    "unique_fleurs_ids": n_uniq,
-                   "parquet_sha256": hashlib.sha256(open(pq_path,"rb").read()).hexdigest(),
+                   "parquet_sha256": pq_sha,
                    "source": "google/fleurs th_th test, CC-BY-4.0",
                    "source_card": "https://huggingface.co/datasets/google/fleurs",
                    "sampling": "固定步长，排序键为 parquet 原始行序；尾部 72 行未覆盖",

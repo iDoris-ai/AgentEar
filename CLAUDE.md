@@ -70,9 +70,11 @@ scripts/bundle.sh                             # 打 .app bundle → dist/
 6. **泰语引擎见 `docs/decisions/0004-thai-asr-engine.md`（草稿，未拍板）**。已完成：
    三个 Whisper 系泰语微调（Thonburian medium / Thonburian distil-large-v3 /
    typhoon-whisper-turbo）已转 GGML 并量化，跑在现有 whisper.cpp 上、不引入新运行时。
-   FLEURS 泰语 test 上实测 CER（n=80，含自助法 CI）：Thonburian 两个约 6.1–6.5%、
-   typhoon-turbo 约 9.5%，**唯一显著的差异是 turbo 更差，但 FLEURS 在 Thonburian
-   的训练分布内，比较不中立**。q5_0 与 q8_0 准确率无可测差异。
+   FLEURS 泰语 test 上实测 CER（n=80 条录音，含自助法 CI）：Thonburian 两个约
+   6.1–6.5%、typhoon-turbo 约 9.5%。六组**事后固定的探索性比较**里只有两组
+   检出差异，都是 Thonburian 优于 turbo；**但 Thonburian 的模型卡声明训练用过
+   FLEURS，比较不中立**。q5_0 与 q8_0 **未检出**准确率差异
+   （「未检出」不是「等效」——没有预定义非劣界）。
    f16 档因峰值 1.84–1.90 GB 出局。**选型卡在 code-switch 数据**——FLEURS 没有夹英文，
    而那正是实际场景。模型**按需下载**不随包分发（jason 2026-08-22 拍板），
    q5_0 约 540–575 MB。
