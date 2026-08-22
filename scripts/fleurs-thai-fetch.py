@@ -6,7 +6,8 @@ ADR-0004 §4 的准确率数字建立在这个子集上。**采样是确定性�
 注意是**固定步长**而非覆盖全区间的等距采样，尾部若干行抽不到，详见下方注释。
 
 数据源：`google/fleurs`，配置 `th_th`，split `test`，CC-BY-4.0。
-音频不入库（几百 MB），入库的是 `scripts/fleurs-thai-manifest.json`——
+音频不入库（80 条约 32 MB，另有约 753 MB 的上游 parquet），
+入库的是 `scripts/fleurs-thai-manifest.json`——
 里面有每条的 FLEURS id 与参考文本，可用来核对本脚本取出来的是不是同一批。
 
 用法：

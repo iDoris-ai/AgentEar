@@ -18,7 +18,8 @@ ADR-0004 的数字从这里来。**保留原始与逐样本数据**，免得只�
 含指纹。`scripts/fleurs-thai-fetch.py` 重新取样时会与它对账，
 上游数据变了会直接报错而不是悄悄给出不可比的数字。
 
-音频不入库（约 100 MB），用 `fleurs-thai-fetch.py` 重新生成。
+音频不入库（80 条 wav 约 32 MB；生成它需要先下约 753 MB 的上游 parquet），
+用 `fleurs-thai-fetch.py` 重新生成。
 来源 `google/fleurs` 配置 `th_th` split `test`，**CC-BY-4.0**。
 
 ## 环境
