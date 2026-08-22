@@ -39,9 +39,13 @@ fn main() -> Result<()> {
     // 离线转写一个已有的 wav，不占麦克风，用于验证 ASR 链路
     if args.len() == 3 && args[1] == "--transcribe" {
         let t0 = Instant::now();
-        let text = asr.transcribe(std::path::Path::new(&args[2]))?;
-        println!("{text}");
-        eprintln!("（耗时 {:.2}s）", t0.elapsed().as_secs_f32());
+        let t = asr.transcribe(std::path::Path::new(&args[2]))?;
+        println!("{}", t.text);
+        eprintln!(
+            "（语种 {}，耗时 {:.2}s）",
+            t.lang.as_deref().unwrap_or("?"),
+            t0.elapsed().as_secs_f32()
+        );
         return Ok(());
     }
 
@@ -266,9 +270,13 @@ fn finish(state: State, store: &store::Store, asr: &asr::Asr) -> Result<State> {
 
     let t_asr = Instant::now();
     match asr.transcribe(&committed.path) {
-        Ok(text) if !text.is_empty() => {
-            log::debug!("转写耗时 {:.2}s", t_asr.elapsed().as_secs_f32());
-            let text = paste::sanitize(&text);
+        Ok(t) if !t.text.is_empty() => {
+            log::debug!(
+                "转写耗时 {:.2}s，语种 {}",
+                t_asr.elapsed().as_secs_f32(),
+                t.lang.as_deref().unwrap_or("?")
+            );
+            let text = paste::sanitize(&t.text);
             println!("\n{text}\n");
             // 派生数据落盘。失败只记日志——raw 还在，随时可以重算，
             // 不值得为它中断上屏

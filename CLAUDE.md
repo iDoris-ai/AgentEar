@@ -59,8 +59,9 @@ scripts/bundle.sh                             # 打 .app bundle → dist/
 
 1. **冷启动 0.2 秒 → M1 不需要常驻模型服务。** 每次录音直接 `Command::new()` 调 `llama-funasr-sensevoice` 子进程即可，无需链接 C++ 库、无需 server 模式。（这是换掉 Fun-ASR-Nano 的直接红利——Nano 冷启动要 11.45s，必须常驻。）
 2. **长音频仍需分段送入 ASR，单段建议 ≤5 分钟。** RSS 随音频长度增长 0.52 MB/s，54 分钟破 2 GiB。影响 `ingest-design.md` 的**路径 A**；M1 的快捷键录音不受影响。
-3. **特殊 token 需过滤。** `llama-funasr-sensevoice` 有 `--keep-tags` 开关，默认行为**需在 M1 中实测确认**，别让 `/sil` 之类粘进剪贴板。
-4. **中英混杂技术术语不可靠。** 实测 `raw` 一词四个模型全错（row/road/ro/roll）。**术语纠错是 M2 的职责**，不要指望换 ASR 解决。
+3. **特殊 token 需过滤，但 `--keep-tags` 必须开着。** 已实测（2026-08-22）：转写走 stdout、日志走 stderr，多个 VAD 段拼在同一行，默认不泄漏 `/sil`。**`asr.rs` 靠 `<|zh|>`/`<|en|>` 标记的存在与否区分「转写结果」和「日志」，所以不能去掉 `--keep-tags`。** 绝不要退回「按有没有汉字判断」——那会把英/日/韩/泰的结果整段丢掉（已修，见 `docs/m1-status.md`）。
+4. **中英混杂技术术语不可靠。** 实测 `raw` 一词四个模型全错（row/road/ro/roll）；Docker → `doocca`、Kubernetes → `cuubber needs`。**术语纠错是 M2 的职责**，不要指望换 ASR 解决。
+5. **语种支持边界（实测）**：中文 ✅、英文 ✅、中英混合的中文部分 ✅。**泰语 ❌** 完全不可用且被误判成 `<|en|>`，需第二个引擎（whisper.cpp 候选，ADR-0004 待写）。泰语模型**按需下载**，不随包分发（jason 2026-08-22 拍板），主包保持 241 MB。
 
 ### M1 的两个红利，不要提前破坏
 
