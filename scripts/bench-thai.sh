@@ -54,7 +54,10 @@ grep -q '^Kanya' <<<"$VOICES" || die "缺泰语嗓音 Kanya（系统设置 → �
 # 曾经只判断 len-long.wav 是否存在。那样的话：首次生成在 long 写出后、
 # short/mid 写坏就会永久复用坏数据；改了 thai-corpus.txt 也不会重建。
 STAMP="$C/.stamp"
-WANT="corpus=$(shasum -a 256 "$CORPUS_TXT" | cut -c1-16) voice=Kanya n=$(grep -c . "$CORPUS_TXT")"
+# 生成逻辑变了就必须重建语料——只看文本 hash 不够。改了 say 参数、
+# 改了 ffmpeg 编码、改了长度档的取句数，都要把这个版本号 +1。
+CORPUS_FORMAT_VERSION=1
+WANT="v=$CORPUS_FORMAT_VERSION corpus=$(shasum -a 256 "$CORPUS_TXT" | cut -c1-16) voice=Kanya n=$(grep -c . "$CORPUS_TXT")"
 NEED=1
 if [ "$REGEN" = 0 ] && [ -f "$STAMP" ] && [ "$(cat "$STAMP")" = "$WANT" ]; then
   NEED=0
@@ -67,7 +70,11 @@ fi
 
 if [ "$NEED" = 1 ]; then
   echo "==> 合成语料到 $C"
-  # 先在临时目录整个建好再原子换上，避免中途失败留下半套语料
+  # 先在临时目录整个建好再替换，避免中途失败留下半套语料。
+  #
+  # **这不是原子替换**：`rm -rf` 与 `mv` 是两步，中间有空窗，
+  # 两个实例并发跑还会互删。要真原子得用版本化目录 + symlink 切换。
+  # 现状够用（基准是手动跑的单实例），但别在注释里吹成原子。
   TMP="$C.tmp.$$"; rm -rf "$TMP"; mkdir -p "$TMP"
   trap 'rm -rf "$TMP"' EXIT
   i=0; PARTS=()
@@ -94,7 +101,7 @@ if [ "$NEED" = 1 ]; then
   build len-mid 6
   build len-long "$i"
   echo "$WANT" > "$TMP/.stamp"
-  rm -rf "$C"; mv "$TMP" "$C"
+  rm -rf "$C"; mv "$TMP" "$C"   # 见上：非原子
   trap - EXIT
 fi
 

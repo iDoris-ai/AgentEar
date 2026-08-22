@@ -1,6 +1,0 @@
-ggml-medium-q5_0         CER_cp=0.0628  CER_gc=0.0681  空输出=0/80  耗时=163s
-ggml-medium-q8_0         CER_cp=0.0607  CER_gc=0.0657  空输出=0/80  耗时=183s
-ggml-distill-q5_0        CER_cp=0.0620  CER_gc=0.0674  空输出=0/80  耗时=108s
-ggml-distill-q8_0        CER_cp=0.0653  CER_gc=0.0714  空输出=0/80  耗时=110s
-ggml-turbo-q5_0          CER_cp=0.0947  CER_gc=0.0968  空输出=0/80  耗时=115s
-ggml-turbo-q8_0          CER_cp=0.0956  CER_gc=0.0976  空输出=0/80  耗时=115s

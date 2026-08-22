@@ -1,31 +1,64 @@
-"""在 FLEURS 泰语 test 上算 CER。
+#!/usr/bin/env python3
+"""在 FLEURS 泰语 test 子集上跑推理并算 CER，输出**逐样本**结果。
 
-归一化口径（先定死，否则数字不可比）：
-  - Unicode NFC
-  - 去掉**全部空白**。泰语词间不用空格，FLEURS 的空格是短语边界，
-    而各模型加不加、加在哪都不一样，计进去测的是排版不是识别。
-  - 拉丁字母转小写（FLEURS 的 transcription 字段已经是小写的）
-  - 去掉标点
+只负责「跑一个模型、存下逐句 edits 与长度」。
+置信区间和配对比较在 `cer-stats.py`，输入就是这里存的逐样本文件——
+这样统计部分可以随时重算，不用重跑推理。
 
-**两种粒度都报，不预设哪个是唯一正确答案**：
-  - cp   : 按 Unicode code point
-  - gc   : 按字素簇（泰文的声调符/元音符附着在辅音上，视觉上是一个字）
-两者会给出不同的数字，差值本身能说明错误集中在组合符号上还是基字上。
+用法：
+    python3 scripts/cer-thai.py <ggml模型> <whisper-cli> <数据目录> [输出目录]
+
+数据目录由 `fleurs-thai-fetch.py` 生成（含 wav/ 与 refs.json）。
+
+## 归一化口径
+
+NFC → 小写 → 去全部空白 → 去 Unicode 标点（category `P*`）。
+
+去空白：泰语词间不用空格，FLEURS 的空格是短语边界，各模型加不加、加在哪
+都不同，计进去测的是排版不是识别。
+**注意这条口径将来测 code-switch 时会掩盖英文词边界错误**，那时要另立口径。
+
+`ฯ`（泰语缩略符，Unicode 类别 Lo 而非标点）**保留**，因为它是正字法的一部分，
+不是排版符号。这是一个明确选择，不是遗漏。
+
+## 两种切分粒度
+
+- `cp`  —— 按 Unicode code point
+- `bcm` —— base + combining marks：把泰文声调符/元音符并入前一个字符
+
+⚠️ **`bcm` 不是 Unicode 字素簇，也不是泰语正字法音节。** 泰语的前置元音
+（`เ`、`แ`…）和 Sara Am（`ำ`）它都处理不了：`เก่ง` → `['เ','ก่','ง']`，
+`กำ` → `['ก','ำ']`。它只是一个「对组合符号不那么敏感」的辅助口径，
+两个数字有差异只说明**结果对切分口径敏感**，不能据此断言错误集中在哪里
+——要定位得看逐句对齐。
 """
-import json, sys, unicodedata, subprocess, os, time
+import json
+import os
+import subprocess
+import sys
+import time
+import unicodedata
 
-THAI_COMBINING = set(range(0x0E31, 0x0E32)) | set(range(0x0E34, 0x0E3B)) | set(range(0x0E47, 0x0E4F))
-PUNCT = set('.,!?;:"\'()[]{}<>—–-…"" '' `~@#$%^&*_+=|\\/๚๛ฯ')
+# 泰文组合符号：U+0E31、U+0E34–U+0E3A、U+0E47–U+0E4E
+THAI_COMBINING = frozenset(
+    [0x0E31] + list(range(0x0E34, 0x0E3B)) + list(range(0x0E47, 0x0E4F))
+)
+# 保留的非标点符号：泰语缩略符是正字法的一部分
+KEEP = frozenset("ฯ")
 
 
 def norm(s: str) -> str:
     s = unicodedata.normalize("NFC", s).lower()
-    return "".join(c for c in s if not c.isspace() and c not in PUNCT)
+    return "".join(
+        c for c in s
+        if not c.isspace()
+        and (c in KEEP or not unicodedata.category(c).startswith("P"))
+    )
 
 
-def graphemes(s: str):
-    """把泰文组合符号并入前一个基字。非泰文按单字符处理。"""
-    out = []
+def base_plus_combining(s: str) -> list:
+    """把泰文组合符号并入前一个字符。见模块文档里的局限声明。"""
+    out: list = []
     for c in s:
         if out and ord(c) in THAI_COMBINING:
             out[-1] += c
@@ -35,6 +68,7 @@ def graphemes(s: str):
 
 
 def edit(a, b) -> int:
+    """Levenshtein。a/b 可以是 str 也可以是 list。"""
     if len(a) < len(b):
         a, b = b, a
     prev = list(range(len(b) + 1))
@@ -46,35 +80,88 @@ def edit(a, b) -> int:
     return prev[-1]
 
 
-def main():
-    sp = os.path.dirname(os.path.abspath(__file__))
-    model, cli = sys.argv[1], sys.argv[2]
-    refs = json.load(open(f"{sp}/fleurs/refs.json"))
-    tot_cp = tot_cp_n = tot_gc = tot_gc_n = 0
-    empty = 0
-    t0 = time.time()
-    dump = {}
-    for name, r in sorted(refs.items()):
-        wav = f"{sp}/fleurs/wav/{name}.wav"
-        try:
-            hyp = subprocess.run(
-                [cli, "-m", model, "-f", wav, "-l", "th", "-t", "4",
-                 "-bo", "1", "-bs", "1", "-np", "-nt"],
-                capture_output=True, text=True, timeout=300,
-            ).stdout.strip()
-        except subprocess.TimeoutExpired:
-            hyp = ""
-        if not hyp:
-            empty += 1
-        dump[name] = hyp
-        ref_n, hyp_n = norm(r["transcription"]), norm(hyp)
-        tot_cp += edit(ref_n, hyp_n); tot_cp_n += len(ref_n)
-        rg, hg = graphemes(ref_n), graphemes(hyp_n)
-        tot_gc += edit(rg, hg); tot_gc_n += len(rg)
+def transcribe(cli: str, model: str, wav: str) -> str:
+    """跑一条。**任何非正常退出都当场失败，不返回空串。**
+
+    静默把失败当成「模型输出为空」，会让加载失败、文件损坏、崩溃、超时
+    统统被计成 100% 的删除错误——基础设施故障伪装成准确率差，
+    这是实验正确性问题，不是健壮性细节。
+    """
+    try:
+        p = subprocess.run(
+            [cli, "-m", model, "-f", wav, "-l", "th", "-t", "4",
+             "-bo", "1", "-bs", "1", "-np", "-nt"],
+            capture_output=True, text=True, timeout=300,
+        )
+    except subprocess.TimeoutExpired as e:
+        raise SystemExit(f"!! 超时（300s）：{wav}\n{e}")
+    if p.returncode != 0:
+        raise SystemExit(
+            f"!! whisper-cli 退出码 {p.returncode}：{wav}\n{p.stderr[-2000:]}"
+        )
+    return p.stdout.strip()
+
+
+def main() -> int:
+    if not 4 <= len(sys.argv) <= 5:
+        print(__doc__)
+        return 2
+    model, cli, data = sys.argv[1], sys.argv[2], sys.argv[3]
+    outdir = sys.argv[4] if len(sys.argv) == 5 else os.path.join(data, "results")
+    for p in (model, cli, os.path.join(data, "refs.json")):
+        if not os.path.exists(p):
+            print(f"找不到 {p}", file=sys.stderr)
+            return 1
+    os.makedirs(outdir, exist_ok=True)
+
+    refs = json.load(open(data + "/refs.json"))
     tag = os.path.basename(model).replace(".bin", "")
-    json.dump(dump, open(f"{sp}/fleurs/hyp-{tag}.json", "w"), ensure_ascii=False, indent=1)
-    print(f"{tag:24s} CER_cp={tot_cp/tot_cp_n:.4f}  CER_gc={tot_gc/tot_gc_n:.4f}  "
-          f"空输出={empty}/{len(refs)}  耗时={time.time()-t0:.0f}s")
+
+    # 先冒烟一条，模型坏掉要立刻知道，而不是跑完 80 条才发现全是空
+    first = sorted(refs)[0]
+    transcribe(cli, model, f"{data}/wav/{first}.wav")
+
+    per, empty, t0 = {}, 0, time.time()
+    for name in sorted(refs):
+        hyp = transcribe(cli, model, f"{data}/wav/{name}.wav")
+        if not hyp:
+            empty += 1  # 进程成功退出且 stdout 确实为空，才算「空输出」
+        r, h = norm(refs[name]["transcription"]), norm(hyp)
+        rb, hb = base_plus_combining(r), base_plus_combining(h)
+        per[name] = {
+            "hyp": hyp,
+            "cp_edits": edit(r, h), "cp_len": len(r),
+            "bcm_edits": edit(rb, hb), "bcm_len": len(rb),
+        }
+
+    res = {
+        "model": os.path.abspath(model),
+        "model_sha256_12": _sha12(model),
+        "cli_sha256_12": _sha12(cli),
+        "norm": "NFC|lower|strip-space|strip-unicode-P|keep-ฯ",
+        "n": len(per),
+        "empty_output": empty,
+        "elapsed_s": round(time.time() - t0, 1),
+        "per_sample": per,
+    }
+    path = os.path.join(outdir, f"{tag}.json")
+    json.dump(res, open(path, "w"), ensure_ascii=False, indent=1, sort_keys=True)
+
+    cp = sum(v["cp_edits"] for v in per.values()) / sum(v["cp_len"] for v in per.values())
+    bcm = sum(v["bcm_edits"] for v in per.values()) / sum(v["bcm_len"] for v in per.values())
+    print(f"{tag:24s} CER_cp={cp:.4f}  CER_bcm={bcm:.4f}  "
+          f"空输出={empty}/{len(per)}  耗时={res['elapsed_s']:.0f}s  → {path}")
+    return 0
 
 
-main()
+def _sha12(p: str) -> str:
+    import hashlib
+    h = hashlib.sha256()
+    with open(p, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()[:12]
+
+
+if __name__ == "__main__":
+    sys.exit(main())

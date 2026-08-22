@@ -1,0 +1,22 @@
+# scripts/cer-stats.py 的输出（ADR-0004 §4 的 CI 与配对比较由此而来）
+# 重算：python3 scripts/cer-stats.py docs/data/thai-cer-per-sample 4000
+
+n=80 句，自助法 4000 次，粒度 cp，种子 CI=20260822/配对=20260823
+
+模型                            CER                95% CI     空输出        sha256
+ggml-medium-q8_0           0.0608  [0.0441, 0.0789]     0/80  a2e7ef6b1eee
+ggml-distill-q5_0          0.0622  [0.0411, 0.0861]     0/80  5bfc04f1931a
+ggml-medium-q5_0           0.0630  [0.0451, 0.0825]     0/80  3c23bdbee10a
+ggml-distill-q8_0          0.0655  [0.0407, 0.0955]     0/80  e0894592a0a9
+ggml-turbo-q5_0            0.0948  [0.0726, 0.1187]     0/80  2ffbb16719be
+ggml-turbo-q8_0            0.0958  [0.0739, 0.1197]     0/80  6c1aca53a64c
+
+预先指定的配对比较（Δ = 左 − 右；CI 不跨 0 才算检出差异）：
+  ggml-medium-q8_0       − ggml-medium-q5_0        Δ95%CI=[-0.0077, +0.0027]  未检出差异
+  ggml-distill-q8_0      − ggml-distill-q5_0       Δ95%CI=[-0.0049, +0.0162]  未检出差异
+  ggml-turbo-q8_0        − ggml-turbo-q5_0         Δ95%CI=[-0.0014, +0.0037]  未检出差异
+  ggml-medium-q8_0       − ggml-distill-q5_0       Δ95%CI=[-0.0142, +0.0100]  未检出差异
+  ggml-distill-q5_0      − ggml-turbo-q5_0         Δ95%CI=[-0.0466, -0.0193]  检出差异
+  ggml-medium-q8_0       − ggml-turbo-q5_0         Δ95%CI=[-0.0471, -0.0216]  检出差异
+
+注：「未检出差异」≠「无差异」≠「等效」。要声称等效需先定非劣界，再看 CI 上界是否落在界内。
