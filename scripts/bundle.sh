@@ -97,10 +97,17 @@ echo "==> 写入权限文案本地化"
 write_infoplist_strings() {
   local lproj="$APP/Contents/Resources/$1.lproj"
   mkdir -p "$lproj"
-  # 无 BOM 的 UTF-8 就够（plutil -lint 会在下面把关）。
-  # 文案里不能出现未转义的双引号，.strings 的语法会被打断。
-  printf '%s\n' "\"NSMicrophoneUsageDescription\" = \"$2\";" > "$lproj/InfoPlist.strings"
-  # 格式错了不会报错，只会静默退回 Info.plist 里的英文兜底——
+  # 转义 `\` 和 `"`。顺序不能反——先转反斜杠，否则会把自己插入的
+  # 转义符再转一遍。
+  #
+  # 反斜杠这条比引号更阴险：文案里写个 `\n`，.strings 解析器会把它当换行，
+  # plutil -lint **照样通过**，只是显示出来的内容和你写的不一样了。
+  local escaped="$2"
+  escaped="${escaped//\\/\\\\}"
+  escaped="${escaped//\"/\\\"}"
+  # 无 BOM 的 UTF-8 就够（plutil -lint 把关）
+  printf '%s\n' "\"NSMicrophoneUsageDescription\" = \"$escaped\";" > "$lproj/InfoPlist.strings"
+  # 格式错了系统不会报错，只会静默退回 Info.plist 里的英文兜底——
   # 那种失败没人会发现，所以在这里挡住
   plutil -lint "$lproj/InfoPlist.strings" > /dev/null
 }

@@ -98,10 +98,14 @@ fn clean(stdout: &str, stderr: &str) -> Transcript {
         // 日志直接敲进用户当时正在用的任何窗口。宁可什么都不出，
         // 也不能把内部日志替用户打出来——空剪贴板一眼能看出没转成功，
         // 混进日志的文本不会。
-        if !stdout.trim().is_empty() {
+        // 两条流都看：只查 stdout 的话，「结果混进了 stderr 且格式变了」
+        // 这种失效模式会连一行诊断都留不下
+        if !stdout.trim().is_empty() || !stderr.trim().is_empty() {
+            let peek = |s: &str| s.trim().chars().take(200).collect::<String>();
             log::error!(
-                "ASR 输出里没有带语种标记的记录，判为转写失败（检查 --keep-tags 是否仍被支持）。stdout: {}",
-                stdout.trim().chars().take(200).collect::<String>()
+                "ASR 输出里没有带语种标记的记录，判为转写失败（检查 --keep-tags 是否仍被支持）。\n  stdout: {}\n  stderr: {}",
+                peek(stdout),
+                peek(stderr)
             );
         }
         return Transcript { text: String::new(), lang: None };
@@ -135,30 +139,67 @@ fn collect(stream: &str) -> Vec<(&str, &str)> {
 
 /// 把一行拆成若干 `(语种, 正文)`。运行时会把多个 VAD 段拼在同一行，
 /// 每段形如 `<|zh|><|NEUTRAL|><|Speech|><|withitn|>正文`。
+///
+/// ## 为什么判据要这么严
+///
+/// 只要「行内任何位置出现语种标记」就当成转写结果，日志会被切出正文来：
+///
+/// ```text
+/// [sensevoice] unexpected token <|en|> while decoding frame 42
+///                               ^ 松判据从这里开始当正文
+/// ```
+///
+/// 结果「while decoding frame 42」会被**自动敲进用户当时正在用的窗口**。
+/// 语种白名单挡得住 `<|debug|>`，挡不住这个。
+///
+/// 所以要求两条，缺一不可：
+/// 1. **trim 后的行首**就得是语种标记——前面有任何别的内容，整行不是结果
+/// 2. 语种标记后面**紧跟至少一个标记**（实测是 emotion/event/itn 三个）
 fn split_records(line: &str) -> Vec<(&str, &str)> {
-    // 先找出每个「语种标记」的起始位置——它是一条记录的开头
-    let mut starts: Vec<(usize, &str, usize)> = Vec::new(); // (标记起点, 语种, 标记终点)
+    // (记录起点, 语种, 正文起点)
+    let mut starts: Vec<(usize, &str, usize)> = Vec::new();
     let mut i = 0;
     while i < line.len() {
-        if let Some((name, next)) = tag_at(line, i) {
-            if is_lang(name) {
-                starts.push((i, name, next));
-            }
-            i = next;
-        } else {
+        let Some((name, after)) = tag_at(line, i) else {
             i += line[i..].chars().next().map_or(1, char::len_utf8);
+            continue;
+        };
+        // 记录头 = 语种标记 + 紧跟的其他标记
+        if is_lang(name) && tag_at(line, after).is_some() {
+            // 吃掉记录头剩下的标记，正文从最后一个标记之后开始
+            let mut p = after;
+            while let Some((_, next)) = tag_at(line, p) {
+                p = next;
+            }
+            starts.push((i, name, p));
+            i = p;
+        } else {
+            i = after;
         }
     }
 
-    let mut out = Vec::new();
-    for (k, &(_, lang, after_tag)) in starts.iter().enumerate() {
-        let end = starts.get(k + 1).map_or(line.len(), |n| n.0);
-        out.push((lang, &line[after_tag..end]));
+    // 第一条记录必须就在行首。不在行首说明它前面还有别的东西，
+    // 那是日志，不是转写。
+    if starts.first().is_none_or(|&(pos, _, _)| pos != 0) {
+        return Vec::new();
     }
-    out
+
+    starts
+        .iter()
+        .enumerate()
+        .map(|(k, &(_, lang, body_start))| {
+            let end = starts.get(k + 1).map_or(line.len(), |n| n.0);
+            (lang, &line[body_start..end])
+        })
+        .collect()
 }
 
-/// 拼接各段正文。段间补空格，但两侧都是 CJK/泰文这类不用空格分词的文字时不补。
+/// 拼接各段正文。
+///
+/// 段间补一个空格，**但只要接缝任意一侧是不用空格分词的文字就不补**。
+/// 「任意一侧」而不是「两侧」是有意的：中文段后面接英文段时也不该补，
+/// SenseVoice 自己输出的中英混排就是不带空格的（`提交PR人家都review了`），
+/// 我们在段接缝处补一个，反而和段内不一致。
 fn join_segments<'a>(bodies: impl Iterator<Item = &'a str>) -> String {
     let mut out = String::new();
     for body in bodies {
@@ -178,13 +219,16 @@ fn join_segments<'a>(bodies: impl Iterator<Item = &'a str>) -> String {
     out.trim().to_string()
 }
 
-/// 不用空格分词的文字（CJK、泰文、日文假名、韩文）。
+/// 不用空格分词的文字。
+///
+/// **韩文不在其列** —— 现代韩文是分词写的，`안녕하세요 반갑습니다` 中间
+/// 那个空格是必需的。曾经把谚文和中日泰并列，两段韩文会粘成
+/// `안녕하세요반갑습니다`。
 fn is_scriptio_continua(c: char) -> bool {
     matches!(c as u32,
         0x3040..=0x30FF      // 平假名 / 片假名
         | 0x3400..=0x4DBF    // CJK 扩展 A
         | 0x4E00..=0x9FFF    // CJK 统一汉字
-        | 0xAC00..=0xD7AF    // 谚文
         | 0x0E00..=0x0E7F    // 泰文
         | 0xFF00..=0xFFEF    // 全角标点
     ) || matches!(c, '，' | '。' | '？' | '！' | '、' | '：' | '；' | '「' | '」')
@@ -314,6 +358,57 @@ mod tests {
     fn requires_a_language_tag_not_just_any_tag() {
         let t = clean("", "<|debug|> internal state dump");
         assert!(t.text.is_empty(), "非语种标记不应被当成转写结果：{:?}", t.text);
+    }
+
+    /// 日志行里偶然出现一个语种标记，**不能**把它右边的内容当成转写正文。
+    /// 松判据会切出「while decoding frame 42」并自动敲进用户窗口。
+    #[test]
+    fn language_tag_mid_line_is_not_a_record() {
+        let t = clean(
+            "[sensevoice] unexpected token <|en|> while decoding frame 42",
+            LOG,
+        );
+        assert!(
+            t.text.is_empty(),
+            "日志里的语种标记被当成记录头了：{:?}",
+            t.text
+        );
+    }
+
+    /// 就算日志行以语种标记开头，后面没有紧跟其他标记也不算记录头。
+    #[test]
+    fn bare_language_tag_without_following_tags_is_not_a_record() {
+        let t = clean("<|en|> decoding failed, retrying", LOG);
+        assert!(t.text.is_empty(), "光一个语种标记不构成记录头：{:?}", t.text);
+    }
+
+    /// 韩文是分词写的，两段之间必须有空格。
+    #[test]
+    fn korean_segments_get_a_space() {
+        let line = format!("{}{}", tagged("ko", "안녕하세요"), tagged("ko", "반갑습니다"));
+        assert_eq!(clean(&line, LOG).text, "안녕하세요 반갑습니다");
+    }
+
+    /// 泰文不分词，段间不补空格。
+    ///
+    /// 这里直接测 `join_segments` 而不是走 `clean()`：**SenseVoice 根本不会
+    /// 输出 `<|th|>`**（泰语不在它支持的语种里，会被误判成 `en` 或 `yue`，
+    /// 见 `keeps_thai_even_when_misdetected`）。将来接泰语引擎时走的是另一条
+    /// 解析路径，但拼接规则是共用的。
+    #[test]
+    fn thai_segments_get_no_space() {
+        let joined = join_segments(["สวัสดี", "ครับ"].into_iter());
+        assert_eq!(joined, "สวัสดีครับ");
+    }
+
+    /// `is_lang` 只列 SenseVoice 真会输出的语种。泰语不在其中——
+    /// 这不是遗漏，加进去反而会让「泰语被误判」这件事更难发现。
+    #[test]
+    fn thai_is_not_a_sensevoice_language() {
+        assert!(!is_lang("th"));
+        for l in ["zh", "en", "yue", "ja", "ko", "nospeech"] {
+            assert!(is_lang(l), "{l} 应该是已知语种");
+        }
     }
 
     /// 无标记时**返回空**而不是猜。自动上屏默认开着，猜错等于把运行时日志

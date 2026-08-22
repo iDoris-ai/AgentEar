@@ -20,6 +20,11 @@ use crate::i18n::Lang;
 /// **输入设备、触发键、保留期全部**，只因为一个字段坏了。
 ///
 /// 先解析成 `Value` 再逐字段尝试，把损坏隔离在字段这一层。
+///
+/// **边界：挡不住重复键。** `{"ui_lang":"zh","ui_lang":"fr"}` 会在派生的
+/// `Config` visitor 里就报 `duplicate field`，轮不到这里，整份配置照样
+/// 退回默认。要兜住它得先解析成 map 再逐字段取，值不值得看以后是否真的
+/// 出现过——目前配置只由程序写，重复键只可能来自手工编辑。
 fn lenient<'de, D, T>(d: D) -> Result<T, D::Error>
 where
     D: Deserializer<'de>,
@@ -229,6 +234,17 @@ mod tests {
         assert_eq!(c.trigger, Trigger::CtrlShiftR, "触发键被连累了");
         assert_eq!(c.retention_days, 90, "保留期被连累了");
         assert!(!c.auto_paste, "自动上屏被连累了");
+    }
+
+    /// 逐字段容错**挡不住重复键**——记录这个边界，免得把承诺说过头。
+    /// 重复键在派生的 visitor 里就报错了，轮不到 `lenient`。
+    #[test]
+    fn duplicate_keys_are_a_known_gap() {
+        let json = r#"{"ui_lang":"zh","ui_lang":"fr","retention_days":90}"#;
+        assert!(
+            serde_json::from_str::<Config>(json).is_err(),
+            "如果这条开始通过了，说明重复键也能兜住了，去把 lenient 的注释改掉"
+        );
     }
 
     /// 类型写错也一样，只坏那一个字段，且退回**文档写的默认值**
