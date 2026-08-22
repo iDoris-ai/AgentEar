@@ -11,3 +11,7 @@ vendor/models/
 
 # 打包产物。dist/ 曾被误提交，里面含 vendor/bin 下的 ASR 二进制
 /dist
+
+# Python 字节码（评测脚本被 import 时会生成）
+__pycache__/
+*.pyc
