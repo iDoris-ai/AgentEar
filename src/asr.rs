@@ -85,41 +85,109 @@ impl Asr {
 /// M0 实测 `/sil` 之类的 token 也会泄漏进输出（`--chunk` 模式尤其明显），
 /// 直接粘进剪贴板会很难看。见 `docs/benchmarks.md` §3.4。
 fn clean(stdout: &str, stderr: &str) -> Transcript {
-    let mut lang = None;
-    let mut kept: Vec<&str> = Vec::new();
-    for line in stdout.lines().chain(stderr.lines()) {
+    // stdout 优先：实测转写只走 stdout。两条流都拼起来的话，万一某天两边
+    // 都出现结果就会**重复一遍**，而重复的文本会被自动上屏，很难察觉。
+    // 只有 stdout 一条合法记录都没有时，才去 stderr 找（历史上混过流）。
+    let found = collect(stdout);
+    let found = if found.is_empty() { collect(stderr) } else { found };
+
+    if found.is_empty() {
+        // 没有合法记录时**返回空**，不做「按前缀过滤剩下的行」的兜底。
+        //
+        // 兜底看着稳妥，实际很危险：自动上屏默认开着，猜错就是把运行时
+        // 日志直接敲进用户当时正在用的任何窗口。宁可什么都不出，
+        // 也不能把内部日志替用户打出来——空剪贴板一眼能看出没转成功，
+        // 混进日志的文本不会。
+        if !stdout.trim().is_empty() {
+            log::error!(
+                "ASR 输出里没有带语种标记的记录，判为转写失败（检查 --keep-tags 是否仍被支持）。stdout: {}",
+                stdout.trim().chars().take(200).collect::<String>()
+            );
+        }
+        return Transcript { text: String::new(), lang: None };
+    }
+
+    let lang = found[0].0.to_string();
+    // 段与段之间补一个空格。运行时把多个 VAD 段直接粘在一起输出，
+    // 英文会连成 `worldthis`。中日泰不用空格分词，多出来的空格由
+    // paste::sanitize 之外的这一步收敛——见下面的 join_segments。
+    let text = join_segments(found.iter().map(|(_, body)| *body));
+    Transcript { text, lang: Some(lang) }
+}
+
+/// 从一条流里挑出「带语种标记的转写记录」，返回 (语种, 正文) 列表。
+///
+/// 判据收紧为**必须有已知语种标记**，而不是「有任意 `<|...|>` 就算」——
+/// 后者只要日志里出现一次尖括号标记就会把整行当成转写结果。
+fn collect(stream: &str) -> Vec<(&str, &str)> {
+    let mut out = Vec::new();
+    for line in stream.lines() {
         let t = line.trim();
-        let tags = tag_names(t);
-        if tags.is_empty() {
+        if t.is_empty() {
             continue;
         }
-        if lang.is_none() {
-            lang = tags.iter().find(|n| is_lang(n)).map(|n| n.to_string());
+        for (lang, body) in split_records(t) {
+            out.push((lang, body));
         }
-        kept.push(t);
+    }
+    out
+}
+
+/// 把一行拆成若干 `(语种, 正文)`。运行时会把多个 VAD 段拼在同一行，
+/// 每段形如 `<|zh|><|NEUTRAL|><|Speech|><|withitn|>正文`。
+fn split_records(line: &str) -> Vec<(&str, &str)> {
+    // 先找出每个「语种标记」的起始位置——它是一条记录的开头
+    let mut starts: Vec<(usize, &str, usize)> = Vec::new(); // (标记起点, 语种, 标记终点)
+    let mut i = 0;
+    while i < line.len() {
+        if let Some((name, next)) = tag_at(line, i) {
+            if is_lang(name) {
+                starts.push((i, name, next));
+            }
+            i = next;
+        } else {
+            i += line[i..].chars().next().map_or(1, char::len_utf8);
+        }
     }
 
-    if kept.is_empty() {
-        // 兜底：万一将来的构建不再输出标记，也不能把结果全丢掉。
-        // 只扫 stdout（转写结果所在的流），按已知日志前缀过滤。
-        let fallback: Vec<&str> = stdout
-            .lines()
-            .map(str::trim)
-            .filter(|t| !t.is_empty() && !is_diagnostic(t))
-            .collect();
-        if !fallback.is_empty() {
-            log::warn!("ASR 输出没有 <|lang|> 标记，退回前缀过滤——检查 --keep-tags 是否仍被支持");
+    let mut out = Vec::new();
+    for (k, &(_, lang, after_tag)) in starts.iter().enumerate() {
+        let end = starts.get(k + 1).map_or(line.len(), |n| n.0);
+        out.push((lang, &line[after_tag..end]));
+    }
+    out
+}
+
+/// 拼接各段正文。段间补空格，但两侧都是 CJK/泰文这类不用空格分词的文字时不补。
+fn join_segments<'a>(bodies: impl Iterator<Item = &'a str>) -> String {
+    let mut out = String::new();
+    for body in bodies {
+        let piece = strip_tags(body);
+        if piece.is_empty() {
+            continue;
         }
-        return Transcript {
-            text: strip_tags(&fallback.join("")),
-            lang: None,
+        let need_space = match (out.chars().last(), piece.chars().next()) {
+            (Some(a), Some(b)) => !is_scriptio_continua(a) && !is_scriptio_continua(b),
+            _ => false,
         };
+        if need_space {
+            out.push(' ');
+        }
+        out.push_str(&piece);
     }
+    out.trim().to_string()
+}
 
-    Transcript {
-        text: strip_tags(&kept.join("")),
-        lang,
-    }
+/// 不用空格分词的文字（CJK、泰文、日文假名、韩文）。
+fn is_scriptio_continua(c: char) -> bool {
+    matches!(c as u32,
+        0x3040..=0x30FF      // 平假名 / 片假名
+        | 0x3400..=0x4DBF    // CJK 扩展 A
+        | 0x4E00..=0x9FFF    // CJK 统一汉字
+        | 0xAC00..=0xD7AF    // 谚文
+        | 0x0E00..=0x0E7F    // 泰文
+        | 0xFF00..=0xFFEF    // 全角标点
+    ) || matches!(c, '，' | '。' | '？' | '！' | '、' | '：' | '；' | '「' | '」')
 }
 
 /// SenseVoice 会输出的语种标记。泰语等不在其中，会被误判成这里的某一个。
@@ -139,32 +207,6 @@ fn tag_at(s: &str, start: usize) -> Option<(&str, usize)> {
         return None;
     }
     Some((name, start + 2 + end + 2))
-}
-
-/// 一行里所有 `<|...|>` 标记的名字，按出现顺序。
-fn tag_names(s: &str) -> Vec<&str> {
-    let mut names = Vec::new();
-    let mut i = 0;
-    while i < s.len() {
-        if let Some((name, next)) = tag_at(s, i) {
-            names.push(name);
-            i = next;
-        } else {
-            // 按字符步进，保证 i 永远落在字符边界上
-            i += s[i..].chars().next().map_or(1, char::len_utf8);
-        }
-    }
-    names
-}
-
-/// 判断是否为运行时诊断输出而非转写结果。**只用于无标记时的兜底路径。**
-fn is_diagnostic(line: &str) -> bool {
-    const PREFIXES: &[&str] = &[
-        "sched_reserve", "graph_reserve", "llama_", "ggml_", "load", "print_info",
-        "build", "main:", "repack:", "init", "set_abort_callback", "~llama_context",
-        "[vad]", "[done]", "[sensevoice]", "system_info", "register_", "get_memory",
-    ];
-    PREFIXES.iter().any(|p| line.starts_with(p))
 }
 
 /// 去掉 `<|...|>` 与 `/sil` 这类特殊标记。
@@ -250,12 +292,45 @@ mod tests {
     }
 
     /// 多段 VAD 时，运行时把各段拼在同一行，每段各带一套标记。
+    /// 英文段之间要补空格，否则会连成 `segment.Second`。
     #[test]
     fn joins_multiple_segments() {
         let line = format!("{}{}", tagged("en", "First segment."), tagged("en", "Second segment."));
         let t = clean(&line, LOG);
-        assert_eq!(t.text, "First segment.Second segment.");
+        assert_eq!(t.text, "First segment. Second segment.");
         assert_eq!(t.lang.as_deref(), Some("en"));
+    }
+
+    /// 中文段之间不能补空格——中文不用空格分词。
+    #[test]
+    fn joins_chinese_without_space() {
+        let line = format!("{}{}", tagged("zh", "第一段。"), tagged("zh", "第二段。"));
+        assert_eq!(clean(&line, LOG).text, "第一段。第二段。");
+    }
+
+    /// 只有带**已知语种**标记的行才算转写结果。日志里混进别的尖括号标记
+    /// （比如 `<|debug|>`）不能把整行当成结果吐给用户。
+    #[test]
+    fn requires_a_language_tag_not_just_any_tag() {
+        let t = clean("", "<|debug|> internal state dump");
+        assert!(t.text.is_empty(), "非语种标记不应被当成转写结果：{:?}", t.text);
+    }
+
+    /// 无标记时**返回空**而不是猜。自动上屏默认开着，猜错等于把运行时日志
+    /// 直接敲进用户正在用的窗口。
+    #[test]
+    fn untagged_output_yields_nothing() {
+        let t = clean("[sensevoice] done 0.4s\nsome unexpected log line", LOG);
+        assert!(t.text.is_empty(), "无语种标记时必须返回空，实际: {:?}", t.text);
+        assert_eq!(t.lang, None);
+    }
+
+    /// stdout 有结果时不再去 stderr 找，避免两边都有时输出重复一遍。
+    #[test]
+    fn does_not_duplicate_across_streams() {
+        let line = tagged("zh", "只该出现一次");
+        let t = clean(&line, &format!("{LOG}\n{line}"));
+        assert_eq!(t.text, "只该出现一次");
     }
 
     /// 静音：运行时只吐日志，没有带标记的行。
@@ -273,11 +348,4 @@ mod tests {
         assert_eq!(t.text, "混流的结果");
     }
 
-    /// 兜底路径：若将来不再输出标记，也不能把结果整段丢掉。
-    #[test]
-    fn falls_back_when_untagged() {
-        let t = clean("[sensevoice] done 0.4s\nplain english output", LOG);
-        assert_eq!(t.text, "plain english output");
-        assert_eq!(t.lang, None);
-    }
 }
