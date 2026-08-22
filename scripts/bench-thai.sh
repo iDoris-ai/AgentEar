@@ -1,76 +1,138 @@
 #!/usr/bin/env bash
-# ADR-0004 §3 的性能基线。复现 whisper 系泰语模型的体积 / RTF / 峰值 RSS。
+# ADR-0004 §3 的**性能**测量：体积 / RTF / 峰值 RSS。
 #
-# 前置：
-#   1. whisper.cpp 已构建（build/bin/whisper-cli、build/bin/quantize）
-#   2. GGML 模型已转好。转换见 ADR-0004 §2，注意 bf16 权重要先落成 fp32，
-#      且 quantize **不校验输入**——转崩留下的残缺文件它照样量化成功。
+# 范围声明：本脚本只复现**性能测量**这一步。它不复现模型下载、GGML 转换和
+# 量化——那三步见 ADR-0004 §2，得自己跑完把 .bin 准备好。
+# **准确率不归它管**，看 `scripts/cer-thai.py`。
 #
-# 用法：scripts/bench-thai.sh <ggml模型> [...]
-#   环境变量 WHISPER_CPP 指定 whisper.cpp 仓库路径（默认与本仓库同级）
+# 语料是 macOS 内置泰语嗓音 Kanya 合成的（`scripts/thai-corpus.txt`）。
+# ⚠️ **那 20 句是本项目自己编写的，没有母语者校对，不是任何标准语料库。**
+# 用它测性能是可以的（RTF/RSS 只取决于时长和解码 token 数），
+# **绝不能用来算 CER**——参考文本本身就没有权威性。真实准确率走 FLEURS。
 #
-# ⚠️ 两条必须遵守的测量纪律，都是踩过坑换来的（ADR-0004 §3）：
+# 两条测量纪律，都是踩坑换来的（ADR-0004 §3）：
+#   1. **机器必须空闲。** 后台有下载/编译时数字会系统性偏慢，而且容易把
+#      干净的那次误判成脏的。测完复现一遍再信。
+#   2. **长度档必须由互不重复的内容构成。** 同一句重复拼接会触发 whisper 的
+#      重复检测和温度回退，墙钟翻几倍而输出长度不变，RTF 整列作废。
 #
-#   1. **机器必须空闲。** 后台有下载/编译时测出的数字会系统性偏慢，
-#      而且容易让人把干净的那次误判成脏的。测完复现一遍再信。
-#   2. **长度档必须由互不重复的内容构成。** 同一句话重复拼接会触发 whisper
-#      的重复检测和温度回退，墙钟翻几倍而输出长度不变，RTF 整列作废。
-#      本脚本用 thai-corpus.txt 里 20 句不重复的句子拼长度档。
-#
-# 语料是 macOS 内置泰语嗓音 Kanya 合成的。**只能测性能，不能算 CER**——
-# 没有口音、语速变化、噪声，准确率会显著优于真实表现。
+# 用法：scripts/bench-thai.sh [--regenerate] <ggml模型> [...]
+#   WHISPER_CPP  whisper.cpp 仓库路径（默认与本仓库同级）
+#   THREADS      线程数，默认 4
+#   AGENTEAR_BENCH_WORK  工作目录，默认 $TMPDIR/agentear-thai-bench
 
 set -euo pipefail
+
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 WCPP="${WHISPER_CPP:-$ROOT/../whisper.cpp}"
 CLI="$WCPP/build/bin/whisper-cli"
 WORK="${AGENTEAR_BENCH_WORK:-${TMPDIR:-/tmp}/agentear-thai-bench}"
 THREADS="${THREADS:-4}"
-
-[ -x "$CLI" ] || { echo "找不到 whisper-cli：$CLI（设 WHISPER_CPP 指向 whisper.cpp 仓库）" >&2; exit 1; }
-[ $# -gt 0 ] || { echo "用法：$0 <ggml模型> [...]" >&2; exit 1; }
-command -v say >/dev/null || { echo "需要 macOS 的 say" >&2; exit 1; }
-say -v '?' | grep -q '^Kanya' || { echo "缺泰语嗓音 Kanya（系统设置 → 辅助功能 → 语音里下载）" >&2; exit 1; }
-
+CORPUS_TXT="$ROOT/scripts/thai-corpus.txt"
 C="$WORK/corpus"
-if [ ! -f "$C/len-long.wav" ]; then
+REGEN=0
+[ "${1:-}" = "--regenerate" ] && { REGEN=1; shift; }
+
+die() { echo "!! $*" >&2; exit 1; }
+
+# —— 依赖检查。缺哪个都要现在就说清楚，别让 set -e 在半路抛个看不懂的错 ——
+for c in ffmpeg ffprobe bc say shasum; do
+  command -v "$c" >/dev/null || die "缺少 $c"
+done
+[ -x /usr/bin/time ] || die "缺少 /usr/bin/time（本脚本依赖它的 -l 输出取峰值 RSS）"
+[ -x "$CLI" ] || die "找不到 whisper-cli：$CLI（设 WHISPER_CPP 指向 whisper.cpp 仓库）"
+[ -f "$CORPUS_TXT" ] || die "找不到语料文本：$CORPUS_TXT"
+[ $# -gt 0 ] || die "用法：$0 [--regenerate] <ggml模型> [...]"
+[[ "$THREADS" =~ ^[1-9][0-9]*$ ]] || die "THREADS 必须是正整数，当前是 '$THREADS'"
+# 不用 `say -v '?' | grep -q`：grep -q 命中即退出并关闭管道，say 收到 SIGPIPE
+# 返回非零，pipefail 下会把「装了 Kanya」误判成「没装」
+VOICES="$(say -v '?')"
+grep -q '^Kanya' <<<"$VOICES" || die "缺泰语嗓音 Kanya（系统设置 → 辅助功能 → 朗读内容 → 系统声音里下载）"
+
+# —— 语料。**指纹变了就重建**，不能只看某个文件在不在 ——
+#
+# 曾经只判断 len-long.wav 是否存在。那样的话：首次生成在 long 写出后、
+# short/mid 写坏就会永久复用坏数据；改了 thai-corpus.txt 也不会重建。
+STAMP="$C/.stamp"
+WANT="corpus=$(shasum -a 256 "$CORPUS_TXT" | cut -c1-16) voice=Kanya n=$(grep -c . "$CORPUS_TXT")"
+NEED=1
+if [ "$REGEN" = 0 ] && [ -f "$STAMP" ] && [ "$(cat "$STAMP")" = "$WANT" ]; then
+  NEED=0
+  # 指纹对上还不够，三个档都得真的能读且时长为正
+  for t in len-short len-mid len-long; do
+    d="$(ffprobe -v error -show_entries format=duration -of csv=p=0 "$C/$t.wav" 2>/dev/null || echo 0)"
+    [ "$(echo "$d > 0" | bc -l)" = 1 ] || { NEED=1; break; }
+  done
+fi
+
+if [ "$NEED" = 1 ]; then
   echo "==> 合成语料到 $C"
-  mkdir -p "$C"; i=0
+  # 先在临时目录整个建好再原子换上，避免中途失败留下半套语料
+  TMP="$C.tmp.$$"; rm -rf "$TMP"; mkdir -p "$TMP"
+  trap 'rm -rf "$TMP"' EXIT
+  i=0; PARTS=()
   while IFS= read -r line; do
     [ -n "$line" ] || continue
-    i=$((i+1)); n="$(printf 's%02d' $i)"
-    say -v Kanya -o "$C/$n.aiff" "$line"
-    ffmpeg -y -i "$C/$n.aiff" -ar 16000 -ac 1 "$C/$n.wav" -loglevel error
-    rm -f "$C/$n.aiff"
-  done < "$ROOT/scripts/thai-corpus.txt"
-  build() {  # $1=名字 $2=取前几句
-    ls "$C"/s*.wav | head -"$2" | sed "s|^|file '|;s|$|'|" > "$C/.concat"
-    ffmpeg -y -f concat -safe 0 -i "$C/.concat" -ar 16000 -ac 1 "$C/$1.wav" -loglevel error
-    rm -f "$C/.concat"
+    i=$((i+1)); n="$(printf 's%02d' "$i")"
+    say -v Kanya -o "$TMP/$n.aiff" "$line"
+    ffmpeg -y -i "$TMP/$n.aiff" -ar 16000 -ac 1 "$TMP/$n.wav" -loglevel error
+    rm -f "$TMP/$n.aiff"
+    PARTS+=("$TMP/$n.wav")
+  done < "$CORPUS_TXT"
+  [ "$i" -ge 6 ] || die "语料至少要 6 句，当前 $i 句"
+  build() {  # $1=名字 $2=取前几句。显式构造列表，不解析 ls 的输出
+    local out="$TMP/.concat"; : > "$out"
+    local k=0
+    for p in "${PARTS[@]}"; do
+      k=$((k+1)); [ "$k" -le "$2" ] || break
+      printf "file '%s'\n" "$p" >> "$out"
+    done
+    ffmpeg -y -f concat -safe 0 -i "$out" -ar 16000 -ac 1 "$TMP/$1.wav" -loglevel error
+    rm -f "$out"
   }
-  build len-short 2; build len-mid 6; build len-long "$i"
+  build len-short 2
+  build len-mid 6
+  build len-long "$i"
+  echo "$WANT" > "$TMP/.stamp"
+  rm -rf "$C"; mv "$TMP" "$C"
+  trap - EXIT
 fi
 
 dur() { ffprobe -v error -show_entries format=duration -of csv=p=0 "$1"; }
-run() {  # $1=模型 $2=wav → "墙钟秒 峰值RSS字节"
-  local o; o="$( { /usr/bin/time -l "$CLI" -m "$1" -f "$2" -l th -t "$THREADS" \
-      -bo 1 -bs 1 -np -nt >/dev/null; } 2>&1 )"
-  echo "$(awk '/ real/{print $1}' <<<"$o" | head -1) \
-        $(grep -o '[0-9]*  *maximum resident' <<<"$o" | grep -o '^[0-9]*')"
+
+# 一次运行 → "墙钟秒 峰值RSS字节"。
+#
+# `/usr/bin/time -l` 和被测程序的 stderr 混在同一个流里，所以两个字段都要
+# 锚定着取，并且校验解析结果确实是数字——解析失败若放任，会到 bc 那里才炸，
+# 报出来的错和真实原因八竿子打不着。
+run() {
+  local o secs rss
+  o="$( { /usr/bin/time -l "$1" -m "$2" -f "$3" -l th -t "$THREADS" \
+          -bo 1 -bs 1 -np -nt >/dev/null; } 2>&1 )" || die "whisper-cli 失败：$3"
+  secs="$(awk '$2=="real"{print $1; exit}' <<<"$o")"
+  rss="$(awk '/maximum resident set size/{print $1; exit}' <<<"$o")"
+  [[ "$secs" =~ ^[0-9]+\.?[0-9]*$ ]] || die "解析墙钟失败（/usr/bin/time 输出格式变了？）：$(head -3 <<<"$o")"
+  [[ "$rss"  =~ ^[0-9]+$ ]]          || die "解析峰值 RSS 失败：$(grep -i resident <<<"$o" | head -1)"
+  printf '%s %s\n' "$secs" "$rss"
 }
 
-DS=$(dur "$C/len-short.wav"); DM=$(dur "$C/len-mid.wav"); DL=$(dur "$C/len-long.wav")
-printf '语料时长档：%.1fs / %.1fs / %.1fs，线程 %s\n\n' "$DS" "$DM" "$DL" "$THREADS"
-printf '%-22s %7s %8s %8s %8s %9s %9s\n' 模型 体积MB 短-RTF 中-RTF 长-RTF 短-RSS 长-RSS
+DS="$(dur "$C/len-short.wav")"; DM="$(dur "$C/len-mid.wav")"; DL="$(dur "$C/len-long.wav")"
+printf '语料 %.1fs / %.1fs / %.1fs（自编合成，仅供性能测量）｜线程 %s｜whisper.cpp %s\n\n' \
+  "$DS" "$DM" "$DL" "$THREADS" "$(git -C "$WCPP" rev-parse --short HEAD 2>/dev/null || echo '?')"
+printf '%-24s %7s %8s %8s %8s %8s %8s  %s\n' 模型 体积MB 短RTF 中RTF 长RTF 短RSS 长RSS sha256
 for m in "$@"; do
   [ -f "$m" ] || { echo "跳过（不存在）：$m" >&2; continue; }
-  # 转换失败留下的残缺文件量化后仍是几 MB，挡在这里免得测出一堆没意义的数字
-  sz=$(stat -f%z "$m")
+  sz="$(stat -f%z "$m")"
+  # 转换失败留下的残件量化后仍只有几 MB。这只挡得住那一种坏法——
+  # 截断到几百 MB、量化错档、架构不对都挡不住，所以下面把 sha256 一起打出来，
+  # 出了问题至少能对上是哪个文件。
   [ "$sz" -gt 100000000 ] || { echo "跳过（只有 $((sz/1000000)) MB，多半是转换失败的残件）：$m" >&2; continue; }
-  read -r ts rs <<<"$(run "$m" "$C/len-short.wav")"
-  read -r tm _  <<<"$(run "$m" "$C/len-mid.wav")"
-  read -r tl rl <<<"$(run "$m" "$C/len-long.wav")"
-  printf '%-22s %7d %8.3f %8.3f %8.3f %9d %9d\n' "$(basename "$m" .bin)" \
-    $((sz/1000000)) "$(echo "$ts/$DS"|bc -l)" "$(echo "$tm/$DM"|bc -l)" \
-    "$(echo "$tl/$DL"|bc -l)" $((rs/1000000)) $((rl/1000000))
+  read -r ts rs <<<"$(run "$CLI" "$m" "$C/len-short.wav")"
+  read -r tm _  <<<"$(run "$CLI" "$m" "$C/len-mid.wav")"
+  read -r tl rl <<<"$(run "$CLI" "$m" "$C/len-long.wav")"
+  printf '%-24s %7d %8.3f %8.3f %8.3f %8d %8d  %s\n' "$(basename "$m" .bin)" \
+    $((sz/1000000)) \
+    "$(echo "$ts/$DS" | bc -l)" "$(echo "$tm/$DM" | bc -l)" "$(echo "$tl/$DL" | bc -l)" \
+    $((rs/1000000)) $((rl/1000000)) \
+    "$(shasum -a 256 "$m" | cut -c1-12)"
 done
