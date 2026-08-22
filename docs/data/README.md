@@ -33,13 +33,20 @@ ADR-0004 的数字从这里来。**保留原始与逐样本数据**，免得只�
 
 每个 `.bin` 的 sha256 前 12 位记在逐样本 JSON 与性能表里，用来对上是哪份产物。
 
-| 代号 | HF 仓库 | 转换 |
-|---|---|---|
-| `medium` | `biodatlab/whisper-th-medium-combined` | `convert-h5-to-ggml.py` 直转 |
-| `distill` | `biodatlab/distill-whisper-th-large-v3` | 同上 |
-| `turbo` | `typhoon-ai/typhoon-whisper-turbo` | **先用 transformers 以 fp32 重存**（原权重 bf16，转换脚本会崩） |
+| 代号 | HF 仓库 | revision | 转换 |
+|---|---|---|---|
+| `medium` | `biodatlab/whisper-th-medium-combined` | `eebf84255cc7f242a504f64ec09ec33d32903fe1` | `convert-h5-to-ggml.py` 直转 |
+| `distill` | `biodatlab/distill-whisper-th-large-v3` | `62df42cecab9f484226ad5f9afdb557552021bbb` | 同上 |
+| `turbo` | `typhoon-ai/typhoon-whisper-turbo` | `3c03fa84c26f172944422ceb8a4e88a2dbc08b10` | **先用 transformers 以 fp32 重存**（原权重 bf16，转换脚本会崩） |
 
 量化用 whisper.cpp 的 `quantize`，q5_0 / q8_0。
 
-⚠️ **未记录 HF revision。** 上游若更新过权重，重跑可能对不上号。
-这是本次基线的已知缺口，ADR 定稿前应补。
+⚠️ **revision 是事后补记的，不是下载时记录的。**
+下载发生在 2026-08-22，上面三个 sha 是当天稍晚从 HF API 查到的仓库 HEAD。
+**没有证据证明下载那一刻的 HEAD 与此相同**——若上游当天做过更新，就对不上。
+下次必须在下载时就记下来。
+
+同样没有记录：原始权重文件的 SHA-256、转换命令的脚本 commit。
+GGML 产物的 sha256 只存了**前 12 位**（在逐样本 JSON 与性能表里）。
+**所以「HF revision → 转换 → 量化产物」这条来源链是不完整的**，
+本基线属于「部分可复现」。

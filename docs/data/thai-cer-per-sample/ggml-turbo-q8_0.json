@@ -2,7 +2,7 @@
  "cli_sha256_12": "013a9e57f7d5",
  "elapsed_s": 120.9,
  "empty_output": 0,
- "model": "/private/tmp/claude-502/-Users-jason-Dev-tools-AgentEar/c1d933fa-4885-4e16-b8fd-a8859d1cd60c/scratchpad/ggml/turbo/ggml-turbo-q8_0.bin",
+ "model": "ggml-turbo-q8_0.bin",
  "model_sha256_12": "6c1aca53a64c",
  "n": 80,
  "norm": "NFC|lower|strip-space|strip-unicode-P|keep-ฯ",

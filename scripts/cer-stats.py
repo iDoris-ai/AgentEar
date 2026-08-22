@@ -26,8 +26,9 @@ CER 是语料级 micro average：`sum(edits) / sum(reference_len)`。
 1. **CI 跨 0 只说明这批数据没检出差异，不等于「无差异」、更不等于「等效」。**
    要声称等效，得先预定义非劣界（比如「q5 相对 q8 的 CER 恶化不超过 0.5 个
    百分点」），再看 CI 上界是否落在界内。本脚本会报 CI 上界，但**不替你定界**。
-2. 表里的比较若是看到结果后挑出来的，存在多重比较问题。
-   本脚本报告一组**预先写死**的比较，避免事后挑选。
+2. **`COMPARISONS` 不是预注册的。** 它是在第一批结果出来之后才固定进代码的，
+   作用只是让后续复算口径不漂移。所以这些比较是**探索性的**，
+   存在多重比较问题，且未做校正。看到「检出差异」时要记着这一点。
 """
 import json
 import os
@@ -49,6 +50,7 @@ def boot_ci(per, names, kind, n_boot, seed):
         idx = [names[rnd.randrange(N)] for _ in range(N)]
         vals.append(cer(per, idx, kind))
     vals.sort()
+    # 百分位取离散下标（非插值）。与 NumPy 默认的线性插值会有微小差异。
     return vals[int(0.025 * n_boot)], vals[int(0.975 * n_boot)]
 
 
@@ -64,7 +66,9 @@ def boot_paired(a, b, names, kind, n_boot, seed):
     return diffs[int(0.025 * n_boot)], diffs[int(0.975 * n_boot)]
 
 
-# 预先写死，避免看到结果后挑着报
+# ⚠️ **这不是预注册的比较集合。** 它是在结果已经产出之后固定下来的
+# （commit c5f1e55），作用是让后续复算口径不漂移，**不能宣称「事前指定」**。
+# 真要预注册，只能在下一轮新语料评测开始前先把方案定下来。
 COMPARISONS = [
     ("ggml-medium-q8_0", "ggml-medium-q5_0"),
     ("ggml-distill-q8_0", "ggml-distill-q5_0"),
@@ -91,11 +95,25 @@ def main() -> int:
         print(f"{d} 里没有结果文件", file=sys.stderr)
         return 1
 
-    names = sorted(next(iter(res.values()))["per_sample"])
+    if n_boot <= 0:
+        print("重采样次数必须为正", file=sys.stderr)
+        return 1
+    baseline_tag = next(iter(res))
+    baseline = res[baseline_tag]
+    names = sorted(baseline["per_sample"])
+    if not names:
+        print("逐样本数据为空", file=sys.stderr)
+        return 1
     for tag, r in res.items():
         if sorted(r["per_sample"]) != names:
             print(f"!! {tag} 的样本集与其他不一致，配对比较无效", file=sys.stderr)
             return 1
+        # 参考长度必须一致，否则是拿不同 normalization/reference 的结果在「配对」
+        for k in names:
+            if r["per_sample"][k]["cp_len"] != baseline["per_sample"][k]["cp_len"]:
+                print(f"!! {tag} 的参考长度与 {baseline_tag} 不一致（{k}），"
+                      f"归一化口径可能不同，配对无效", file=sys.stderr)
+                return 1
 
     print(f"n={len(names)} 句，自助法 {n_boot} 次，粒度 {KIND}，"
           f"种子 CI={SEED_CI}/配对={SEED_PAIRED}\n")
@@ -107,7 +125,7 @@ def main() -> int:
         print(f"{tag:24s} {pt:8.4f}  [{lo:.4f}, {hi:.4f}]  "
               f"{res[tag]['empty_output']:>4d}/{len(names)}  {res[tag]['model_sha256_12']}")
 
-    print("\n预先指定的配对比较（Δ = 左 − 右；CI 不跨 0 才算检出差异）：")
+    print("\n配对比较（事后固定的探索性比较组，未做多重校正；Δ = 左 − 右）：")
     for a, b in COMPARISONS:
         if a not in res or b not in res:
             print(f"  {a} / {b}：缺结果，跳过")

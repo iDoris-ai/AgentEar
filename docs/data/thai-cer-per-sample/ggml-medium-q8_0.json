@@ -2,7 +2,7 @@
  "cli_sha256_12": "013a9e57f7d5",
  "elapsed_s": 214.0,
  "empty_output": 0,
- "model": "/private/tmp/claude-502/-Users-jason-Dev-tools-AgentEar/c1d933fa-4885-4e16-b8fd-a8859d1cd60c/scratchpad/ggml/medium/ggml-medium-q8_0.bin",
+ "model": "ggml-medium-q8_0.bin",
  "model_sha256_12": "a2e7ef6b1eee",
  "n": 80,
  "norm": "NFC|lower|strip-space|strip-unicode-P|keep-ฯ",

@@ -45,8 +45,13 @@ def main() -> int:
         urllib.request.urlretrieve(PARQUET_URL, pq_path)
 
     rows = pq.read_table(pq_path).to_pylist()
-    # 等距采样，**排序键是 parquet 的原始行序**（不是文件名、不是 id）。
-    # 写清楚这一点：换个排序键会取到不同的句子，数字就对不上了。
+    # 固定步长采样，**排序键是 parquet 的原始行序**（不是文件名、不是 id）。
+    # 换个排序键会取到不同的句子，数字就对不上。
+    #
+    # ⚠️ 这是**固定步长**，不是覆盖全区间的等距采样：1021//80=12，
+    # 只取到索引 0..948，**最后 72 行永远抽不到**。
+    # 保持现状是为了不让已产出的数字失效；若将来重建评测集，
+    # 应改成 floor(i * len(rows) / want_n)。
     if want_n > len(rows):
         print(f"只有 {len(rows)} 条，取不到 {want_n} 条", file=sys.stderr)
         return 1
@@ -65,6 +70,7 @@ def main() -> int:
         sf.write(os.path.join(wav_dir, f"{name}.wav"), data, sr, subtype="PCM_16")
         manifest[name] = {
             "fleurs_id": r["id"],
+            "audio_sha256_16": hashlib.sha256(r["audio"]["bytes"]).hexdigest()[:16],
             "transcription": r["transcription"],
             "gender": r["gender"],
             "duration_s": round(len(data) / sr, 3),
@@ -75,10 +81,19 @@ def main() -> int:
               ensure_ascii=False, indent=1, sort_keys=True)
 
     # 和入库的 manifest 对账。对不上就是取到了不同的句子，数字不可比。
-    blob = json.dumps({k: v["transcription"] for k, v in manifest.items()},
-                      ensure_ascii=False, sort_keys=True).encode()
+    # 指纹要覆盖「取到的是不是同一批录音」，所以 id 和**音频字节**都得进去。
+    # 只按参考文本算的话，上游换了音频、文字没动，就检测不出来。
+    blob = json.dumps(
+        [[manifest[k]["fleurs_id"], manifest[k]["transcription"], manifest[k]["audio_sha256_16"]]
+         for k in sorted(manifest)] + [len(manifest), step],
+        ensure_ascii=False,
+    ).encode()
     digest = hashlib.sha256(blob).hexdigest()[:16]
-    print(f"取样 {len(manifest)} 条（步长 {step}），总时长 {total:.1f}s，参考文本指纹 {digest}")
+    n_uniq = len({v["fleurs_id"] for v in manifest.values()})
+    print(f"取样 {len(manifest)} 条录音（步长 {step}，唯一 fleurs_id {n_uniq} 个），"
+          f"总时长 {total:.1f}s，指纹 {digest}")
+    if n_uniq != len(manifest):
+        print(f"   注：{len(manifest) - n_uniq} 条与其他条目共用 prompt（同文本的不同录音）")
 
     if os.path.exists(MANIFEST):
         ref = json.load(open(MANIFEST))
@@ -89,8 +104,11 @@ def main() -> int:
         print("✓ 与入库 manifest 一致")
     else:
         json.dump({"n": len(manifest), "step": step, "refs_sha256_16": digest,
+                   "unique_fleurs_ids": n_uniq,
+                   "parquet_sha256": hashlib.sha256(open(pq_path,"rb").read()).hexdigest(),
                    "source": "google/fleurs th_th test, CC-BY-4.0",
-                   "sampling": "等距，排序键为 parquet 原始行序",
+                   "source_card": "https://huggingface.co/datasets/google/fleurs",
+                   "sampling": "固定步长，排序键为 parquet 原始行序；尾部 72 行未覆盖",
                    "items": manifest}, open(MANIFEST, "w"),
                   ensure_ascii=False, indent=1, sort_keys=True)
         print(f"已写入 {MANIFEST}")

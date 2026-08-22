@@ -94,7 +94,10 @@ def transcribe(cli: str, model: str, wav: str) -> str:
             capture_output=True, text=True, timeout=300,
         )
     except subprocess.TimeoutExpired as e:
-        raise SystemExit(f"!! 超时（300s）：{wav}\n{e}")
+        err = (e.stderr or b"").decode(errors="replace") if isinstance(e.stderr, bytes) else (e.stderr or "")
+        raise SystemExit(f"!! 超时（300s）：{wav}\n{err[-2000:]}")
+    except OSError as e:
+        raise SystemExit(f"!! 无法执行 {cli}：{e}")
     if p.returncode != 0:
         raise SystemExit(
             f"!! whisper-cli 退出码 {p.returncode}：{wav}\n{p.stderr[-2000:]}"
@@ -135,7 +138,7 @@ def main() -> int:
         }
 
     res = {
-        "model": os.path.abspath(model),
+        "model": os.path.basename(model),  # 不写绝对路径，那是本机私有信息
         "model_sha256_12": _sha12(model),
         "cli_sha256_12": _sha12(cli),
         "norm": "NFC|lower|strip-space|strip-unicode-P|keep-ฯ",
