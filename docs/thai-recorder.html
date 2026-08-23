@@ -1,0 +1,625 @@
+<!doctype html>
+<html lang="th">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<meta name="color-scheme" content="light dark">
+<title>บันทึกเสียงภาษาไทย — Thai Recording Session</title>
+<style>
+  :root {
+    --paper:      #EEF1EF;
+    --card-bg:    #FFFFFF;
+    --ink:        #141A1C;
+    --slate:      #55666B;
+    --hair:       #D3DAD8;
+    --signal:     #B8332B;
+    --signal-dim: #B8332B22;
+    --done:       #1F6B5C;
+    --focus:      #1F6B5C;
+    --shadow:     0 1px 2px rgba(20,26,28,.05), 0 8px 24px -12px rgba(20,26,28,.18);
+
+    --thai: "Noto Sans Thai", "Leelawadee UI", "Sukhumvit Set", Thonburi,
+            "Noto Sans Thai UI", system-ui, sans-serif;
+    --ui:   system-ui, -apple-system, "Segoe UI", sans-serif;
+    --mono: ui-monospace, "SF Mono", "Cascadia Mono", Menlo, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --paper:   #101617;
+      --card-bg: #172023;
+      --ink:     #E6EDEA;
+      --slate:   #93A6A9;
+      --hair:    #2A3639;
+      --signal:  #E2635A;
+      --signal-dim: #E2635A26;
+      --done:    #4FBFA5;
+      --focus:   #4FBFA5;
+      --shadow:  0 1px 2px rgba(0,0,0,.4), 0 10px 28px -14px rgba(0,0,0,.7);
+    }
+  }
+  :root[data-theme="dark"] {
+    --paper:#101617; --card-bg:#172023; --ink:#E6EDEA; --slate:#93A6A9;
+    --hair:#2A3639; --signal:#E2635A; --signal-dim:#E2635A26; --done:#4FBFA5;
+    --focus:#4FBFA5; --shadow:0 1px 2px rgba(0,0,0,.4), 0 10px 28px -14px rgba(0,0,0,.7);
+  }
+  :root[data-theme="light"] {
+    --paper:#EEF1EF; --card-bg:#FFFFFF; --ink:#141A1C; --slate:#55666B;
+    --hair:#D3DAD8; --signal:#B8332B; --signal-dim:#B8332B22; --done:#1F6B5C;
+    --focus:#1F6B5C; --shadow:0 1px 2px rgba(20,26,28,.05), 0 8px 24px -12px rgba(20,26,28,.18);
+  }
+
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--paper); color: var(--ink);
+    font-family: var(--ui); line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: 62rem; margin: 0 auto; padding: 2.5rem 1.25rem 6rem; }
+
+  /* ── 头部 ── */
+  header { display: flex; flex-direction: column; gap: .75rem; margin-bottom: 2rem; }
+  .eyebrow {
+    font-family: var(--mono); font-size: .7rem; letter-spacing: .14em;
+    text-transform: uppercase; color: var(--slate);
+  }
+  h1 {
+    font-family: var(--thai); font-size: clamp(1.6rem, 3.4vw, 2.3rem);
+    font-weight: 700; margin: 0; line-height: 1.45; text-wrap: balance;
+  }
+  .sub { color: var(--slate); max-width: 60ch; margin: 0; }
+
+  /* ── 提示条 ── */
+  .notice {
+    display: grid; grid-template-columns: auto 1fr; gap: .9rem;
+    background: var(--card-bg); border: 1px solid var(--hair);
+    border-left: 3px solid var(--signal);
+    border-radius: 3px; padding: 1rem 1.15rem; margin: 1.5rem 0 2rem;
+  }
+  .notice .mark {
+    font-family: var(--mono); font-size: .7rem; letter-spacing: .1em;
+    color: var(--signal); padding-top: .15rem;
+  }
+  .notice p { margin: 0 0 .5rem; }
+  .notice p:last-child { margin-bottom: 0; }
+  .notice .th { font-family: var(--thai); line-height: 1.9; }
+  .notice .en { color: var(--slate); font-size: .9rem; }
+
+  /* ── 状态条 ── */
+  .statusbar {
+    position: sticky; top: 0; z-index: 20;
+    display: flex; align-items: center; gap: 1rem; flex-wrap: wrap;
+    background: var(--paper); border-bottom: 1px solid var(--hair);
+    padding: .7rem 0; margin-bottom: 1.75rem;
+    font-family: var(--mono); font-size: .78rem;
+  }
+  .statusbar .grow { flex: 1; }
+  .pill {
+    display: inline-flex; align-items: center; gap: .45rem;
+    border: 1px solid var(--hair); border-radius: 2px;
+    padding: .25rem .55rem; color: var(--slate);
+  }
+  .pill.ok { color: var(--done); border-color: color-mix(in srgb, var(--done) 40%, transparent); }
+  .sizer { display: inline-flex; gap: .3rem; align-items: center; }
+  .sizer button {
+    font-family: var(--mono); font-size: .78rem; width: 1.9rem; height: 1.6rem;
+    border: 1px solid var(--hair); background: var(--card-bg); color: var(--ink);
+    border-radius: 2px; cursor: pointer;
+  }
+
+  /* ── 段落卡 ── */
+  .take {
+    background: var(--card-bg); border: 1px solid var(--hair);
+    border-radius: 4px; box-shadow: var(--shadow);
+    margin-bottom: 1.5rem; overflow: hidden;
+  }
+  .take[data-state="recording"] { border-color: var(--signal); }
+  .take[data-state="done"]      { border-color: color-mix(in srgb, var(--done) 45%, var(--hair)); }
+
+  .take-head {
+    display: flex; align-items: baseline; gap: .8rem; flex-wrap: wrap;
+    padding: .9rem 1.25rem; border-bottom: 1px solid var(--hair);
+  }
+  .take-no {
+    font-family: var(--mono); font-size: .72rem; letter-spacing: .12em;
+    color: var(--slate); text-transform: uppercase;
+  }
+  .take-title { font-family: var(--thai); font-weight: 600; }
+  .take-note { color: var(--slate); font-size: .82rem; margin-left: auto; }
+
+  /* 朗读区 —— 这是提词器，字号和行高优先 */
+  .script {
+    font-family: var(--thai); font-size: var(--read, 1.35rem);
+    line-height: 2.15; padding: 1.4rem 1.25rem;
+    width: 100%; border: 0; background: transparent; color: var(--ink);
+    resize: vertical; min-height: 8rem; display: block;
+  }
+  .script:focus-visible { outline: 2px solid var(--focus); outline-offset: -2px; }
+  .script::placeholder { color: var(--slate); }
+  .edit-hint {
+    font-family: var(--mono); font-size: .68rem; letter-spacing: .08em;
+    color: var(--slate); padding: 0 1.25rem 1rem; text-transform: uppercase;
+  }
+
+  /* 走带控制 */
+  .transport {
+    display: flex; align-items: center; gap: .7rem; flex-wrap: wrap;
+    padding: .85rem 1.25rem; border-top: 1px solid var(--hair);
+    background: color-mix(in srgb, var(--paper) 55%, var(--card-bg));
+  }
+  button.btn {
+    font-family: var(--ui); font-size: .88rem; font-weight: 500;
+    display: inline-flex; align-items: center; gap: .45rem;
+    padding: .5rem .9rem; border-radius: 3px; cursor: pointer;
+    border: 1px solid var(--hair); background: var(--card-bg); color: var(--ink);
+  }
+  button.btn:hover:not(:disabled) { border-color: var(--slate); }
+  button.btn:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+  button.btn:disabled { opacity: .38; cursor: not-allowed; }
+  button.rec { border-color: var(--signal); color: var(--signal); }
+  button.rec[data-on="1"] { background: var(--signal); color: #fff; }
+  .dot {
+    width: .6rem; height: .6rem; border-radius: 50%;
+    background: currentColor; flex: none;
+  }
+  button.rec[data-on="1"] .dot { animation: blink 1.1s steps(2, start) infinite; }
+  @keyframes blink { 50% { opacity: .25; } }
+  @media (prefers-reduced-motion: reduce) {
+    button.rec[data-on="1"] .dot { animation: none; }
+  }
+
+  .timer {
+    font-family: var(--mono); font-size: .95rem; font-variant-numeric: tabular-nums;
+    color: var(--slate); min-width: 4.2rem;
+  }
+  .take[data-state="recording"] .timer { color: var(--signal); }
+
+  /* 电平表 —— 防止「录了一段静音还不知道」 */
+  .meter {
+    flex: 1; min-width: 7rem; height: .5rem; border-radius: 2px;
+    background: var(--hair); overflow: hidden; position: relative;
+  }
+  .meter i {
+    display: block; height: 100%; width: 0%;
+    background: var(--done); transition: width .06s linear;
+  }
+  .meter.hot i { background: var(--signal); }
+  .meter-label {
+    font-family: var(--mono); font-size: .66rem; color: var(--slate);
+    letter-spacing: .08em;
+  }
+
+  audio { height: 2rem; max-width: 15rem; }
+
+  /* ── 收尾 ── */
+  .finish {
+    background: var(--card-bg); border: 1px solid var(--hair);
+    border-radius: 4px; padding: 1.3rem 1.25rem; margin-top: 2.5rem;
+  }
+  .finish h2 { font-family: var(--thai); font-size: 1.15rem; margin: 0 0 .8rem; }
+  .checklist { list-style: none; padding: 0; margin: 0 0 1.1rem; display: grid; gap: .5rem; }
+  .checklist li {
+    display: grid; grid-template-columns: 1.4rem 1fr; gap: .5rem;
+    font-family: var(--thai); line-height: 1.85;
+  }
+  .checklist .box { font-family: var(--mono); color: var(--slate); }
+  .checklist li[data-ok="1"] .box { color: var(--done); }
+  footer {
+    margin-top: 2rem; padding-top: 1.25rem; border-top: 1px solid var(--hair);
+    color: var(--slate); font-size: .82rem;
+  }
+  .err {
+    display: grid; gap: .45rem; padding: 0 1.25rem 1.1rem;
+    font-size: .88rem;
+  }
+  .err .th { font-family: var(--thai); line-height: 1.9; color: var(--signal); }
+  .err .en { color: var(--slate); }
+  .err code {
+    font-family: var(--mono); font-size: .72rem; color: var(--slate);
+    background: color-mix(in srgb, var(--slate) 10%, transparent);
+    padding: .35rem .5rem; border-radius: 2px;
+    overflow-x: auto; white-space: pre-wrap; word-break: break-all;
+  }
+  .err a { color: var(--focus); }
+
+  /* ── 退路 ── */
+  details.fallback {
+    background: var(--card-bg); border: 1px solid var(--hair);
+    border-left: 3px solid var(--slate);
+    border-radius: 3px; margin-top: 2rem; padding: 0;
+  }
+  details.fallback > summary {
+    cursor: pointer; padding: .95rem 1.25rem; font-weight: 500;
+    font-family: var(--thai); line-height: 1.8;
+  }
+  details.fallback > summary:focus-visible { outline: 2px solid var(--focus); outline-offset: -2px; }
+  details.fallback[open] > summary { border-bottom: 1px solid var(--hair); }
+  .fb-body { padding: 1.1rem 1.25rem; display: grid; gap: .8rem; }
+  .fb-body ol { margin: 0; padding-left: 1.3rem; display: grid; gap: .55rem; }
+  .fb-body li { font-family: var(--thai); line-height: 1.9; }
+  .fb-body .en { font-family: var(--ui); color: var(--slate); font-size: .88rem; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div class="eyebrow">Speech recognition test · เทสต์ระบบถอดเสียง</div>
+    <h1>ช่วยอ่านออกเสียงและอัดเสียงให้หน่อยครับ</h1>
+    <p class="sub">
+      We're testing how well local speech-recognition models handle Thai speech that
+      contains English technical terms. Three short passages — about 90 seconds of
+      reading in total. Everything stays on your computer; nothing is uploaded.
+    </p>
+  </header>
+
+  <div class="notice">
+    <div class="mark">อ่านก่อน<br>READ&nbsp;FIRST</div>
+    <div>
+      <p class="th"><strong>ข้อความข้างล่างเขียนโดยคนที่ไม่ใช่เจ้าของภาษา
+      อาจมีจุดที่ผิดหรือไม่เป็นธรรมชาติ</strong> — กรุณาแก้ให้เป็นภาษาไทยที่เป็นธรรมชาติก่อน
+      แล้วค่อยอ่านตามฉบับที่แก้แล้ว ข้อความแก้ไขได้โดยตรงในหน้านี้</p>
+      <p class="en">The Thai below was written by a non-native speaker and may be wrong or
+      unnatural. <strong>Please fix it first</strong> — the text boxes are editable —
+      then read your corrected version. The corrected text is what we score against,
+      so it must match what you actually say.</p>
+      <p class="en"><strong>Say the English terms the way you normally would</strong>
+      when speaking Thai. A Thai accent is exactly what we're testing — please don't
+      force a native-English pronunciation.</p>
+    </div>
+  </div>
+
+  <div class="statusbar">
+    <span class="pill" id="micPill">◌ ไมโครโฟน · mic not started</span>
+    <span class="pill" id="progPill">0 / 3 อัดแล้ว · recorded</span>
+    <span class="grow"></span>
+    <span class="sizer">
+      <span class="meter-label">ขนาดตัวอักษร</span>
+      <button type="button" id="fontDown" aria-label="ตัวอักษรเล็กลง · smaller text">A−</button>
+      <button type="button" id="fontUp" aria-label="ตัวอักษรใหญ่ขึ้น · larger text">A+</button>
+    </span>
+  </div>
+
+  <div id="takes"></div>
+
+  <details class="fallback" id="fallback">
+    <summary>ถ้าอัดในหน้านี้ไม่ได้ — ใช้มือถืออัดแทนได้เลย · Can't record here? Use your phone instead</summary>
+    <div class="fb-body">
+      <p class="en">The recorder above needs microphone permission, which some embedded
+      pages simply cannot get. That's not something you can fix on your side — and it
+      doesn't matter, because a plain phone recording works just as well for us.</p>
+      <ol>
+        <li>แก้ข้อความทั้ง 3 ตอนด้านบนให้เป็นภาษาไทยที่เป็นธรรมชาติ แล้วกด
+          <strong>“ดาวน์โหลดข้อความที่แก้แล้ว”</strong> (ปุ่มด้านล่าง)
+          <div class="en">Fix the three passages above, then hit “Download corrected text”.</div></li>
+        <li>ใช้แอปอัดเสียงในมือถือ อัด <strong>3 ไฟล์แยกกัน</strong> ตอนที่ 1 / 2 / 3
+          <div class="en">Record the three passages as three separate files with your phone's
+          voice recorder — in a quiet room, at your normal speaking pace.</div></li>
+        <li>ส่งไฟล์เสียง (m4a / mp3 / wav อะไรก็ได้) พร้อมไฟล์ข้อความกลับมา
+          <div class="en">Send the audio (any format — m4a, mp3, wav) together with the text file.
+          We'll convert the format on our end.</div></li>
+      </ol>
+      <p class="en"><strong>Format doesn't matter.</strong> Whatever your phone produces is
+      fine — please don't spend time converting anything.</p>
+    </div>
+  </details>
+
+  <section class="finish">
+    <h2>ส่งกลับอะไรบ้าง · What to send back</h2>
+    <ul class="checklist" id="checklist">
+      <li data-ok="0"><span class="box">[ ]</span><span>ไฟล์เสียง 3 ไฟล์ (ตอนที่ 1–3) · Three audio files</span></li>
+      <li data-ok="0"><span class="box">[ ]</span><span><strong>ข้อความที่แก้แล้ว</strong> — กดปุ่มข้างล่าง · <strong>The corrected text</strong> — button below</span></li>
+      <li data-ok="0"><span class="box">[ ]</span><span>(ถ้าสะดวก) ตอนที่ 4 พูดสด · (Optional) Passage 4, unscripted</span></li>
+    </ul>
+    <button class="btn" id="dlText" type="button">⤓ ดาวน์โหลดข้อความที่แก้แล้ว · Download corrected text</button>
+  </section>
+
+  <footer>
+    <p style="margin:0 0 .6rem">
+      อัดเสร็จแล้ว<strong>ต้องกดปุ่ม “บันทึกเป็น WAV” เอง</strong> ไฟล์จะไปอยู่ในโฟลเดอร์
+      Downloads ของเครื่องคุณ (ชื่อไฟล์เช่น <code>th-p1-devops.wav</code>) —
+      เสียงจะไม่ถูกเก็บไว้อัตโนมัติ ถ้าปิดหน้านี้ก่อนกดบันทึก เสียงจะหายครับ
+    </p>
+    <p style="margin:0 0 .6rem">
+      Recordings are <strong>not saved automatically</strong> — press
+      “Save WAV” on each passage and the file lands in your Downloads folder
+      (named e.g. <code>th-p1-devops.wav</code>). Close the page before saving and
+      the recording is gone.
+    </p>
+    <p style="margin:0">
+      เสียงและข้อความทั้งหมดอยู่ในเครื่องของคุณเท่านั้น ไม่มีการอัปโหลด ·
+      All audio and text stay on your machine — nothing is uploaded anywhere.
+      WAV 16 kHz mono.
+    </p>
+  </footer>
+</div>
+
+<script>
+const PASSAGES = [
+  { id: "p1-devops", no: "ตอนที่ 1 · Passage 1", title: "DevOps",
+    note: "ศัพท์อังกฤษเยอะ · dense English terms",
+    text: `สวัสดีครับ วันนี้ผมจะอธิบายวิธี deploy ระบบของเราขึ้น production
+เราใช้ Docker สร้าง container แล้วส่งขึ้น Kubernetes cluster
+ก่อน merge pull request ทุกครั้ง ต้องรัน unit test ให้ผ่านก่อน
+ถ้า build ไม่ผ่าน ระบบ CI จะแจ้งเตือนใน Slack ทันที
+ฐานข้อมูลเราใช้ PostgreSQL ส่วน cache ใช้ Redis
+ตอนนี้เรามี server ทั้งหมด 12 เครื่อง แบ่งเป็น 3 zone
+ปัญหาที่เจอบ่อยที่สุดคือ memory leak ใน service ตัวเก่า
+พรุ่งนี้เช้าเก้าโมงครึ่ง เราจะ release version ใหม่ครับ` },
+
+  { id: "p2-collab", no: "ตอนที่ 2 · Passage 2", title: "ทำงานร่วมกัน · Team collaboration",
+    note: "ศัพท์อังกฤษปานกลาง · moderate English",
+    text: `เมื่อวานผม review code ของทีมแล้ว เจอ bug อยู่สองสามจุด
+ช่วย fix แล้ว push ขึ้น branch develop ภายในวันนี้ด้วยนะครับ
+ผมจะ comment รายละเอียดไว้ใน GitHub ให้ดู
+เรื่อง performance ตอนนี้ API ตอบกลับช้ากว่า 2 วินาที
+ต้องหาวิธี optimize query ก่อนที่ลูกค้าจะร้องเรียน
+บ่ายนี้มีประชุมกับทีม design ตอนบ่าย 2 โมง
+อย่าลืมอัปเดต document ใน Notion ด้วยนะครับ
+ขอบคุณมากครับ ไว้เจอกันสัปดาห์หน้า` },
+
+  { id: "p3-pure", no: "ตอนที่ 3 · Passage 3", title: "ภาษาไทยล้วน · Thai only",
+    note: "ไม่มีคำอังกฤษเลย — ใช้เป็นตัวเปรียบเทียบ · control, no English",
+    text: `เมื่อเช้าฝนตกหนักมาก ทำให้การจราจรติดขัดกว่าปกติ
+ผมออกจากบ้านตั้งแต่หกโมงครึ่ง แต่ยังไปถึงที่ทำงานสาย
+ช่วงนี้อากาศเปลี่ยนแปลงบ่อย หลายคนในทีมไม่สบาย
+สัปดาห์หน้าผมจะลาพักร้อนสามวัน ไปเที่ยวกับครอบครัวที่เชียงใหม่
+ถ้ามีเรื่องด่วนติดต่อผมทางโทรศัพท์ได้ตลอดเวลา
+ขอให้ทุกคนดูแลสุขภาพด้วยนะครับ` },
+
+  { id: "p4-free", no: "ตอนที่ 4 · Passage 4", title: "พูดสด · Unscripted",
+    note: "ไม่บังคับ · optional — no script needed",
+    text: "", optional: true,
+    prompt: `ไม่ต้องมีสคริปต์ครับ — พูดสัก 2–3 นาทีเกี่ยวกับงานที่ทำอยู่ตอนนี้
+ตามสบาย มีหยุดคิด มี "เอ่อ" ได้เลย นั่นแหละคือสิ่งที่เราอยากเก็บ
+
+No script — just talk for 2–3 minutes about what you're working on.
+Pauses, filler words and false starts are welcome: that's the point.
+Read speech is always cleaner than real speech, and we want the real thing.` },
+];
+
+const TARGET_SR = 16000;
+let stream = null, ctx = null, analyser = null, rafId = null;
+const state = new Map();
+
+/* ── WAV 编码：16-bit PCM，单声道 ── */
+function encodeWav(samples, sampleRate) {
+  const buf = new ArrayBuffer(44 + samples.length * 2);
+  const v = new DataView(buf);
+  const str = (o, s) => { for (let i = 0; i < s.length; i++) v.setUint8(o + i, s.charCodeAt(i)); };
+  str(0, "RIFF"); v.setUint32(4, 36 + samples.length * 2, true); str(8, "WAVE");
+  str(12, "fmt "); v.setUint32(16, 16, true); v.setUint16(20, 1, true);
+  v.setUint16(22, 1, true); v.setUint32(24, sampleRate, true);
+  v.setUint32(28, sampleRate * 2, true); v.setUint16(32, 2, true); v.setUint16(34, 16, true);
+  str(36, "data"); v.setUint32(40, samples.length * 2, true);
+  let o = 44;
+  for (let i = 0; i < samples.length; i++, o += 2) {
+    const s = Math.max(-1, Math.min(1, samples[i]));
+    v.setInt16(o, s < 0 ? s * 0x8000 : s * 0x7FFF, true);
+  }
+  return new Blob([buf], { type: "audio/wav" });
+}
+
+/* 录下来是 webm/opus，解码后用 OfflineAudioContext 重采样到 16 kHz 单声道 */
+async function toWav16k(blob) {
+  const ab = await blob.arrayBuffer();
+  const tmp = new (window.AudioContext || window.webkitAudioContext)();
+  const decoded = await tmp.decodeAudioData(ab);
+  const frames = Math.ceil(decoded.duration * TARGET_SR);
+  const off = new OfflineAudioContext(1, frames, TARGET_SR);
+  const src = off.createBufferSource();
+  src.buffer = decoded; src.connect(off.destination); src.start();
+  const rendered = await off.startRendering();
+  tmp.close();
+  return encodeWav(rendered.getChannelData(0), TARGET_SR);
+}
+
+/* 环境自检。「没弹窗就失败」和「用户拒绝了」是两回事，得分清楚，
+   否则会给出「去浏览器里允许」这种在嵌套 iframe 下根本无效的建议。 */
+function diagnose() {
+  const d = {
+    secure: window.isSecureContext,
+    framed: window.self !== window.top,
+    hasApi: !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia),
+    policy: null,
+  };
+  try {
+    if (document.featurePolicy && document.featurePolicy.allowsFeature)
+      d.policy = document.featurePolicy.allowsFeature("microphone");
+  } catch (_) {}
+  return d;
+}
+
+/* 返回 null 表示成功；否则返回 {th, en, detail} */
+async function ensureMic() {
+  if (stream) return null;
+  const pill = document.getElementById("micPill");
+  const d = diagnose();
+
+  if (!d.hasApi || !d.secure) {
+    pill.textContent = "✕ เบราว์เซอร์ไม่รองรับ · unsupported";
+    return { th: "เบราว์เซอร์นี้ใช้ไมโครโฟนไม่ได้ (ต้องเปิดผ่าน https)",
+             en: "This browser can't access the microphone here (needs a secure https page).",
+             detail: `secure=${d.secure} api=${d.hasApi}` };
+  }
+
+  try {
+    // 关掉浏览器的降噪/AGC：评测要的是原始音频，处理过的会掩盖真实表现
+    stream = await navigator.mediaDevices.getUserMedia({
+      audio: { channelCount: 1, echoCancellation: false,
+               noiseSuppression: false, autoGainControl: false }
+    });
+    ctx = new (window.AudioContext || window.webkitAudioContext)();
+    analyser = ctx.createAnalyser();
+    analyser.fftSize = 1024;
+    ctx.createMediaStreamSource(stream).connect(analyser);
+    pill.textContent = "● ไมโครโฟนพร้อม · mic ready";
+    pill.classList.add("ok");
+    return null;
+  } catch (e) {
+    pill.textContent = "✕ เปิดไมโครโฟนไม่ได้ · mic unavailable";
+    const detail = `${e.name}: ${e.message} · framed=${d.framed} policy=${d.policy}`;
+
+    // 页面被嵌在 iframe 里、且 iframe 没授予 microphone 权限时，
+    // 浏览器**不会弹窗**就直接拒绝。这种情况用户在自己这边怎么点都没用。
+    if (d.framed && d.policy === false) {
+      return { th: "หน้านี้ถูกฝังอยู่ในกรอบที่ไม่อนุญาตให้ใช้ไมโครโฟน — แก้ที่ฝั่งคุณไม่ได้ครับ กรุณาใช้วิธีอัดเสียงด้วยมือถือแทน (ดูด้านล่าง)",
+               en: "This page is embedded in a frame that doesn't permit microphone access. Nothing you can change on your side — please use the phone-recorder route instead (see below).",
+               detail };
+    }
+    if (e.name === "NotAllowedError" && d.framed) {
+      return { th: "เบราว์เซอร์ปฏิเสธการใช้ไมโครโฟนโดยไม่ถามก่อน มักเกิดจากหน้านี้ถูกฝังในกรอบ — ลองเปิดหน้านี้ในแท็บใหม่ ถ้ายังไม่ได้ กรุณาใช้วิธีอัดด้วยมือถือ (ดูด้านล่าง)",
+               en: "The browser refused without asking — usually because this page is embedded in a frame. Try opening it in its own tab; if that still fails, use the phone-recorder route below.",
+               detail };
+    }
+    if (e.name === "NotAllowedError") {
+      return { th: "ไมโครโฟนถูกปิดกั้น กรุณากดไอคอนกุญแจ/กล้องบนแถบที่อยู่ แล้วอนุญาตไมโครโฟน จากนั้นโหลดหน้าใหม่",
+               en: "Microphone blocked. Click the lock icon in the address bar, allow the microphone, then reload.",
+               detail };
+    }
+    if (e.name === "NotFoundError" || e.name === "OverconstrainedError") {
+      return { th: "ไม่พบไมโครโฟน กรุณาเสียบไมค์หรือเลือกอุปกรณ์เสียงในระบบก่อน",
+               en: "No microphone found. Connect one or select an input device in your system settings.",
+               detail };
+    }
+    return { th: "เปิดไมโครโฟนไม่สำเร็จ กรุณาใช้วิธีอัดด้วยมือถือ (ดูด้านล่าง)",
+             en: "Could not open the microphone. Please use the phone-recorder route below.",
+             detail };
+  }
+}
+
+function levelLoop() {
+  const buf = new Uint8Array(analyser.fftSize);
+  const tick = () => {
+    analyser.getByteTimeDomainData(buf);
+    let peak = 0;
+    for (let i = 0; i < buf.length; i++) peak = Math.max(peak, Math.abs(buf[i] - 128) / 128);
+    document.querySelectorAll('.take[data-state="recording"] .meter').forEach(m => {
+      m.querySelector("i").style.width = Math.min(100, peak * 160) + "%";
+      m.classList.toggle("hot", peak > 0.92);
+    });
+    rafId = requestAnimationFrame(tick);
+  };
+  tick();
+}
+
+const mmss = s => String(Math.floor(s / 60)).padStart(2, "0") + ":" + String(Math.floor(s % 60)).padStart(2, "0");
+
+function refreshProgress() {
+  const need = PASSAGES.filter(p => !p.optional);
+  const got = need.filter(p => state.get(p.id)?.wav).length;
+  document.getElementById("progPill").textContent = `${got} / ${need.length} อัดแล้ว · recorded`;
+  document.getElementById("progPill").classList.toggle("ok", got === need.length);
+  const items = document.querySelectorAll("#checklist li");
+  items[0].dataset.ok = got === need.length ? "1" : "0";
+  items[0].querySelector(".box").textContent = got === need.length ? "[✓]" : "[ ]";
+  items[2].dataset.ok = state.get("p4-free")?.wav ? "1" : "0";
+  items[2].querySelector(".box").textContent = state.get("p4-free")?.wav ? "[✓]" : "[ ]";
+}
+
+function buildTake(p) {
+  const el = document.createElement("section");
+  el.className = "take"; el.dataset.state = "idle"; el.id = "take-" + p.id;
+  el.innerHTML = `
+    <div class="take-head">
+      <span class="take-no">${p.no}</span>
+      <span class="take-title">${p.title}</span>
+      <span class="take-note">${p.note}</span>
+    </div>
+    ${p.optional
+      ? `<div class="script" style="white-space:pre-wrap;color:var(--slate)">${p.prompt}</div>`
+      : `<textarea class="script" spellcheck="false" aria-label="${p.title}">${p.text}</textarea>
+         <div class="edit-hint">แก้ข้อความตรงนี้ได้เลย · edit here — the corrected text is the reference</div>`}
+    <div class="transport">
+      <button class="btn rec" type="button" data-on="0"><span class="dot"></span><span class="lbl">อัดเสียง · Record</span></button>
+      <span class="timer">00:00</span>
+      <span class="meter"><i></i></span>
+      <audio controls hidden></audio>
+      <button class="btn dl" type="button" disabled>⤓ บันทึกเป็น WAV · Save WAV</button>
+    </div>
+    <div class="err" hidden></div>`;
+
+  const recBtn = el.querySelector(".rec"), lbl = el.querySelector(".lbl");
+  const timer = el.querySelector(".timer"), audio = el.querySelector("audio");
+  const dlBtn = el.querySelector(".dl"), err = el.querySelector(".err");
+  let mr = null, chunks = [], t0 = 0, tickId = 0;
+
+  recBtn.addEventListener("click", async () => {
+    if (recBtn.dataset.on === "1") { mr && mr.stop(); return; }
+    const problem = await ensureMic();
+    if (problem) {
+      err.hidden = false;
+      err.innerHTML = `<span class="th">${problem.th}</span>
+        <span class="en">${problem.en}</span>
+        <code>${problem.detail}</code>
+        <a href="#fallback">↓ วิธีอัดด้วยมือถือ · phone-recorder route</a>`;
+      document.getElementById("fallback").open = true;
+      return;
+    }
+    err.hidden = true;
+    chunks = [];
+    mr = new MediaRecorder(stream);
+    mr.ondataavailable = e => e.data.size && chunks.push(e.data);
+    mr.onstop = async () => {
+      clearInterval(tickId);
+      recBtn.dataset.on = "0"; lbl.textContent = "อัดใหม่ · Re-record";
+      el.dataset.state = "done";
+      el.querySelector(".meter i").style.width = "0%";
+      try {
+        const wav = await toWav16k(new Blob(chunks, { type: mr.mimeType }));
+        state.set(p.id, { wav });
+        audio.src = URL.createObjectURL(wav); audio.hidden = false;
+        dlBtn.disabled = false;
+        refreshProgress();
+      } catch (e) {
+        err.hidden = false;
+        err.textContent = "แปลงไฟล์เสียงไม่สำเร็จ กรุณาอัดใหม่ · Could not convert the recording — please record again.";
+        el.dataset.state = "idle";
+      }
+    };
+    mr.start();
+    t0 = Date.now();
+    recBtn.dataset.on = "1"; lbl.textContent = "หยุด · Stop";
+    el.dataset.state = "recording";
+    timer.textContent = "00:00";
+    tickId = setInterval(() => { timer.textContent = mmss((Date.now() - t0) / 1000); }, 200);
+    if (!rafId) levelLoop();
+  });
+
+  dlBtn.addEventListener("click", () => {
+    const w = state.get(p.id)?.wav; if (!w) return;
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(w); a.download = `th-${p.id}.wav`; a.click();
+  });
+
+  return el;
+}
+
+const takesEl = document.getElementById("takes");
+PASSAGES.forEach(p => takesEl.appendChild(buildTake(p)));
+
+/* 字号：泰文有上下叠加的符号，念稿时字号是刚需不是装饰 */
+let readSize = 1.35;
+const applySize = () => document.documentElement.style.setProperty("--read", readSize + "rem");
+document.getElementById("fontUp").onclick = () => { readSize = Math.min(2.4, readSize + .15); applySize(); };
+document.getElementById("fontDown").onclick = () => { readSize = Math.max(1, readSize - .15); applySize(); };
+applySize();
+
+document.getElementById("dlText").addEventListener("click", () => {
+  let out = "# ข้อความที่แก้แล้ว / Corrected passages\n";
+  out += "# ใช้ข้อความนี้เป็นเฉลย — ต้องตรงกับที่อ่านจริง\n";
+  out += "# This is the scoring reference — it must match what was actually said.\n";
+  PASSAGES.filter(p => !p.optional).forEach(p => {
+    const ta = document.querySelector(`#take-${p.id} .script`);
+    out += `\n## ${p.id}  (${p.title})\n${ta.value.trim()}\n`;
+  });
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(new Blob([out], { type: "text/plain;charset=utf-8" }));
+  a.download = "thai-passages-corrected.txt"; a.click();
+  const li = document.querySelectorAll("#checklist li")[1];
+  li.dataset.ok = "1"; li.querySelector(".box").textContent = "[✓]";
+});
+
+refreshProgress();
+</script>
+</body>
+</html>
