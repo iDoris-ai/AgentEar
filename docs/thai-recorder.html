@@ -391,14 +391,22 @@ const TARGET_SR = 16000;
 
 /* ── 全局录音会话 ──
    一次只允许一路录音。各段按钮独立的话，用户能同时开几路 MediaRecorder，
-   录出来几个文件其实是同一段输入。 */
-const session = { stream: null, ctx: null, analyser: null, rafId: null,
-                  activeId: null, converting: 0,
-                  // 申请麦克风是异步的，权限弹窗期间必须已经占住锁，
-                  // 否则连点两下会开出两路录音并互相覆盖 stream
-                  acquiringId: null,
-                  // 页面隐藏时 +1，让在飞的转换回来后知道自己已过期
-                  epoch: 0 };
+   录出来几个文件其实是同一段输入。
+
+   **用单一持有者令牌，而不是「计数 + passage id」。** 前两版栽在同一处：
+   裸计数表达不了「谁有权改共享状态」——旧回调会消耗新任务的计数、
+   清掉新会话的 activeId，而 Math.max(0,…) 只挡住了负数挡不住这个。
+   现在任何回调改 session 之前先验证 `owns(myToken)`；不是自己的就什么都不碰。 */
+const session = {
+  stream: null, ctx: null, analyser: null, rafId: null,
+  // { token, id, phase: "acquiring" | "recording" | "converting" }
+  holder: null,
+  // 页面隐藏时 +1。让在飞的异步工作知道自己已跨代。
+  epoch: 0,
+};
+let tokenSeq = 0;
+const owns = t => !!session.holder && session.holder.token === t;
+
 const state = new Map();
 const takes = new Map();   // id → { setBusy, clearResult }
 
@@ -433,7 +441,7 @@ async function toWav16k(blob) {
     // 失败路径也要关，否则每次转换失败都漏一个 AudioContext
     try { await tmp.close(); } catch (_) {}
   }
-  // 用 length/sampleRate 换算，不用浮点的 duration，避免边界上差一帧
+  // 用 length/sampleRate 换算，不用浮点 duration，避免边界上差一帧
   const frames = Math.max(1, Math.round(decoded.length * TARGET_SR / decoded.sampleRate));
   const off = new OfflineAudioContext(1, frames, TARGET_SR);
   const src = off.createBufferSource();
@@ -465,6 +473,7 @@ function diagnose() {
 
 const micPill = () => document.getElementById("micPill");
 
+/* 不看守卫，直接放掉一切。只给 pagehide 和「确认自己是持有者」的路径用。 */
 function forceRelease() {
   if (session.rafId) { cancelAnimationFrame(session.rafId); session.rafId = null; }
   if (session.stream) { session.stream.getTracks().forEach(t => t.stop()); session.stream = null; }
@@ -476,26 +485,22 @@ function forceRelease() {
   p.classList.remove("ok");
 }
 
-/* 只在真的空闲时释放。忙的时候什么都不做——**不要靠改业务计数来绕过守卫**，
-   那会让还在执行的 finally 把计数减成负数。 */
+/* 只在无人持有时释放。**不要靠改计数来绕过它** —— 前两版就是栽在这。 */
 function releaseMic() {
-  if (session.activeId || session.acquiringId || session.converting > 0) return;
+  if (session.holder) return;
   forceRelease();
 }
 
 window.addEventListener("pagehide", () => {
-  // 提高 epoch 而不是清零计数：在飞的转换回来时会发现自己过期，
-  // 直接退出且不再碰任何状态
   session.epoch++;
-  session.activeId = null;
-  session.acquiringId = null;
+  session.holder = null;      // 直接放弃持有权；在飞的回调会因 owns() 失败而不碰状态
   forceRelease();
 });
 window.addEventListener("pageshow", e => {
-  // 从 BFCache 恢复的页面，UI 可能还停在「正在录音」，而资源早已释放
+  // 从 BFCache 恢复：资源早已释放，但 UI 可能还停在「正在录音」。
+  // 这里**只复位 UI，不碰任何计数**——holder 在 pagehide 时就已置空。
   if (!e.persisted) return;
-  session.converting = 0;
-  document.querySelectorAll('.take').forEach(el => {
+  document.querySelectorAll(".take").forEach(el => {
     if (el.dataset.state === "recording" || el.dataset.state === "converting") {
       el.dataset.state = "idle";
       const s = el.querySelector(".status");
@@ -507,8 +512,10 @@ window.addEventListener("pageshow", e => {
   syncLocks();
 });
 
-/* 成功返回 null；失败返回 {th, en, detail} */
-async function acquireMic() {
+/* 成功返回 null；失败返回 {th, en, detail}；被取代返回 {superseded:true}。
+   `token` 用来判断申请回来时自己是否还是持有者——旧请求晚回来时，
+   要自己关掉自己申请到的 track，不能写进 session 覆盖新会话的资源。 */
+async function acquireMic(token) {
   const d = diagnose();
   if (!d.secure || !d.gum || !d.rec || !d.ac || !d.oac) {
     micPill().textContent = "✕ เบราว์เซอร์ไม่รองรับ · unsupported";
@@ -518,29 +525,19 @@ async function acquireMic() {
   }
   if (session.stream) return null;
 
+  let got = null;
   try {
     // 关掉浏览器的降噪/AGC：评测要的是原始音频，处理过的会掩盖真实表现
-    session.stream = await navigator.mediaDevices.getUserMedia({
+    got = await navigator.mediaDevices.getUserMedia({
       audio: { channelCount: 1, echoCancellation: false,
                noiseSuppression: false, autoGainControl: false }
     });
-    const AC = window.AudioContext || window.webkitAudioContext;
-    session.ctx = new AC();
-    session.analyser = session.ctx.createAnalyser();
-    session.analyser.fftSize = 1024;
-    session.ctx.createMediaStreamSource(session.stream).connect(session.analyser);
-    const p = micPill();
-    p.textContent = "● ไมโครโฟนพร้อม · mic ready";
-    p.classList.add("ok");
-    return null;
   } catch (e) {
-    if (session.stream) { session.stream.getTracks().forEach(t => t.stop()); session.stream = null; }
-    if (session.ctx) { session.ctx.close().catch(() => {}); session.ctx = null; }
+    if (!owns(token)) return { superseded: true };
     micPill().textContent = "✕ เปิดไมโครโฟนไม่ได้ · mic unavailable";
     const detail = `${e.name}: ${e.message} · framed=${d.framed} policy=${d.policy}`;
     const phone = " กรุณาใช้วิธีอัดด้วยมือถือ (ดูด้านล่าง)";
     const phoneEn = " Please use the phone-recorder route below.";
-
     if (d.framed && d.policy === false) {
       return { th: "หน้านี้ถูกฝังอยู่ในกรอบที่ไม่อนุญาตให้ใช้ไมโครโฟน — แก้ที่ฝั่งคุณไม่ได้ครับ" + phone,
                en: "This page is embedded in a frame that doesn't permit microphone access — nothing you can change on your side." + phoneEn,
@@ -550,31 +547,48 @@ async function acquireMic() {
       case "NotAllowedError":
         return d.framed
           ? { th: "เบราว์เซอร์ปฏิเสธการใช้ไมโครโฟน อาจเพราะคุณกดไม่อนุญาต หรือเพราะหน้านี้ถูกฝังในกรอบ — ลองเปิดในแท็บใหม่ ถ้ายังไม่ได้" + phone,
-              en: "The browser refused microphone access — either you declined, or this page is embedded in a frame. Try opening it in its own tab; if that still fails," + phoneEn,
-              detail }
+              en: "The browser refused microphone access — either you declined, or this page is embedded in a frame. Try opening it in its own tab; if that still fails," + phoneEn, detail }
           : { th: "ไมโครโฟนถูกปิดกั้น กรุณากดไอคอนกุญแจบนแถบที่อยู่ อนุญาตไมโครโฟน แล้วโหลดหน้าใหม่",
-              en: "Microphone blocked. Click the lock icon in the address bar, allow the microphone, then reload.",
-              detail };
+              en: "Microphone blocked. Click the lock icon in the address bar, allow the microphone, then reload.", detail };
       case "NotFoundError": case "OverconstrainedError":
         return { th: "ไม่พบไมโครโฟน กรุณาเสียบไมค์หรือเลือกอุปกรณ์เสียงในระบบก่อน",
-                 en: "No microphone found. Connect one or pick an input device in your system settings.",
-                 detail };
+                 en: "No microphone found. Connect one or pick an input device in your system settings.", detail };
       case "NotReadableError": case "AbortError":
         return { th: "เปิดไมโครโฟนไม่ได้ อาจมีแอปอื่นใช้อยู่ หรือระบบไม่อนุญาต ลองปิดแอปที่ใช้ไมค์แล้วลองใหม่",
-                 en: "Could not open the microphone — another app may be using it, or the OS is blocking it. Close other apps using the mic and try again.",
-                 detail };
+                 en: "Could not open the microphone — another app may be using it, or the OS is blocking it. Close other apps using the mic and try again.", detail };
       default:
-        return { th: "เปิดไมโครโฟนไม่สำเร็จ" + phone,
-                 en: "Could not open the microphone." + phoneEn, detail };
+        return { th: "เปิดไมโครโฟนไม่สำเร็จ" + phone, en: "Could not open the microphone." + phoneEn, detail };
     }
   }
+
+  // 申请成功，但期间可能已经跨代（pagehide）或被取代：
+  // 自己关掉自己拿到的 track，绝不写进 session
+  if (!owns(token)) { got.getTracks().forEach(t => t.stop()); return { superseded: true }; }
+
+  try {
+    const AC = window.AudioContext || window.webkitAudioContext;
+    session.stream = got;
+    session.ctx = new AC();
+    session.analyser = session.ctx.createAnalyser();
+    session.analyser.fftSize = 1024;
+    session.ctx.createMediaStreamSource(session.stream).connect(session.analyser);
+  } catch (e) {
+    forceRelease();
+    return { th: "เตรียมระบบเสียงไม่สำเร็จ", en: "Could not initialise the audio pipeline.",
+             detail: `${e.name}: ${e.message}` };
+  }
+  const p = micPill();
+  p.textContent = "● ไมโครโฟนพร้อม · mic ready";
+  p.classList.add("ok");
+  return null;
 }
 
 function levelLoop() {
   if (session.rafId || !session.analyser) return;
   const buf = new Uint8Array(session.analyser.fftSize);
   const tick = () => {
-    if (!session.analyser || !session.activeId) {   // 没在录就停，别空转烧 CPU
+    const h = session.holder;
+    if (!session.analyser || !h || h.phase !== "recording") {   // 没在录就停，别空转烧 CPU
       session.rafId = null;
       document.querySelectorAll(".meter i").forEach(i => (i.style.width = "0%"));
       return;
@@ -582,7 +596,7 @@ function levelLoop() {
     session.analyser.getByteTimeDomainData(buf);
     let peak = 0;
     for (let i = 0; i < buf.length; i++) peak = Math.max(peak, Math.abs(buf[i] - 128) / 128);
-    const m = document.querySelector(`#take-${session.activeId} .meter`);
+    const m = document.querySelector(`#take-${h.id} .meter`);
     if (m) {
       m.querySelector("i").style.width = Math.min(100, peak * 160) + "%";
       m.classList.toggle("hot", peak > 0.92);
@@ -592,11 +606,10 @@ function levelLoop() {
   session.rafId = requestAnimationFrame(tick);
 }
 
-/* 录音或转换进行中时，锁掉其它段的按钮 */
+/* 有人持有会话时锁掉按钮；正在录音那一段留着，用户得能停。 */
 function syncLocks() {
-  const busy = !!session.activeId || !!session.acquiringId || session.converting > 0;
-  // 录音进行中，那一段的按钮要留着让用户能停；申请或转换期间全部禁用
-  takes.forEach((t, id) => t.setBusy(busy && id !== session.activeId));
+  const h = session.holder;
+  takes.forEach((t, id) => t.setBusy(!!h && !(h.phase === "recording" && h.id === id)));
 }
 
 const mmss = s => String(Math.floor(s / 60)).padStart(2, "0") + ":" + String(Math.floor(s % 60)).padStart(2, "0");
@@ -653,19 +666,24 @@ function buildTake(p) {
   takes.set(p.id, { setBusy, clearResult });
 
   recBtn.addEventListener("click", async () => {
-    if (session.activeId === p.id && mr) { mr.stop(); return; }
-    // 申请麦克风是异步的：必须在 await 之前**同步**占住锁，
-    // 否则权限弹窗期间连点两下，两个 handler 都会越过这道守卫
-    if (session.activeId || session.acquiringId || session.converting > 0) return;
-    session.acquiringId = p.id;
+    // 正在录这一段 → 停止
+    if (session.holder && session.holder.phase === "recording"
+        && session.holder.id === p.id && mr) { mr.stop(); return; }
+    // 会话被任何人持有（申请中/录音中/转换中）→ 忽略。
+    // 这道守卫必须在 await 之前**同步**执行并立刻占位，否则权限弹窗期间
+    // 连点两下，两个 handler 都能越过它。
+    if (session.holder) return;
+
+    const token = ++tokenSeq;
+    session.holder = { token, id: p.id, phase: "acquiring" };
     syncLocks();
 
-    const myEpoch = session.epoch;
     let started = false;
     try {
-      const problem = await acquireMic();
-      if (myEpoch !== session.epoch) return;      // 页面已隐藏/恢复，放弃
+      const problem = await acquireMic(token);
+      if (!owns(token)) return;                   // 已跨代或被取代，什么都别碰
       if (problem) {
+        if (problem.superseded) return;
         err.hidden = false;
         err.innerHTML = `<span class="th">${problem.th}</span>
           <span class="en" lang="en">${problem.en}</span>
@@ -677,7 +695,7 @@ function buildTake(p) {
       err.hidden = true;
 
       let chunks = [];
-      let recFailed = false;              // 每次录音独立，不跨次污染
+      let recFailed = false;              // 每次点击独立，不跨次污染
       try {
         mr = new MediaRecorder(session.stream);
       } catch (e) {
@@ -692,32 +710,37 @@ function buildTake(p) {
       thisMr.ondataavailable = e => e.data && e.data.size && chunks.push(e.data);
       thisMr.onerror = () => {
         recFailed = true;
+        if (!owns(token)) return;
         err.hidden = false;
         err.innerHTML = `<span class="th">เกิดข้อผิดพลาดขณะอัดเสียง กรุณาอัดใหม่</span>
           <span class="en" lang="en">The recorder failed. Please record again.</span>`;
       };
+
       thisMr.onstop = async () => {
         clearInterval(tickId);
         const captured = chunks; chunks = [];
-        session.activeId = null;
+        // **先验证所有权再动任何共享状态。** 反过来的话，pagehide 之后
+        // 迟到的 onstop 会把新会话的 holder 清掉，新录音就失去了锁。
+        if (!owns(token)) return;
+
         recBtn.dataset.on = "0"; lbl.textContent = "อัดใหม่ · Re-record";
 
         // 录音过程中报过错就不要这段音频——部分数据可能能解码，
-        // 那会同时显示「录好了」和「录音失败」，用户多半会把残缺的发出去
-        if (recFailed || myEpoch !== session.epoch) {
+        // 那会同时显示「录好了」和「录音失败」，用户多半把残缺的发出去
+        if (recFailed) {
           el.dataset.state = "idle";
           status.textContent = "";
-          syncLocks(); releaseMic();
+          session.holder = null; syncLocks(); releaseMic();
           return;
         }
 
-        session.converting++;
+        session.holder.phase = "converting";
         el.dataset.state = "converting";
         status.textContent = "กำลังแปลงไฟล์… · converting…";
         syncLocks();
         try {
           const wav = await toWav16k(new Blob(captured, { type: thisMr.mimeType || "" }));
-          if (myGen !== gen || myEpoch !== session.epoch) return;   // 已被取代或页面已换代
+          if (!owns(token) || myGen !== gen) return;
           state.set(p.id, { wav });
           audioUrl = URL.createObjectURL(wav);
           audio.src = audioUrl; audio.hidden = false;
@@ -726,7 +749,7 @@ function buildTake(p) {
           status.textContent = "อัดเสร็จแล้ว — อย่าลืมกด “บันทึกเป็น WAV” · Recorded — remember to press “Save WAV”";
           refreshProgress();
         } catch (e) {
-          if (myGen !== gen || myEpoch !== session.epoch) return;
+          if (!owns(token) || myGen !== gen) return;
           el.dataset.state = "idle";
           status.textContent = "";
           err.hidden = false;
@@ -734,9 +757,8 @@ function buildTake(p) {
             <span class="en" lang="en">Could not convert the recording — please record again.</span>
             <code>${e.name}: ${e.message}</code>`;
         } finally {
-          session.converting = Math.max(0, session.converting - 1);  // 永不为负
-          syncLocks();
-          releaseMic();
+          // 只有仍持有会话时才交还。旧回调不得释放新会话的锁。
+          if (owns(token)) { session.holder = null; syncLocks(); releaseMic(); }
         }
       };
 
@@ -749,14 +771,14 @@ function buildTake(p) {
         return;
       }
 
-      // 到这里才算真的开始重录，此刻废弃旧结果。
-      // 放在更早的话，acquire/构造/start 任一失败都会白白删掉上一份有效录音，
-      // 而那时重录根本没开始，删了没有任何防误发的价值。
+      // 到这里才算真的开始重录，此刻废弃旧结果。放更早的话，
+      // acquire/构造/start 任一失败都会白删上一份有效录音，
+      // 而那时重录根本没开始，删了没有防误发的价值。
       clearResult();
 
       started = true;
       const t0 = Date.now();
-      session.activeId = p.id;
+      session.holder.phase = "recording";
       recBtn.dataset.on = "1"; lbl.textContent = "หยุด · Stop";
       el.dataset.state = "recording";
       status.textContent = "กำลังอัด… · recording…";
@@ -764,10 +786,10 @@ function buildTake(p) {
       tickId = setInterval(() => { timer.textContent = mmss((Date.now() - t0) / 1000); }, 200);
       levelLoop();
     } finally {
-      // 无论走哪条路径都要交还申请锁，否则所有按钮会永久卡在禁用
-      session.acquiringId = null;
+      // 没能进入录音状态就交还会话，否则所有按钮永久卡在禁用。
+      // 同样要先验证所有权——旧 finally 不得清掉新会话的 holder。
+      if (!started && owns(token)) { session.holder = null; releaseMic(); }
       syncLocks();
-      if (!started) releaseMic();
     }
   });
 
