@@ -208,6 +208,16 @@
     margin-top: 2rem; padding-top: 1.25rem; border-top: 1px solid var(--hair);
     color: var(--slate); font-size: .82rem;
   }
+  .status {
+    margin: 0; padding: 0 1.25rem .9rem;
+    font-family: var(--mono); font-size: .72rem; letter-spacing: .05em;
+    color: var(--slate); min-height: 0;
+  }
+  .status:empty { display: none; }
+  .take[data-state="done"] .status { color: var(--done); }
+  .take[data-state="converting"] { border-color: var(--slate); }
+  .take[data-state="converting"] .status { color: var(--ink); }
+
   .err {
     display: grid; gap: .45rem; padding: 0 1.25rem 1.1rem;
     font-size: .88rem;
@@ -245,7 +255,7 @@
   <header>
     <div class="eyebrow">Speech recognition test · เทสต์ระบบถอดเสียง</div>
     <h1>ช่วยอ่านออกเสียงและอัดเสียงให้หน่อยครับ</h1>
-    <p class="sub">
+    <p class="sub" lang="en">
       We're testing how well local speech-recognition models handle Thai speech that
       contains English technical terms. Three short passages — about 90 seconds of
       reading in total. Everything stays on your computer; nothing is uploaded.
@@ -258,11 +268,11 @@
       <p class="th"><strong>ข้อความข้างล่างเขียนโดยคนที่ไม่ใช่เจ้าของภาษา
       อาจมีจุดที่ผิดหรือไม่เป็นธรรมชาติ</strong> — กรุณาแก้ให้เป็นภาษาไทยที่เป็นธรรมชาติก่อน
       แล้วค่อยอ่านตามฉบับที่แก้แล้ว ข้อความแก้ไขได้โดยตรงในหน้านี้</p>
-      <p class="en">The Thai below was written by a non-native speaker and may be wrong or
+      <p class="en" lang="en">The Thai below was written by a non-native speaker and may be wrong or
       unnatural. <strong>Please fix it first</strong> — the text boxes are editable —
       then read your corrected version. The corrected text is what we score against,
       so it must match what you actually say.</p>
-      <p class="en"><strong>Say the English terms the way you normally would</strong>
+      <p class="en" lang="en"><strong>Say the English terms the way you normally would</strong>
       when speaking Thai. A Thai accent is exactly what we're testing — please don't
       force a native-English pronunciation.</p>
     </div>
@@ -284,21 +294,21 @@
   <details class="fallback" id="fallback">
     <summary>ถ้าอัดในหน้านี้ไม่ได้ — ใช้มือถืออัดแทนได้เลย · Can't record here? Use your phone instead</summary>
     <div class="fb-body">
-      <p class="en">The recorder above needs microphone permission, which some embedded
+      <p class="en" lang="en">The recorder above needs microphone permission, which some embedded
       pages simply cannot get. That's not something you can fix on your side — and it
       doesn't matter, because a plain phone recording works just as well for us.</p>
       <ol>
         <li>แก้ข้อความทั้ง 3 ตอนด้านบนให้เป็นภาษาไทยที่เป็นธรรมชาติ แล้วกด
           <strong>“ดาวน์โหลดข้อความที่แก้แล้ว”</strong> (ปุ่มด้านล่าง)
-          <div class="en">Fix the three passages above, then hit “Download corrected text”.</div></li>
+          <div class="en" lang="en">Fix the three passages above, then hit “Download corrected text”.</div></li>
         <li>ใช้แอปอัดเสียงในมือถือ อัด <strong>3 ไฟล์แยกกัน</strong> ตอนที่ 1 / 2 / 3
-          <div class="en">Record the three passages as three separate files with your phone's
+          <div class="en" lang="en">Record the three passages as three separate files with your phone's
           voice recorder — in a quiet room, at your normal speaking pace.</div></li>
         <li>ส่งไฟล์เสียง (m4a / mp3 / wav อะไรก็ได้) พร้อมไฟล์ข้อความกลับมา
-          <div class="en">Send the audio (any format — m4a, mp3, wav) together with the text file.
+          <div class="en" lang="en">Send the audio (any format — m4a, mp3, wav) together with the text file.
           We'll convert the format on our end.</div></li>
       </ol>
-      <p class="en"><strong>Format doesn't matter.</strong> Whatever your phone produces is
+      <p class="en" lang="en"><strong>Format doesn't matter.</strong> Whatever your phone produces is
       fine — please don't spend time converting anything.</p>
     </div>
   </details>
@@ -378,8 +388,14 @@ Read speech is always cleaner than real speech, and we want the real thing.` },
 ];
 
 const TARGET_SR = 16000;
-let stream = null, ctx = null, analyser = null, rafId = null;
+
+/* ── 全局录音会话 ──
+   一次只允许一路录音。各段按钮独立的话，用户能同时开几路 MediaRecorder，
+   录出来几个文件其实是同一段输入。 */
+const session = { stream: null, ctx: null, analyser: null, rafId: null,
+                  activeId: null, converting: 0 };
 const state = new Map();
+const takes = new Map();   // id → { setBusy, clearResult }
 
 /* ── WAV 编码：16-bit PCM，单声道 ── */
 function encodeWav(samples, sampleRate) {
@@ -399,107 +415,155 @@ function encodeWav(samples, sampleRate) {
   return new Blob([buf], { type: "audio/wav" });
 }
 
-/* 录下来是 webm/opus，解码后用 OfflineAudioContext 重采样到 16 kHz 单声道 */
+/* 录出来的容器格式各浏览器不同（Chrome 多为 webm/opus，Safari 多为 mp4/aac），
+   所以不假设容器，一律解码后用 OfflineAudioContext 重采样到 16 kHz 单声道。 */
 async function toWav16k(blob) {
   const ab = await blob.arrayBuffer();
-  const tmp = new (window.AudioContext || window.webkitAudioContext)();
-  const decoded = await tmp.decodeAudioData(ab);
-  const frames = Math.ceil(decoded.duration * TARGET_SR);
+  const AC = window.AudioContext || window.webkitAudioContext;
+  const tmp = new AC();
+  let decoded;
+  try {
+    decoded = await tmp.decodeAudioData(ab);
+  } finally {
+    // 失败路径也要关，否则每次转换失败都漏一个 AudioContext
+    try { await tmp.close(); } catch (_) {}
+  }
+  // 用 length/sampleRate 换算，不用浮点的 duration，避免边界上差一帧
+  const frames = Math.max(1, Math.round(decoded.length * TARGET_SR / decoded.sampleRate));
   const off = new OfflineAudioContext(1, frames, TARGET_SR);
   const src = off.createBufferSource();
   src.buffer = decoded; src.connect(off.destination); src.start();
-  const rendered = await off.startRendering();
-  tmp.close();
+  const rendered = await off.startRendering();   // OfflineAudioContext 无需 close
   return encodeWav(rendered.getChannelData(0), TARGET_SR);
 }
 
-/* 环境自检。「没弹窗就失败」和「用户拒绝了」是两回事，得分清楚，
-   否则会给出「去浏览器里允许」这种在嵌套 iframe 下根本无效的建议。 */
+/* ── 环境自检 ──
+   「没弹窗就失败」和「用户拒绝了」是两回事，得分清楚，否则会给出
+   「去浏览器里允许」这种在嵌套 iframe 下根本无效的建议。 */
 function diagnose() {
   const d = {
     secure: window.isSecureContext,
     framed: window.self !== window.top,
-    hasApi: !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia),
+    gum: !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia),
+    rec: typeof window.MediaRecorder === "function",
+    ac:  !!(window.AudioContext || window.webkitAudioContext),
+    oac: typeof window.OfflineAudioContext === "function",
     policy: null,
   };
   try {
-    if (document.featurePolicy && document.featurePolicy.allowsFeature)
-      d.policy = document.featurePolicy.allowsFeature("microphone");
+    // featurePolicy 是旧名，permissionsPolicy 是新名；两个都可能不存在
+    const pol = document.permissionsPolicy || document.featurePolicy;
+    if (pol && pol.allowsFeature) d.policy = pol.allowsFeature("microphone");
   } catch (_) {}
   return d;
 }
 
-/* 返回 null 表示成功；否则返回 {th, en, detail} */
-async function ensureMic() {
-  if (stream) return null;
-  const pill = document.getElementById("micPill");
-  const d = diagnose();
+const micPill = () => document.getElementById("micPill");
 
-  if (!d.hasApi || !d.secure) {
-    pill.textContent = "✕ เบราว์เซอร์ไม่รองรับ · unsupported";
-    return { th: "เบราว์เซอร์นี้ใช้ไมโครโฟนไม่ได้ (ต้องเปิดผ่าน https)",
-             en: "This browser can't access the microphone here (needs a secure https page).",
-             detail: `secure=${d.secure} api=${d.hasApi}` };
+function releaseMic() {
+  if (session.activeId || session.converting > 0) return;   // 还在用，先别关
+  if (session.rafId) { cancelAnimationFrame(session.rafId); session.rafId = null; }
+  if (session.stream) { session.stream.getTracks().forEach(t => t.stop()); session.stream = null; }
+  if (session.ctx) { session.ctx.close().catch(() => {}); session.ctx = null; }
+  session.analyser = null;
+  document.querySelectorAll(".meter i").forEach(i => (i.style.width = "0%"));
+  const p = micPill();
+  p.textContent = "◌ ไมโครโฟนปิดอยู่ · mic off";
+  p.classList.remove("ok");
+}
+window.addEventListener("pagehide", () => {
+  session.activeId = null; session.converting = 0; releaseMic();
+});
+
+/* 成功返回 null；失败返回 {th, en, detail} */
+async function acquireMic() {
+  const d = diagnose();
+  if (!d.secure || !d.gum || !d.rec || !d.ac || !d.oac) {
+    micPill().textContent = "✕ เบราว์เซอร์ไม่รองรับ · unsupported";
+    return { th: "เบราว์เซอร์นี้อัดเสียงไม่ได้ กรุณาใช้วิธีอัดด้วยมือถือ (ดูด้านล่าง)",
+             en: "This browser can't record here. Please use the phone-recorder route below.",
+             detail: `secure=${d.secure} gum=${d.gum} MediaRecorder=${d.rec} AudioContext=${d.ac} Offline=${d.oac}` };
   }
+  if (session.stream) return null;
 
   try {
     // 关掉浏览器的降噪/AGC：评测要的是原始音频，处理过的会掩盖真实表现
-    stream = await navigator.mediaDevices.getUserMedia({
+    session.stream = await navigator.mediaDevices.getUserMedia({
       audio: { channelCount: 1, echoCancellation: false,
                noiseSuppression: false, autoGainControl: false }
     });
-    ctx = new (window.AudioContext || window.webkitAudioContext)();
-    analyser = ctx.createAnalyser();
-    analyser.fftSize = 1024;
-    ctx.createMediaStreamSource(stream).connect(analyser);
-    pill.textContent = "● ไมโครโฟนพร้อม · mic ready";
-    pill.classList.add("ok");
+    const AC = window.AudioContext || window.webkitAudioContext;
+    session.ctx = new AC();
+    session.analyser = session.ctx.createAnalyser();
+    session.analyser.fftSize = 1024;
+    session.ctx.createMediaStreamSource(session.stream).connect(session.analyser);
+    const p = micPill();
+    p.textContent = "● ไมโครโฟนพร้อม · mic ready";
+    p.classList.add("ok");
     return null;
   } catch (e) {
-    pill.textContent = "✕ เปิดไมโครโฟนไม่ได้ · mic unavailable";
+    if (session.stream) { session.stream.getTracks().forEach(t => t.stop()); session.stream = null; }
+    if (session.ctx) { session.ctx.close().catch(() => {}); session.ctx = null; }
+    micPill().textContent = "✕ เปิดไมโครโฟนไม่ได้ · mic unavailable";
     const detail = `${e.name}: ${e.message} · framed=${d.framed} policy=${d.policy}`;
+    const phone = " กรุณาใช้วิธีอัดด้วยมือถือ (ดูด้านล่าง)";
+    const phoneEn = " Please use the phone-recorder route below.";
 
-    // 页面被嵌在 iframe 里、且 iframe 没授予 microphone 权限时，
-    // 浏览器**不会弹窗**就直接拒绝。这种情况用户在自己这边怎么点都没用。
     if (d.framed && d.policy === false) {
-      return { th: "หน้านี้ถูกฝังอยู่ในกรอบที่ไม่อนุญาตให้ใช้ไมโครโฟน — แก้ที่ฝั่งคุณไม่ได้ครับ กรุณาใช้วิธีอัดเสียงด้วยมือถือแทน (ดูด้านล่าง)",
-               en: "This page is embedded in a frame that doesn't permit microphone access. Nothing you can change on your side — please use the phone-recorder route instead (see below).",
+      return { th: "หน้านี้ถูกฝังอยู่ในกรอบที่ไม่อนุญาตให้ใช้ไมโครโฟน — แก้ที่ฝั่งคุณไม่ได้ครับ" + phone,
+               en: "This page is embedded in a frame that doesn't permit microphone access — nothing you can change on your side." + phoneEn,
                detail };
     }
-    if (e.name === "NotAllowedError" && d.framed) {
-      return { th: "เบราว์เซอร์ปฏิเสธการใช้ไมโครโฟนโดยไม่ถามก่อน มักเกิดจากหน้านี้ถูกฝังในกรอบ — ลองเปิดหน้านี้ในแท็บใหม่ ถ้ายังไม่ได้ กรุณาใช้วิธีอัดด้วยมือถือ (ดูด้านล่าง)",
-               en: "The browser refused without asking — usually because this page is embedded in a frame. Try opening it in its own tab; if that still fails, use the phone-recorder route below.",
-               detail };
+    switch (e.name) {
+      case "NotAllowedError":
+        return d.framed
+          ? { th: "เบราว์เซอร์ปฏิเสธการใช้ไมโครโฟน อาจเพราะคุณกดไม่อนุญาต หรือเพราะหน้านี้ถูกฝังในกรอบ — ลองเปิดในแท็บใหม่ ถ้ายังไม่ได้" + phone,
+              en: "The browser refused microphone access — either you declined, or this page is embedded in a frame. Try opening it in its own tab; if that still fails," + phoneEn,
+              detail }
+          : { th: "ไมโครโฟนถูกปิดกั้น กรุณากดไอคอนกุญแจบนแถบที่อยู่ อนุญาตไมโครโฟน แล้วโหลดหน้าใหม่",
+              en: "Microphone blocked. Click the lock icon in the address bar, allow the microphone, then reload.",
+              detail };
+      case "NotFoundError": case "OverconstrainedError":
+        return { th: "ไม่พบไมโครโฟน กรุณาเสียบไมค์หรือเลือกอุปกรณ์เสียงในระบบก่อน",
+                 en: "No microphone found. Connect one or pick an input device in your system settings.",
+                 detail };
+      case "NotReadableError": case "AbortError":
+        return { th: "เปิดไมโครโฟนไม่ได้ อาจมีแอปอื่นใช้อยู่ หรือระบบไม่อนุญาต ลองปิดแอปที่ใช้ไมค์แล้วลองใหม่",
+                 en: "Could not open the microphone — another app may be using it, or the OS is blocking it. Close other apps using the mic and try again.",
+                 detail };
+      default:
+        return { th: "เปิดไมโครโฟนไม่สำเร็จ" + phone,
+                 en: "Could not open the microphone." + phoneEn, detail };
     }
-    if (e.name === "NotAllowedError") {
-      return { th: "ไมโครโฟนถูกปิดกั้น กรุณากดไอคอนกุญแจ/กล้องบนแถบที่อยู่ แล้วอนุญาตไมโครโฟน จากนั้นโหลดหน้าใหม่",
-               en: "Microphone blocked. Click the lock icon in the address bar, allow the microphone, then reload.",
-               detail };
-    }
-    if (e.name === "NotFoundError" || e.name === "OverconstrainedError") {
-      return { th: "ไม่พบไมโครโฟน กรุณาเสียบไมค์หรือเลือกอุปกรณ์เสียงในระบบก่อน",
-               en: "No microphone found. Connect one or select an input device in your system settings.",
-               detail };
-    }
-    return { th: "เปิดไมโครโฟนไม่สำเร็จ กรุณาใช้วิธีอัดด้วยมือถือ (ดูด้านล่าง)",
-             en: "Could not open the microphone. Please use the phone-recorder route below.",
-             detail };
   }
 }
 
 function levelLoop() {
-  const buf = new Uint8Array(analyser.fftSize);
+  if (session.rafId || !session.analyser) return;
+  const buf = new Uint8Array(session.analyser.fftSize);
   const tick = () => {
-    analyser.getByteTimeDomainData(buf);
+    if (!session.analyser || !session.activeId) {   // 没在录就停，别空转烧 CPU
+      session.rafId = null;
+      document.querySelectorAll(".meter i").forEach(i => (i.style.width = "0%"));
+      return;
+    }
+    session.analyser.getByteTimeDomainData(buf);
     let peak = 0;
     for (let i = 0; i < buf.length; i++) peak = Math.max(peak, Math.abs(buf[i] - 128) / 128);
-    document.querySelectorAll('.take[data-state="recording"] .meter').forEach(m => {
+    const m = document.querySelector(`#take-${session.activeId} .meter`);
+    if (m) {
       m.querySelector("i").style.width = Math.min(100, peak * 160) + "%";
       m.classList.toggle("hot", peak > 0.92);
-    });
-    rafId = requestAnimationFrame(tick);
+    }
+    session.rafId = requestAnimationFrame(tick);
   };
-  tick();
+  session.rafId = requestAnimationFrame(tick);
+}
+
+/* 录音或转换进行中时，锁掉其它段的按钮 */
+function syncLocks() {
+  const locked = !!session.activeId || session.converting > 0;
+  takes.forEach((t, id) => t.setBusy(locked && id !== session.activeId));
 }
 
 const mmss = s => String(Math.floor(s / 60)).padStart(2, "0") + ":" + String(Math.floor(s % 60)).padStart(2, "0");
@@ -507,13 +571,13 @@ const mmss = s => String(Math.floor(s / 60)).padStart(2, "0") + ":" + String(Mat
 function refreshProgress() {
   const need = PASSAGES.filter(p => !p.optional);
   const got = need.filter(p => state.get(p.id)?.wav).length;
-  document.getElementById("progPill").textContent = `${got} / ${need.length} อัดแล้ว · recorded`;
-  document.getElementById("progPill").classList.toggle("ok", got === need.length);
+  const pill = document.getElementById("progPill");
+  pill.textContent = `${got} / ${need.length} อัดแล้ว · recorded`;
+  pill.classList.toggle("ok", got === need.length);
   const items = document.querySelectorAll("#checklist li");
-  items[0].dataset.ok = got === need.length ? "1" : "0";
-  items[0].querySelector(".box").textContent = got === need.length ? "[✓]" : "[ ]";
-  items[2].dataset.ok = state.get("p4-free")?.wav ? "1" : "0";
-  items[2].querySelector(".box").textContent = state.get("p4-free")?.wav ? "[✓]" : "[ ]";
+  const mark = (li, ok) => { li.dataset.ok = ok ? "1" : "0"; li.querySelector(".box").textContent = ok ? "[✓]" : "[ ]"; };
+  mark(items[0], got === need.length);
+  mark(items[2], !!state.get("p4-free")?.wav);
 }
 
 function buildTake(p) {
@@ -522,8 +586,8 @@ function buildTake(p) {
   el.innerHTML = `
     <div class="take-head">
       <span class="take-no">${p.no}</span>
-      <span class="take-title">${p.title}</span>
-      <span class="take-note">${p.note}</span>
+      <h2 class="take-title">${p.title}</h2>
+      <span class="take-note" lang="en">${p.note}</span>
     </div>
     ${p.optional
       ? `<div class="script" style="white-space:pre-wrap;color:var(--slate)">${p.prompt}</div>`
@@ -531,64 +595,128 @@ function buildTake(p) {
          <div class="edit-hint">แก้ข้อความตรงนี้ได้เลย · edit here — the corrected text is the reference</div>`}
     <div class="transport">
       <button class="btn rec" type="button" data-on="0"><span class="dot"></span><span class="lbl">อัดเสียง · Record</span></button>
-      <span class="timer">00:00</span>
-      <span class="meter"><i></i></span>
+      <span class="timer" role="timer" aria-live="off">00:00</span>
+      <span class="meter" aria-hidden="true"><i></i></span>
       <audio controls hidden></audio>
       <button class="btn dl" type="button" disabled>⤓ บันทึกเป็น WAV · Save WAV</button>
     </div>
+    <p class="status" role="status" aria-live="polite"></p>
     <div class="err" hidden></div>`;
 
   const recBtn = el.querySelector(".rec"), lbl = el.querySelector(".lbl");
   const timer = el.querySelector(".timer"), audio = el.querySelector("audio");
   const dlBtn = el.querySelector(".dl"), err = el.querySelector(".err");
-  let mr = null, chunks = [], t0 = 0, tickId = 0;
+  const status = el.querySelector(".status");
+  let mr = null, tickId = 0, gen = 0, audioUrl = null;
+
+  const clearResult = () => {
+    if (audioUrl) { URL.revokeObjectURL(audioUrl); audioUrl = null; }
+    audio.removeAttribute("src"); audio.load(); audio.hidden = true;
+    dlBtn.disabled = true;
+    state.delete(p.id);
+    refreshProgress();
+  };
+  const setBusy = busy => { recBtn.disabled = busy; };
+  takes.set(p.id, { setBusy, clearResult });
 
   recBtn.addEventListener("click", async () => {
-    if (recBtn.dataset.on === "1") { mr && mr.stop(); return; }
-    const problem = await ensureMic();
+    if (session.activeId === p.id && mr) { mr.stop(); return; }
+    if (session.activeId || session.converting > 0) return;   // 双保险
+
+    const problem = await acquireMic();
     if (problem) {
       err.hidden = false;
       err.innerHTML = `<span class="th">${problem.th}</span>
-        <span class="en">${problem.en}</span>
+        <span class="en" lang="en">${problem.en}</span>
         <code>${problem.detail}</code>
         <a href="#fallback">↓ วิธีอัดด้วยมือถือ · phone-recorder route</a>`;
       document.getElementById("fallback").open = true;
       return;
     }
     err.hidden = true;
-    chunks = [];
-    mr = new MediaRecorder(stream);
-    mr.ondataavailable = e => e.data.size && chunks.push(e.data);
-    mr.onstop = async () => {
+
+    // 每次录音一个代号：转换回来时对不上就说明已被更新的录音取代，丢弃
+    const myGen = ++gen;
+    // 重录立即作废旧结果，避免转换失败后旧文件还挂在那儿被误发
+    clearResult();
+
+    let chunks = [];
+    try {
+      mr = new MediaRecorder(session.stream);
+    } catch (e) {
+      err.hidden = false;
+      err.innerHTML = `<span class="th">เริ่มอัดเสียงไม่ได้</span>
+        <span class="en" lang="en">Could not start the recorder.</span><code>${e.name}: ${e.message}</code>`;
+      releaseMic();
+      return;
+    }
+    const thisMr = mr;
+    thisMr.ondataavailable = e => e.data && e.data.size && chunks.push(e.data);
+    thisMr.onerror = () => {
+      err.hidden = false;
+      err.innerHTML = `<span class="th">เกิดข้อผิดพลาดขณะอัดเสียง กรุณาอัดใหม่</span>
+        <span class="en" lang="en">The recorder failed. Please record again.</span>`;
+    };
+    thisMr.onstop = async () => {
       clearInterval(tickId);
+      const captured = chunks; chunks = [];
+      session.activeId = null;
+      session.converting++;
       recBtn.dataset.on = "0"; lbl.textContent = "อัดใหม่ · Re-record";
-      el.dataset.state = "done";
-      el.querySelector(".meter i").style.width = "0%";
+      el.dataset.state = "converting";
+      status.textContent = "กำลังแปลงไฟล์… · converting…";
+      syncLocks();
       try {
-        const wav = await toWav16k(new Blob(chunks, { type: mr.mimeType }));
+        const wav = await toWav16k(new Blob(captured, { type: thisMr.mimeType || "" }));
+        if (myGen !== gen) return;            // 已被更新的录音取代，丢弃这次结果
         state.set(p.id, { wav });
-        audio.src = URL.createObjectURL(wav); audio.hidden = false;
+        audioUrl = URL.createObjectURL(wav);
+        audio.src = audioUrl; audio.hidden = false;
         dlBtn.disabled = false;
+        el.dataset.state = "done";
+        status.textContent = "อัดเสร็จแล้ว — อย่าลืมกด “บันทึกเป็น WAV” · Recorded — remember to press “Save WAV”";
         refreshProgress();
       } catch (e) {
-        err.hidden = false;
-        err.textContent = "แปลงไฟล์เสียงไม่สำเร็จ กรุณาอัดใหม่ · Could not convert the recording — please record again.";
+        if (myGen !== gen) return;
         el.dataset.state = "idle";
+        status.textContent = "";
+        err.hidden = false;
+        err.innerHTML = `<span class="th">แปลงไฟล์เสียงไม่สำเร็จ กรุณาอัดใหม่</span>
+          <span class="en" lang="en">Could not convert the recording — please record again.</span>
+          <code>${e.name}: ${e.message}</code>`;
+      } finally {
+        session.converting--;
+        syncLocks();
+        releaseMic();
       }
     };
-    mr.start();
-    t0 = Date.now();
+
+    try {
+      thisMr.start();
+    } catch (e) {
+      err.hidden = false;
+      err.innerHTML = `<span class="th">เริ่มอัดเสียงไม่ได้</span>
+        <span class="en" lang="en">Could not start recording.</span><code>${e.name}: ${e.message}</code>`;
+      releaseMic();
+      return;
+    }
+    const t0 = Date.now();
+    session.activeId = p.id;
     recBtn.dataset.on = "1"; lbl.textContent = "หยุด · Stop";
     el.dataset.state = "recording";
+    status.textContent = "กำลังอัด… · recording…";
     timer.textContent = "00:00";
     tickId = setInterval(() => { timer.textContent = mmss((Date.now() - t0) / 1000); }, 200);
-    if (!rafId) levelLoop();
+    syncLocks();
+    levelLoop();
   });
 
   dlBtn.addEventListener("click", () => {
     const w = state.get(p.id)?.wav; if (!w) return;
+    const url = URL.createObjectURL(w);
     const a = document.createElement("a");
-    a.href = URL.createObjectURL(w); a.download = `th-${p.id}.wav`; a.click();
+    a.href = url; a.download = `th-${p.id}.wav`; a.click();
+    setTimeout(() => URL.revokeObjectURL(url), 0);
   });
 
   return el;
@@ -612,9 +740,10 @@ document.getElementById("dlText").addEventListener("click", () => {
     const ta = document.querySelector(`#take-${p.id} .script`);
     out += `\n## ${p.id}  (${p.title})\n${ta.value.trim()}\n`;
   });
+  const url = URL.createObjectURL(new Blob([out], { type: "text/plain;charset=utf-8" }));
   const a = document.createElement("a");
-  a.href = URL.createObjectURL(new Blob([out], { type: "text/plain;charset=utf-8" }));
-  a.download = "thai-passages-corrected.txt"; a.click();
+  a.href = url; a.download = "thai-passages-corrected.txt"; a.click();
+  setTimeout(() => URL.revokeObjectURL(url), 0);
   const li = document.querySelectorAll("#checklist li")[1];
   li.dataset.ok = "1"; li.querySelector(".box").textContent = "[✓]";
 });
