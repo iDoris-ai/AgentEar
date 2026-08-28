@@ -5,7 +5,10 @@ ADR-0004 §4 的 CI 和「检出/未检出差异」由本脚本产出。**种子
 同一批逐样本文件重跑必然得到同一组数字。
 
 用法：
-    python3 scripts/cer-stats.py <结果目录> [重采样次数，默认 4000]
+    python3 scripts/cer-stats.py <结果目录> [重采样次数，默认 4000] [粒度 cp|bcm，默认 cp]
+
+退出码：0 正常；1 输入有问题（样本集不一致、指纹不符、归一化口径不同）；
+3 跑完了但有配对比较因缺结果没做——**输出不完整，别当成功用**。
 
 ## 方法
 
@@ -79,15 +82,22 @@ COMPARISONS = [
     ("ggml-distill-q5_0", "ggml-turbo-q5_0"),
     ("ggml-medium-q8_0", "ggml-turbo-q5_0"),
 ]
-SEED_CI, SEED_PAIRED, KIND = 20260822, 20260823, "cp"
+SEED_CI, SEED_PAIRED = 20260822, 20260823
+DEFAULT_KIND = "cp"
 
 
 def main() -> int:
-    if not 2 <= len(sys.argv) <= 3:
+    if not 2 <= len(sys.argv) <= 4:
         print(__doc__)
         return 2
     d = sys.argv[1]
-    n_boot = int(sys.argv[2]) if len(sys.argv) == 3 else 4000
+    n_boot = int(sys.argv[2]) if len(sys.argv) >= 3 else 4000
+    # 粒度以前是写死的 "cp"，而逐样本文件里两种都存着 —— 想看 bcm 得改源码。
+    # 它会影响所有结论，所以做成显式参数并打进表头。
+    kind = sys.argv[3] if len(sys.argv) == 4 else DEFAULT_KIND
+    if kind not in ("cp", "bcm"):
+        print(f"粒度只能是 cp 或 bcm，当前是 '{kind}'", file=sys.stderr)
+        return 1
 
     res = {}
     for f in sorted(os.listdir(d)):
@@ -100,6 +110,7 @@ def main() -> int:
     if n_boot <= 0:
         print("重采样次数必须为正", file=sys.stderr)
         return 1
+    no_text_fp, no_audio_fp = [], []
     baseline_tag = next(iter(res))
     baseline = res[baseline_tag]
     names = sorted(baseline["per_sample"])
@@ -118,10 +129,19 @@ def main() -> int:
                 print(f"!! {tag} 的参考指纹与 {baseline_tag} 不一致"
                       f"（{fa} vs {fb}），配对无效", file=sys.stderr)
                 return 1
-        else:
-            # 旧结果文件没有指纹字段，退回长度校验并明确说它挡不住什么
-            print(f"   注：{tag} 或 {baseline_tag} 缺 refs_norm_sha256_16，"
-                  f"退回长度校验（挡不住等长的不同参考）", file=sys.stderr)
+        elif tag != baseline_tag:
+            # 旧结果文件没有指纹字段，退回长度校验（挡不住等长的不同参考）
+            no_text_fp.append(tag)
+        # 参考文本一致不等于录音一致：上游换了音频、文字没动，上面那道全过。
+        aa, ab = r.get("refs_audio_sha256_16"), baseline.get("refs_audio_sha256_16")
+        if aa and ab:
+            if aa != ab:
+                print(f"!! {tag} 的**音频**指纹与 {baseline_tag} 不一致"
+                      f"（{aa} vs {ab}）——参考文本相同但录音不同，配对无效",
+                      file=sys.stderr)
+                return 1
+        elif tag != baseline_tag:
+            no_audio_fp.append(tag)
         if r.get("norm") != baseline.get("norm"):
             print(f"!! {tag} 的归一化口径与 {baseline_tag} 不同"
                   f"（{r.get('norm')} vs {baseline.get('norm')}）", file=sys.stderr)
@@ -133,28 +153,43 @@ def main() -> int:
                           file=sys.stderr)
                     return 1
 
-    print(f"n={len(names)} 条录音，自助法 {n_boot} 次，粒度 {KIND}，"
+    if no_text_fp:
+        print(f"   注：{len(no_text_fp)} 份结果缺 refs_norm_sha256_16，对它们只做了"
+              f"长度校验（挡不住等长的不同参考）：{', '.join(no_text_fp)}", file=sys.stderr)
+    if no_audio_fp:
+        print(f"   注：{len(no_audio_fp)} 份结果缺 refs_audio_sha256_16，无法校验"
+              f"是否跑在同一批录音上：{', '.join(no_audio_fp)}", file=sys.stderr)
+
+    print(f"n={len(names)} 条录音，自助法 {n_boot} 次，粒度 {kind}，"
           f"种子 CI={SEED_CI}/配对={SEED_PAIRED}\n")
     print(f"{'模型':24s} {'CER':>8s}  {'95% CI':>20s}  {'空输出':>6s}  {'sha256':>12s}")
-    for tag in sorted(res, key=lambda t: cer(res[t]["per_sample"], names, KIND)):
+    for tag in sorted(res, key=lambda t: cer(res[t]["per_sample"], names, kind)):
         per = res[tag]["per_sample"]
-        pt = cer(per, names, KIND)
-        lo, hi = boot_ci(per, names, KIND, n_boot, SEED_CI)
+        pt = cer(per, names, kind)
+        lo, hi = boot_ci(per, names, kind, n_boot, SEED_CI)
         print(f"{tag:24s} {pt:8.4f}  [{lo:.4f}, {hi:.4f}]  "
               f"{res[tag]['empty_output']:>4d}/{len(names)}  {res[tag]['model_sha256_12']}")
 
     print("\n配对比较（事后固定的探索性比较组，未做多重校正；Δ = 左 − 右）：")
+    missing = 0
     for a, b in COMPARISONS:
         if a not in res or b not in res:
-            print(f"  {a} / {b}：缺结果，跳过")
+            # 以前这里只打一行就 continue，最后照样 return 0 —— 把输出重定向进
+            # 文件时，缺掉的比较和「本来就没这一组」长得一模一样。收尾要非零退出。
+            print(f"  !! {a} / {b}：缺结果，未做这组比较")
+            missing += 1
             continue
         lo, hi = boot_paired(res[a]["per_sample"], res[b]["per_sample"],
-                             names, KIND, n_boot, SEED_PAIRED)
+                             names, kind, n_boot, SEED_PAIRED)
         verdict = "检出差异" if (lo > 0 or hi < 0) else "未检出差异"
         print(f"  {a:22s} − {b:22s}  Δ95%CI=[{lo:+.4f}, {hi:+.4f}]  {verdict}")
 
     print("\n注：「未检出差异」≠「无差异」≠「等效」。要声称等效需先定非劣界，"
           "再看 CI 上界是否落在界内。")
+    if missing:
+        print(f"!! {missing} 组配对比较因缺结果没做，上面这份输出不完整",
+              file=sys.stderr)
+        return 3
     return 0
 
 

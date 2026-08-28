@@ -17,6 +17,7 @@ import hashlib
 import io
 import json
 import os
+import shutil
 import sys
 import urllib.request
 
@@ -44,7 +45,17 @@ def main() -> int:
     pq_path = os.path.join(out, "test.parquet")
     if not os.path.exists(pq_path):
         print(f"==> 下载 {PARQUET_URL}")
-        urllib.request.urlretrieve(PARQUET_URL, pq_path)
+        # 先下到 .part 再改名。直接写目标路径的话，下到一半被 Ctrl-C 或断网，
+        # 留下的半个文件在下次运行时会被 `os.path.exists` 当成「已下载」，
+        # 于是拿一份截断的 parquet 去抽样——抽出来的子集指纹对不上，
+        # 报的错却指向「上游数据变了」，排查方向整个是歪的。
+        part = pq_path + ".part"
+        try:
+            urllib.request.urlretrieve(PARQUET_URL, part)
+            os.replace(part, pq_path)
+        finally:
+            if os.path.exists(part):
+                os.remove(part)
 
     rows = pq.read_table(pq_path).to_pylist()
     # 固定步长采样，**排序键是 parquet 的原始行序**（不是文件名、不是 id）。
@@ -60,7 +71,13 @@ def main() -> int:
     step = len(rows) // want_n
     sel = [rows[i * step] for i in range(want_n)]
 
-    wav_dir = os.path.join(out, "wav")
+    # 先全部写进暂存目录，**与入库 manifest 对上账之后才搬到正式位置**。
+    # 直接写正式位置的话，一批对不上的数据会留在 wav/ 和 refs.json 里，
+    # 而 cer-thai.py 只认路径不认指纹，下一步会照跑不误——
+    # 拿着被拒绝的评测集算出一组看着正常、实则不可比的 CER。
+    stage = os.path.join(out, ".staging")
+    shutil.rmtree(stage, ignore_errors=True)
+    wav_dir = os.path.join(stage, "wav")
     os.makedirs(wav_dir, exist_ok=True)
     manifest, total = {}, 0.0
     for i, r in enumerate(sel):
@@ -79,7 +96,7 @@ def main() -> int:
         }
         total += len(data) / sr
 
-    json.dump(manifest, open(os.path.join(out, "refs.json"), "w"),
+    json.dump(manifest, open(os.path.join(stage, "refs.json"), "w"),
               ensure_ascii=False, indent=1, sort_keys=True)
 
     # 和入库的 manifest 对账。对不上就是取到了不同的句子，数字不可比。
@@ -106,8 +123,10 @@ def main() -> int:
         #   parquet 全文件 sha —— 决定整个上游文件是否原样（只改了没抽中的行
         #                        时子集仍一致，那不影响可比性，所以只提示）
         if ref.get("refs_sha256_16") != digest:
+            shutil.rmtree(stage, ignore_errors=True)
             print(f"!! 评测子集与入库 manifest 不符（入库 {ref.get('refs_sha256_16')}，"
-                  f"本次 {digest}）——ADR-0004 §4 的数字不可比", file=sys.stderr)
+                  f"本次 {digest}）——ADR-0004 §4 的数字不可比。"
+                  f"\n   已删除本次取样，{out} 下不会留下不可比的数据。", file=sys.stderr)
             return 1
         print("✓ 评测子集与入库 manifest 一致")
         if ref.get("parquet_sha256") and ref["parquet_sha256"] != pq_sha:
@@ -123,6 +142,15 @@ def main() -> int:
                    "items": manifest}, open(MANIFEST, "w"),
                   ensure_ascii=False, indent=1, sort_keys=True)
         print(f"已写入 {MANIFEST}")
+
+    # 对上账了才搬进正式位置。rmtree + rename 两步不是原子的，
+    # 但这脚本是手动跑的单实例，够用；别在注释里把它说成原子。
+    final_wav = os.path.join(out, "wav")
+    shutil.rmtree(final_wav, ignore_errors=True)
+    os.replace(wav_dir, final_wav)
+    os.replace(os.path.join(stage, "refs.json"), os.path.join(out, "refs.json"))
+    shutil.rmtree(stage, ignore_errors=True)
+    print(f"✓ 已写入 {final_wav} 与 {os.path.join(out, 'refs.json')}")
     return 0
 
 

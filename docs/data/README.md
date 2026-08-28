@@ -5,12 +5,15 @@ ADR-0004 的数字从这里来。**保留原始与逐样本数据**，免得只�
 
 | 文件 | 内容 | 怎么重算 |
 |---|---|---|
-| `thai-bench-raw.txt` | 性能（体积/RTF/峰值 RSS） | `scripts/bench-thai.sh <模型...>` |
+| `thai-bench-raw.txt` | 性能（体积/RTF/峰值 RSS） | ⚠️ **人工誊抄，非脚本原样输出；模型已不在本机，现阶段无法重算**。见文件头 |
 | `thai-cer-per-sample/*.json` | **逐句** hyp、edits、参考长度 | `scripts/cer-thai.py <模型> <cli> <数据目录>` |
-| `thai-cer-stats.txt` | CI 与配对比较 | `scripts/cer-stats.py docs/data/thai-cer-per-sample 4000` |
+| `thai-cer-stats.txt` | CI 与配对比较 | `scripts/cer-stats.py docs/data/thai-cer-per-sample 4000` — 除开头 3 行说明外**逐字节一致，已验** |
 
 统计量**不需要重跑推理**——`cer-stats.py` 直接吃 `thai-cer-per-sample/`，
 种子固定（CI=20260822、配对=20260823），任何人重跑必得同一组数字。
+
+**性能那张表则相反**：它依赖本机上的 .bin，而那些文件已经删了。
+两张表的可复算等级不一样，不要混着说。
 
 ## 评测集
 

@@ -108,39 +108,73 @@ fi
 
 dur() { ffprobe -v error -show_entries format=duration -of csv=p=0 "$1"; }
 
-# 一次运行 → "墙钟秒 峰值RSS字节"。
+# 一次运行 → 结果写进全局 RUN_SECS / RUN_RSS。
+#
+# **结果不走 stdout，调用方也绝不能把它套进 `$(...)`。** 早先的版本是
+# `read -r ts rs <<<"$(run ...)"`，那样 `die` 里的 `exit 1` 只结束命令替换
+# 那个子 shell，主脚本继续跑：`read` 从空串里读到 ts="" rs=""，
+# 后面 `echo "$ts/$DS" | bc -l` 拿到 "/12.3"（bc 报错、不输出、退出码仍是 0），
+# 算术里的空串按 0 处理——于是打出一整行「0.000 0.000 0.000 0 0」并 exit 0。
+# 一行凭空捏造的测量，混在正常行里看不出来。
 #
 # `/usr/bin/time -l` 和被测程序的 stderr 混在同一个流里，所以两个字段都要
 # 锚定着取，并且校验解析结果确实是数字——解析失败若放任，会到 bc 那里才炸，
 # 报出来的错和真实原因八竿子打不着。
+RUN_SECS=""; RUN_RSS=""
 run() {
-  local o secs rss
+  local o
+  RUN_SECS=""; RUN_RSS=""
   o="$( { /usr/bin/time -l "$1" -m "$2" -f "$3" -l th -t "$THREADS" \
-          -bo 1 -bs 1 -np -nt >/dev/null; } 2>&1 )" || die "whisper-cli 失败：$3"
-  secs="$(awk '$2=="real"{print $1; exit}' <<<"$o")"
-  rss="$(awk '/maximum resident set size/{print $1; exit}' <<<"$o")"
-  [[ "$secs" =~ ^[0-9]+\.?[0-9]*$ ]] || die "解析墙钟失败（/usr/bin/time 输出格式变了？）：$(head -3 <<<"$o")"
-  [[ "$rss"  =~ ^[0-9]+$ ]]          || die "解析峰值 RSS 失败：$(grep -i resident <<<"$o" | head -1)"
-  printf '%s %s\n' "$secs" "$rss"
+          -bo 1 -bs 1 -np -nt >/dev/null; } 2>&1 )" || {
+    # 取**开头**几行：被测程序自己的报错在前，/usr/bin/time -l 的统计追加在后
+    echo "-- whisper-cli 输出开头 --" >&2; head -5 <<<"$o" >&2
+    die "whisper-cli 失败：模型 $(basename "$2") / 音频 $(basename "$3")"
+  }
+  RUN_SECS="$(awk '$2=="real"{print $1; exit}' <<<"$o")"
+  RUN_RSS="$(awk '/maximum resident set size/{print $1; exit}' <<<"$o")"
+  [[ "$RUN_SECS" =~ ^[0-9]+\.?[0-9]*$ ]] || die "解析墙钟失败（/usr/bin/time 输出格式变了？）：$(head -3 <<<"$o")"
+  [[ "$RUN_RSS"  =~ ^[0-9]+$ ]]          || die "解析峰值 RSS 失败：$(grep -i resident <<<"$o" | head -1)"
+}
+
+# bc 语法错误时只往 stderr 写一行、stdout 为空、退出码仍是 0，所以结果得自己验。
+rtf_of() {  # $1=墙钟秒 $2=音频时长秒 → 回写 RTF_OUT
+  RTF_OUT="$(echo "$1/$2" | bc -l)"
+  [[ "$RTF_OUT" =~ ^[0-9]*\.?[0-9]+$ ]] || die "RTF 计算结果不是数字：'$RTF_OUT'（墙钟=$1 时长=$2）"
 }
 
 DS="$(dur "$C/len-short.wav")"; DM="$(dur "$C/len-mid.wav")"; DL="$(dur "$C/len-long.wav")"
+# ffprobe 可能成功退出却打出 N/A 或空串，那样 bc 会把 RTF 算成垃圾
+for d in "$DS" "$DM" "$DL"; do
+  [[ "$d" =~ ^[0-9]+\.?[0-9]*$ ]] && [ "$(echo "$d > 0" | bc -l)" = 1 ] \
+    || die "语料时长解析失败：'$d'（$C 下的 wav 是不是坏了？）"
+done
 printf '语料 %.1fs / %.1fs / %.1fs（自编合成，仅供性能测量）｜线程 %s｜whisper.cpp %s\n\n' \
   "$DS" "$DM" "$DL" "$THREADS" "$(git -C "$WCPP" rev-parse --short HEAD 2>/dev/null || echo '?')"
 printf '%-24s %7s %8s %8s %8s %8s %8s  %s\n' 模型 体积MB 短RTF 中RTF 长RTF 短RSS 长RSS sha256
+# 跳过的模型必须在**stdout** 上留痕。只往 stderr 写的话，把输出重定向进
+# 数据文件时，那一行就消失了——表里少一行，看起来和「本来就没测这个」
+# 一模一样。收尾再以非零退出，让「部分失败」不会被当成成功。
+SKIPPED=0
 for m in "$@"; do
-  [ -f "$m" ] || { echo "跳过（不存在）：$m" >&2; continue; }
+  tag="$(basename "$m" .bin)"
+  [ -f "$m" ] || { printf '%-24s  !! 跳过：文件不存在\n' "$tag"; SKIPPED=$((SKIPPED+1)); continue; }
   sz="$(stat -f%z "$m")"
   # 转换失败留下的残件量化后仍只有几 MB。这只挡得住那一种坏法——
   # 截断到几百 MB、量化错档、架构不对都挡不住，所以下面把 sha256 一起打出来，
   # 出了问题至少能对上是哪个文件。
-  [ "$sz" -gt 100000000 ] || { echo "跳过（只有 $((sz/1000000)) MB，多半是转换失败的残件）：$m" >&2; continue; }
-  read -r ts rs <<<"$(run "$CLI" "$m" "$C/len-short.wav")"
-  read -r tm _  <<<"$(run "$CLI" "$m" "$C/len-mid.wav")"
-  read -r tl rl <<<"$(run "$CLI" "$m" "$C/len-long.wav")"
-  printf '%-24s %7d %8.3f %8.3f %8.3f %8d %8d  %s\n' "$(basename "$m" .bin)" \
-    $((sz/1000000)) \
-    "$(echo "$ts/$DS" | bc -l)" "$(echo "$tm/$DM" | bc -l)" "$(echo "$tl/$DL" | bc -l)" \
-    $((rs/1000000)) $((rl/1000000)) \
+  [ "$sz" -gt 100000000 ] || {
+    printf '%-24s  !! 跳过：只有 %d MB，多半是转换失败的残件\n' "$tag" $((sz/1000000))
+    SKIPPED=$((SKIPPED+1)); continue; }
+  # 三次运行都直接调用（不套 $(...)），任何一次失败都会当场终止整个脚本
+  run "$CLI" "$m" "$C/len-short.wav"; ts="$RUN_SECS"; rs="$RUN_RSS"
+  run "$CLI" "$m" "$C/len-mid.wav";   tm="$RUN_SECS"
+  run "$CLI" "$m" "$C/len-long.wav";  tl="$RUN_SECS"; rl="$RUN_RSS"
+  rtf_of "$ts" "$DS"; RS="$RTF_OUT"
+  rtf_of "$tm" "$DM"; RM="$RTF_OUT"
+  rtf_of "$tl" "$DL"; RL="$RTF_OUT"
+  printf '%-24s %7d %8.3f %8.3f %8.3f %8d %8d  %s\n' "$tag" \
+    $((sz/1000000)) "$RS" "$RM" "$RL" $((rs/1000000)) $((rl/1000000)) \
     "$(shasum -a 256 "$m" | cut -c1-12)"
 done
+
+[ "$SKIPPED" = 0 ] || die "$SKIPPED 个模型被跳过，上面这张表不完整"

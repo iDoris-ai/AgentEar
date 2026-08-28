@@ -128,6 +128,14 @@ def main() -> int:
     # **只比长度不够**：两段不同的文本完全可能等长，那样就会拿不同参考的
     # 结果做「配对」而检查不出来。
     ref_fp = _refs_fingerprint(refs)
+    # **音频指纹另立一格，不并进 ref_fp。** 并进去会让已产出的六份结果文件
+    # 全部失配（它们的 ref_fp 是按旧口径算的）。
+    # 少了这一格，「上游换了音频、文字没动」这种情况配对检查完全看不出来：
+    # 两份结果参考文本一致、长度一致，却是在不同录音上跑出来的。
+    audio_fp = _audio_fingerprint(refs)
+    if audio_fp is None:
+        print("   注：refs.json 缺 audio_sha256_16，本次结果不带音频指纹"
+              "（cer-stats.py 将无法校验两份结果是否用了同一批录音）", file=sys.stderr)
 
     per, empty, t0 = {}, 0, time.time()
     for name in sorted(refs):
@@ -148,6 +156,7 @@ def main() -> int:
         "cli_sha256_12": _sha12(cli),
         "norm": "NFC|lower|strip-space|strip-unicode-P|keep-ฯ",
         "refs_norm_sha256_16": ref_fp,
+        "refs_audio_sha256_16": audio_fp,
         "n": len(per),
         "empty_output": empty,
         "elapsed_s": round(time.time() - t0, 1),
@@ -161,6 +170,19 @@ def main() -> int:
     print(f"{tag:24s} CER_cp={cp:.4f}  CER_bcm={bcm:.4f}  "
           f"空输出={empty}/{len(per)}  耗时={res['elapsed_s']:.0f}s  → {path}")
     return 0
+
+
+def _audio_fingerprint(refs: dict):
+    """取到的是不是同一批**录音**的指纹。缺 audio_sha256_16 时返回 None。
+
+    参考文本指纹只覆盖「念的是什么」，覆盖不到「谁在念、哪一段录音」。
+    """
+    import hashlib
+    if not all(isinstance(v, dict) and v.get("audio_sha256_16") for v in refs.values()):
+        return None
+    blob = json.dumps([[k, refs[k]["audio_sha256_16"]] for k in sorted(refs)],
+                      ensure_ascii=False).encode()
+    return hashlib.sha256(blob).hexdigest()[:16]
 
 
 def _refs_fingerprint(refs: dict) -> str:
