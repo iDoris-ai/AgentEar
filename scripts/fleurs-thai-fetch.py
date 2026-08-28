@@ -114,7 +114,12 @@ def main() -> int:
     if n_uniq != len(manifest):
         print(f"   注：{len(manifest) - n_uniq} 条与其他条目共用 prompt（同文本的不同录音）")
 
-    pq_sha = hashlib.sha256(open(pq_path, "rb").read()).hexdigest()
+    # 分块读：整块读入 753 MB 的 parquet 只为算一个哈希，内存上没必要
+    _h = hashlib.sha256()
+    with open(pq_path, "rb") as _f:
+        for _chunk in iter(lambda: _f.read(1 << 20), b""):
+            _h.update(_chunk)
+    pq_sha = _h.hexdigest()
 
     if os.path.exists(MANIFEST):
         ref = json.load(open(MANIFEST))

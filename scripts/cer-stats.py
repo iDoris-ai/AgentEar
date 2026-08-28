@@ -55,8 +55,10 @@ def boot_ci(per, names, kind, n_boot, seed):
         idx = [names[rnd.randrange(N)] for _ in range(N)]
         vals.append(cer(per, idx, kind))
     vals.sort()
-    # 百分位取离散下标（非插值）。与 NumPy 默认的线性插值会有微小差异。
-    return vals[int(0.025 * n_boot)], vals[int(0.975 * n_boot)]
+    # 百分位取离散下标（非插值），与 NumPy 默认的线性插值会有微小差异。
+    # 上下两端取对称下标：int(0.975*n) 会比下端多留一个，差约 1e-4。
+    lo = int(0.025 * n_boot)
+    return vals[lo], vals[n_boot - 1 - lo]
 
 
 def boot_paired(a, b, names, kind, n_boot, seed):
@@ -68,7 +70,8 @@ def boot_paired(a, b, names, kind, n_boot, seed):
         idx = [names[rnd.randrange(N)] for _ in range(N)]
         diffs.append(cer(a, idx, kind) - cer(b, idx, kind))
     diffs.sort()
-    return diffs[int(0.025 * n_boot)], diffs[int(0.975 * n_boot)]
+    lo = int(0.025 * n_boot)          # 与 boot_ci 同样取对称下标
+    return diffs[lo], diffs[n_boot - 1 - lo]
 
 
 # ⚠️ **这不是预注册的比较集合。** 它是在结果已经产出之后固定下来的
@@ -110,8 +113,15 @@ def main() -> int:
     if n_boot <= 0:
         print("重采样次数必须为正", file=sys.stderr)
         return 1
-    no_text_fp, no_audio_fp = [], []
-    baseline_tag = next(iter(res))
+    # **普查要把 baseline 自己算进去。** 之前拿 next(iter(res)) 当基线又把它
+    # 排除在普查外，于是「6 份全缺」和「只有基线缺」打出一字不差的同一行；
+    # 后一种情况点名的还恰恰是**有**指纹的那 5 份，把人指向健康的产物。
+    no_text_fp = [t for t in sorted(res) if not res[t].get("refs_norm_sha256_16")]
+    no_audio_fp = [t for t in sorted(res) if not res[t].get("refs_audio_sha256_16")]
+    # 基线自己缺指纹的话，下面 `fa and fb` 恒假，其余结果彼此参考文本不同也
+    # 查不出来 —— 正是那道守卫声称挡住的失败。所以优先挑一个有指纹的当基线。
+    with_fp = [t for t in sorted(res) if res[t].get("refs_norm_sha256_16")]
+    baseline_tag = with_fp[0] if with_fp else sorted(res)[0]
     baseline = res[baseline_tag]
     names = sorted(baseline["per_sample"])
     if not names:
@@ -129,9 +139,7 @@ def main() -> int:
                 print(f"!! {tag} 的参考指纹与 {baseline_tag} 不一致"
                       f"（{fa} vs {fb}），配对无效", file=sys.stderr)
                 return 1
-        elif tag != baseline_tag:
-            # 旧结果文件没有指纹字段，退回长度校验（挡不住等长的不同参考）
-            no_text_fp.append(tag)
+        # 缺字段的情况在上面已统一普查过，这里不再逐个收集
         # 参考文本一致不等于录音一致：上游换了音频、文字没动，上面那道全过。
         aa, ab = r.get("refs_audio_sha256_16"), baseline.get("refs_audio_sha256_16")
         if aa and ab:
@@ -140,8 +148,7 @@ def main() -> int:
                       f"（{aa} vs {ab}）——参考文本相同但录音不同，配对无效",
                       file=sys.stderr)
                 return 1
-        elif tag != baseline_tag:
-            no_audio_fp.append(tag)
+
         if r.get("norm") != baseline.get("norm"):
             print(f"!! {tag} 的归一化口径与 {baseline_tag} 不同"
                   f"（{r.get('norm')} vs {baseline.get('norm')}）", file=sys.stderr)
@@ -153,12 +160,19 @@ def main() -> int:
                           file=sys.stderr)
                     return 1
 
+    # **写 stdout，不写 stderr。** thai-cer-stats.txt 是 stdout 重定向来的，
+    # 写 stderr 的话这两行永远进不了产物 —— 同一个坑 bench-thai.sh 的注释里
+    # 已经写死过一次，「缺结果」那条也已经改成 stdout + 退出码 3。
     if no_text_fp:
-        print(f"   注：{len(no_text_fp)} 份结果缺 refs_norm_sha256_16，对它们只做了"
-              f"长度校验（挡不住等长的不同参考）：{', '.join(no_text_fp)}", file=sys.stderr)
+        print(f"!! {len(no_text_fp)}/{len(res)} 份结果缺 refs_norm_sha256_16，"
+              f"对它们只能做长度校验（挡不住等长的不同参考）：{', '.join(no_text_fp)}")
     if no_audio_fp:
-        print(f"   注：{len(no_audio_fp)} 份结果缺 refs_audio_sha256_16，无法校验"
-              f"是否跑在同一批录音上：{', '.join(no_audio_fp)}", file=sys.stderr)
+        print(f"!! {len(no_audio_fp)}/{len(res)} 份结果缺 refs_audio_sha256_16，"
+              f"无法校验是否跑在同一批录音上：{', '.join(no_audio_fp)}")
+    if no_text_fp:
+        print(f"!! 基线取的是 {baseline_tag}"
+              f"{'（它自己也没有指纹，参考一致性实际上未被校验）' if baseline_tag in no_text_fp else ''}")
+    print()
 
     print(f"n={len(names)} 条录音，自助法 {n_boot} 次，粒度 {kind}，"
           f"种子 CI={SEED_CI}/配对={SEED_PAIRED}\n")

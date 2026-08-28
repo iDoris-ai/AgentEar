@@ -118,11 +118,17 @@ def main() -> int:
     os.makedirs(outdir, exist_ok=True)
 
     refs = json.load(open(data + "/refs.json"))
-    tag = os.path.basename(model).replace(".bin", "")
+    base = os.path.basename(model)
+    # 去后缀，不是全局替换：`a.bin.quant.bin` 这种名字会被 replace 改成 `a.quant`
+    tag = base[:-4] if base.endswith(".bin") else base
 
-    # 先冒烟一条，模型坏掉要立刻知道，而不是跑完 80 条才发现全是空
+    # 先冒烟一条，模型坏掉要立刻知道，而不是跑完 80 条才发现全是空。
+    # **只判退出码不够**：「能加载但吐空串」是另一种坏法，那样会安安静静
+    # 跑满 80 条，产出一组 100% 删除错误的假 CER。
     first = sorted(refs)[0]
-    transcribe(cli, model, f"{data}/wav/{first}.wav")
+    if not transcribe(cli, model, f"{data}/wav/{first}.wav"):
+        raise SystemExit(f"!! 冒烟失败：{first} 的转写为空。模型能加载但不产出文本，"
+                         f"继续跑只会得到一组 100% 删除错误的假数字。")
 
     # 归一化后参考文本的指纹。cer-stats.py 拿它判断两份结果能不能配对——
     # **只比长度不够**：两段不同的文本完全可能等长，那样就会拿不同参考的
