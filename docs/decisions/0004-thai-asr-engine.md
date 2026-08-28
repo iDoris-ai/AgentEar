@@ -363,4 +363,19 @@ FLEURS 是朗读式新闻语料，没有夹英文。自编合成语料测这个�
 - 与 SenseVoice 同时驻留时的系统总占用（注意 mmap 的 RSS 不能简单相加）
 - 长音频（5/15/30/60 分钟）的 RSS 时间序列，用来判定 §3 那条分段约束
 - 解码的确定性（同输入多次跑是否逐字一致）
-- 模型许可与再分发义务的正式确认（按需下载要托管转换后的 GGML）
+- **whisper 的冷启动时间**。ASR 现在是「每次录音起一个子进程、转完就退」，
+  这套路成立的前提是 SenseVoice 冷启动 0.2s。distill q5_0 有 574 MB，
+  每次录音重新从磁盘加载可能要好几秒。**这个数决定架构** —— 慢的话泰语
+  就得走常驻模式，2 GiB 预算的问题又回来了。动手写引擎抽象之前先测掉。
+
+### 已拍板，不再是待办（jason 2026-08-28）
+
+- **模型许可不作为阻塞项。** 用途是本地测试，非商业、不牟利。
+  唯一还需要动手的地方是阶段 D 把转换后的 GGML 挂到 GitHub Release ——
+  那是向公众分发，不是私下测试。MIT 和 Apache-2.0 都允许，义务只是
+  随文件附上许可原文与版权声明。**十分钟的事，不是门槛，不要再当阻塞项讨论。**
+- **两个候选的身份已确认**：`distill` = `biodatlab/distill-whisper-th-large-v3`
+  （809M，**MIT**，从 large-v3 蒸馏），`medium` = `biodatlab/whisper-th-medium-combined`
+  （764M，Apache-2.0）。**是两个不同的模型**，但同属 biodatlab（Thonburian）。
+  因此「distill 与 medium 未检出差异」不受 FLEURS 偏袒 Thonburian 的影响，
+  而「Thonburian 优于 turbo」受影响 —— turbo 的去留仍要等 code-switch 数据。
