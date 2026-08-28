@@ -260,6 +260,8 @@
   border-left:3px solid var(--signal); background:color-mix(in srgb, var(--signal) 9%, transparent);
   font-size:.9rem; }
 .drift .en { display:block; color:var(--slate); font-size:.85rem; margin-top:.2rem; }
+.err .ovr { margin-top:.6rem; }
+.err .th, .err .en { display:block; }
 .sendback { margin:1rem 0 0; font-size:.95rem; }
 .sendback .en { display:block; color:var(--slate); font-size:.86rem; margin-top:.25rem; }
 </style>
@@ -338,9 +340,9 @@
   <section class="finish">
     <h2>ส่งกลับอะไรบ้าง · What to send back</h2>
     <ul class="checklist" id="checklist">
-      <li data-ok="0"><span class="box">[ ]</span><span>ไฟล์เสียง 3 ไฟล์ (ตอนที่ 1–3) — <strong>กดบันทึกแล้ว</strong> · Three audio files — <strong>saved to disk</strong></span></li>
+      <li data-ok="0"><span class="box">[ ]</span><span>ไฟล์เสียง 3 ไฟล์ (ตอนที่ 1–3) — <strong>กดบันทึกแล้ว และเช็กว่าไฟล์อยู่จริง</strong> · Three audio files — <strong>download pressed, and you checked the file is really there</strong></span></li>
       <li data-ok="0"><span class="box">[ ]</span><span><strong>ข้อความที่แก้แล้ว</strong> — กดปุ่มข้างล่าง · <strong>The corrected text</strong> — button below</span></li>
-      <li data-ok="0"><span class="box">[ ]</span><span>(ถ้าสะดวก) ตอนที่ 4 พูดสด — กดบันทึกแล้ว · (Optional) Passage 4, unscripted — saved</span></li>
+      <li data-ok="0"><span class="box">[ ]</span><span>(ถ้าสะดวก) ตอนที่ 4 พูดสด — กดบันทึกแล้ว · (Optional) Passage 4, unscripted — download pressed</span></li>
     </ul>
     <button class="btn" id="dlText" type="button">⤓ ดาวน์โหลดข้อความที่แก้แล้ว · Download corrected text</button>
     <p class="sendback">
@@ -427,7 +429,7 @@ const TARGET_SR = 16000;
    清掉新会话的 activeId，而 Math.max(0,…) 只挡住了负数挡不住这个。
    现在任何回调改 session 之前先验证 `owns(myToken)`；不是自己的就什么都不碰。 */
 const session = {
-  stream: null, ctx: null, analyser: null, rafId: null,
+  stream: null, ctx: null, analyser: null, source: null, rafId: null,
   // { token, id, phase: "acquiring" | "recording" | "converting" }
   holder: null,
 };
@@ -439,6 +441,23 @@ const owns = t => !!session.holder && session.holder.token === t;
 //   saved = 用户真的按过「保存」，不是「录过」
 const state = new Map();
 const takes = new Map();   // id → { setBusy, clearResult }
+
+/* 文本比较与导出都过这一道：NFC 归一 + 去首尾空白。
+   **不做 NFKC** —— 它会改掉评分需要的字符（泰语 ำ 之类）。
+   只做 NFC 的话，视觉相同但码点不同的输入（重音字母的 NFD 形式）不会被
+   误判成「改过了」。IME 组合期间的中间 input 要跳过，见下方 compositionend。 */
+const normText = v => (v || "").normalize("NFC").trim();
+
+/* 已下载的答案文件会过期：下载完再改文本、再重录、改个署名，磁盘上那份
+   就对不上了，而清单还绿着 —— 于是他按着绿勾把旧文本发出来，
+   WAV 和参考文本静默错配。这正是本页想避免的事，只是从内存搬到了磁盘。
+   所以记下**导出内容本身**的指纹，每次刷新重算，对不上就打回未完成。 */
+let textExportFp = null;
+const fnv1a = str => {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < str.length; i++) { h ^= str.charCodeAt(i); h = (h * 0x01000193) >>> 0; }
+  return h.toString(16);
+};
 
 /* 文件名要能区分不同的人，否则几个人各发来一个 th-p1-devops.wav 就撞了 */
 const speakerId = () => {
@@ -493,23 +512,80 @@ function encodeWav(samples, sampleRate) {
    Chrome 的离线解码在 9 kHz 折回点上还残留 0.097，而下面的 sinc 是 0.00016。
    这批录音是要拿去和 FLEURS 比的测量样本，同一段声音在不同浏览器上得出不同
    结果，会让语料本身失去可比性。宁可多花几百毫秒，换一份确定的结果。 */
-async function decodeAudio(ab) {
-  // 优先用固定 48 kHz 的离线上下文解码：不受播放设备采样率影响，同一份输入
-  // 在不同机器上拿到同一份中间结果。不支持就退回普通 AudioContext —— 出来
-  // 什么采样率都行，下面的 sinc 一律接得住。
-  try {
-    const off = new OfflineAudioContext(1, 1, 48000);
-    const buf = await off.decodeAudioData(ab.slice(0));
-    if (buf) return buf;
-  } catch (_) {}
-  const AC = window.AudioContext || window.webkitAudioContext;
-  const tmp = new AC();
-  try {
-    return await tmp.decodeAudioData(ab.slice(0));
-  } finally {
-    // 失败路径也要关，否则每次转换失败都漏一个 AudioContext
-    try { await tmp.close(); } catch (_) {}
+/* ── 采集原始 PCM ──
+   **不用 MediaRecorder。** 各家浏览器用不同的**有损**编码器（Chrome 多为
+   Opus，Safari 多为 AAC），解码回来只是把有损结果装进 PCM，恢复不了原波形；
+   码率、预回声、高频截止、编码器内部的 DSP 都不同。这批录音是要拿去和
+   FLEURS 比 CER 的**测量样本**，采集端夹一层各家不同的有损编码，就没法把
+   CER 的差异归因给「泰语夹英文词」而不是「浏览器用了哪个编码器」。
+   直接从 AudioContext 取 Float32 就没有这一层。 */
+const CAP_WORKLET = `
+class Cap extends AudioWorkletProcessor {
+  constructor() { super(); this.buf = new Float32Array(4096); this.n = 0; }
+  process(inputs) {
+    const ch = inputs[0] && inputs[0][0];
+    if (ch) for (let i = 0; i < ch.length; i++) {
+      this.buf[this.n++] = ch[i];
+      if (this.n === this.buf.length) { this.port.postMessage(this.buf.slice(0)); this.n = 0; }
+    }
+    return true;
   }
+}
+registerProcessor('agentear-cap', Cap);
+`;
+
+const MAX_TAKE_SECONDS = 600;   // 10 分钟；48 kHz float 下约 115 MB，再长不收
+
+async function startCapture(ctx, source) {
+  const chunks = [];
+  let total = 0, dropped = 0;
+  const cap = Math.round(ctx.sampleRate * MAX_TAKE_SECONDS);
+  const push = a => {
+    if (total >= cap) { dropped += a.length; return; }
+    chunks.push(a); total += a.length;
+  };
+
+  let node = null, worklet = false;
+  if (ctx.audioWorklet && typeof AudioWorkletNode === "function") {
+    try {
+      const url = URL.createObjectURL(new Blob([CAP_WORKLET], { type: "text/javascript" }));
+      try { await ctx.audioWorklet.addModule(url); } finally { URL.revokeObjectURL(url); }
+      node = new AudioWorkletNode(ctx, "agentear-cap");
+      node.port.onmessage = e => push(e.data);
+      worklet = true;
+    } catch (_) { node = null; }
+  }
+  if (!node) {
+    // ScriptProcessorNode 已废弃，但老 Safari 只有它，而这条路失败的代价是
+    // 整个页面录不了音。它在主线程上跑，卡顿时会丢块——所以只当退路。
+    node = ctx.createScriptProcessor(4096, 1, 1);
+    node.onaudioprocess = e => push(new Float32Array(e.inputBuffer.getChannelData(0)));
+  }
+  // 两种节点都要有下游才会被拉动；增益置 0，免得把麦克风的声音放出来
+  const sink = ctx.createGain();
+  sink.gain.value = 0;
+  source.connect(node); node.connect(sink); sink.connect(ctx.destination);
+
+  const backend = worklet ? "audioworklet" : "scriptprocessor";
+  let taken = false;
+  return {
+    backend,
+    get seconds() { return total / ctx.sampleRate; },
+    take() {
+      if (taken) return null;
+      taken = true;
+      if (node.port) node.port.onmessage = null;
+      node.onaudioprocess = null;
+      try { source.disconnect(node); } catch (_) {}
+      try { node.disconnect(); } catch (_) {}
+      try { sink.disconnect(); } catch (_) {}
+      const pcm = new Float32Array(total);
+      let o = 0;
+      for (const c of chunks) { pcm.set(c, o); o += c.length; }
+      chunks.length = 0;
+      return { pcm, sampleRate: ctx.sampleRate, dropped, backend };
+    },
+  };
 }
 
 /* Blackman 窗 sinc 重采样，纯 JS，唯一的重采样路径。
@@ -518,18 +594,52 @@ async function decodeAudio(ab) {
    任何浏览器行为，抗混叠靠核函数自身的截止频率。
    实测（48 kHz → 16 kHz，见 PR 描述）：通带 200/1k/3k/5k Hz 增益 1.0000，
    7 kHz −0.75 dB，9 kHz 起的折回残留 ≤0.00016。 */
+function besselI0(x) {
+  let sum = 1, term = 1;
+  for (let k = 1; k < 64; k++) {
+    const r = x / (2 * k);
+    term *= r * r; sum += term;
+    if (term < 1e-14 * sum) break;
+  }
+  return sum;
+}
+
 function resampleSinc(x, srcRate, dstRate) {
   if (srcRate === dstRate) return x;
   const ratio = dstRate / srcRate;
   const n = Math.max(1, Math.round(x.length * ratio));
   const out = new Float32Array(n);
-  // 下采样时截止取目标 Nyquist（相对源采样率），留 5% 过渡带；上采样不需低通
-  const cutoff = Math.min(1, ratio) * 0.95;
-  const taps = Math.ceil(16 / cutoff);
-  const width = 2 * taps + 1;
 
-  // 相位核表。直接在内层循环里算 sin 的话，一分钟录音要几十万次三角函数，
-  // 手机上会把主线程卡死好几秒；把小数偏移量量化成 PH 档，核只算一次。
+  // **指标先定死，阶数由指标反解**，不是先拍个阶数再看能滤成什么样。
+  // 上一版是 `cutoff = ratio * 0.95` 配 103 taps —— 那只是把 −6 dB 点放在
+  // 7.6 kHz，和「过渡带有多宽」没有任何关系，实测 8.1 kHz 折回 7.9 kHz 时
+  // 还有 −17.9 dB。只测 9 kHz 以上的话正好避开这一段，看不出来。
+  //
+  //   下采样：阻带边界只能压在**目标 Nyquist** 上 —— 超过它的任何能量都
+  //           会折回带内。通带取 0.875×目标 Nyquist（16 kHz 时是 7 kHz）。
+  //   上采样：镜像出现在**源 Nyquist** 以上，故以源 Nyquist 为中心，
+  //           通带 0.95×源 Nyquist（不能像下采样那样砍到 0.875，
+  //           那是在削真实存在的源高频）。
+  const nyq = Math.min(srcRate, dstRate) / 2;      // Hz
+  const fStop = nyq;
+  const fPass = nyq * (srcRate < dstRate ? 0.95 : 0.875);
+  const fc = (fPass + fStop) / 2;                  // −6 dB 点
+  const trans = (fStop - fPass) / srcRate;         // 归一化过渡带宽
+
+  // Kaiser 窗的经验公式：给定阻带衰减 A(dB) 反解 β 和阶数。
+  // A=80 → 48 kHz→16 kHz 得 239 taps。阶数随过渡带收窄而增长，
+  // 这正是「指标决定成本」而不是反过来。
+  const A = 80;
+  const beta = A > 50 ? 0.1102 * (A - 8.7) : 0.5842 * Math.pow(A - 21, 0.4) + 0.07886 * (A - 21);
+  const taps = Math.max(16, Math.ceil((A - 8) / (2.285 * 2 * Math.PI * trans) / 2));
+  const width = 2 * taps + 1;
+  const cut = 2 * fc / srcRate;                    // 归一化截止（周期/采样）
+  const i0b = besselI0(beta);
+
+  // 相位核表。直接在内层循环里算 sin/Bessel 的话，一分钟录音要几十万次
+  // 超越函数，手机上会把主线程卡死好几秒；把小数偏移量量化成 PH 档，
+  // 核只算一次。48 kHz→16 kHz 是精确 3:1，所有输出中心都落在整数上，
+  // 这一档的量化误差为零；非整数比时用最近相位（不是向下取整）。
   const PH = 512;
   const kern = new Float32Array(PH * width);
   for (let ph = 0; ph < PH; ph++) {
@@ -537,10 +647,11 @@ function resampleSinc(x, srcRate, dstRate) {
     let sum = 0;
     for (let j = 0; j < width; j++) {
       const t = (j - taps) - frac;
-      const arg = Math.PI * cutoff * t;
-      const sinc = Math.abs(arg) < 1e-9 ? cutoff : cutoff * Math.sin(arg) / arg;
-      const p = (t + taps) / (2 * taps);            // Blackman 窗，阻带 ≈ −74 dB
-      const w = 0.42 - 0.5 * Math.cos(2 * Math.PI * p) + 0.08 * Math.cos(4 * Math.PI * p);
+      const arg = Math.PI * cut * t;
+      const sinc = Math.abs(arg) < 1e-9 ? cut : cut * Math.sin(arg) / arg;
+      // Kaiser 窗，自变量归一到 [-1, 1]
+      const u = t / (taps + 1);
+      const w = Math.abs(u) >= 1 ? 0 : besselI0(beta * Math.sqrt(1 - u * u)) / i0b;
       const v = sinc * w;
       kern[base + j] = v; sum += v;
     }
@@ -552,14 +663,17 @@ function resampleSinc(x, srcRate, dstRate) {
   for (let i = 0; i < n; i++) {
     const center = i / ratio;
     const i0 = Math.floor(center);
-    const base = Math.min(PH - 1, (center - i0) * PH | 0) * width;
-    const from = i0 - taps;
+    // 最近相位而不是向下取整：非整数比时误差直接少约 6 dB
+    let ph = Math.round((center - i0) * PH), off = i0;
+    if (ph >= PH) { ph = 0; off = i0 + 1; }
+    const base = ph * width;
+    const from = off - taps;
     let acc = 0;
     if (from >= 0 && from + width <= len) {
       for (let j = 0; j < width; j++) acc += x[from + j] * kern[base + j];
     } else {
-      // 两端不足半个窗：越界的抽头当静音处理（不重新归一化），
-      // 只影响首尾各约 3 ms
+      // 两端不足半个窗：越界的抽头按静音处理。首尾各约 (taps/srcRate) 秒内
+      // 增益不准（48 kHz / 119 taps 时约 2.5 ms），正常录音这一段是静音。
       for (let j = 0; j < width; j++) {
         const idx = from + j;
         if (idx >= 0 && idx < len) acc += x[idx] * kern[base + j];
@@ -570,29 +684,52 @@ function resampleSinc(x, srcRate, dstRate) {
   return out;
 }
 
-/* decodeAudioData 返回文件本身的声道数，不受上下文声道数影响，所以自己降混 */
-function mixToMono(buf) {
-  const n = buf.length;
-  if (buf.numberOfChannels === 1) return buf.getChannelData(0);
-  const out = new Float32Array(n);
-  for (let c = 0; c < buf.numberOfChannels; c++) {
-    const d = buf.getChannelData(c);
-    for (let i = 0; i < n; i++) out[i] += d[i];
+/* 落盘前的质量体检。
+   电平表只在录音那几秒有效，还要求他一直盯着看；真正会被发出去的是这份
+   数据，所以在这里按整段重新判一次。单看全局峰值不行——整段静音里混一个
+   0.02 的咔哒声就能过。 */
+function analyseTake(x, sr) {
+  const n = x.length, seconds = n / sr;
+  let peak = 0, sumsq = 0, clipped = 0;
+  for (let i = 0; i < n; i++) {
+    const a = Math.abs(x[i]);
+    if (a > peak) peak = a;
+    if (a > 0.99) clipped++;
+    sumsq += x[i] * x[i];
   }
-  const g = 1 / buf.numberOfChannels;
-  for (let i = 0; i < n; i++) out[i] *= g;
-  return out;
+  const rms = n ? Math.sqrt(sumsq / n) : 0;
+  // 20 ms 分帧，算「有声帧」占比。门限同时看绝对值和相对峰值：
+  // 只用相对值的话，纯噪声也能有很高的有声比。
+  const fr = Math.max(1, Math.round(sr * 0.02));
+  const gate = Math.max(0.004, peak * 0.1);
+  let frames = 0, voicedFrames = 0;
+  for (let i = 0; i + fr <= n; i += fr) {
+    let ss = 0;
+    for (let j = i; j < i + fr; j++) ss += x[j] * x[j];
+    frames++;
+    if (Math.sqrt(ss / fr) > gate) voicedFrames++;
+  }
+  const voiced = frames ? voicedFrames / frames : 0;
+  const clipRatio = n ? clipped / n : 0;
+  const problems = [];
+  if (seconds < 2) problems.push({ th: "สั้นเกินไป (< 2 วินาที)", en: "shorter than 2 s" });
+  if (peak < 0.02) problems.push({
+    th: `แทบไม่มีเสียง (peak ${peak.toFixed(4)}) — ไมโครโฟนอาจถูกปิดอยู่`,
+    en: `virtually silent (peak ${peak.toFixed(4)}) — the mic may be muted or the wrong device` });
+  else if (voiced < 0.2) problems.push({
+    th: `มีเสียงพูดแค่ ${(voiced * 100).toFixed(0)}% ของความยาว — ส่วนใหญ่เป็นความเงียบ`,
+    en: `only ${(voiced * 100).toFixed(0)}% of the take has speech-level energy — mostly silence` });
+  if (clipRatio > 0.005) problems.push({
+    th: `เสียงดังเกินจนตัดยอด ${(clipRatio * 100).toFixed(1)}% — ขยับไมค์ให้ห่างขึ้น`,
+    en: `${(clipRatio * 100).toFixed(1)}% of samples are clipped — move further from the mic` });
+  return { peak, rms, seconds, voiced, clipRatio, problems };
 }
 
-/* decodeAudioData 会 detach 掉传进去的 ArrayBuffer，所以两条路径各拿一份拷贝。
-   顺带算出峰值和时长 —— 电平表只在录音当下有效，静音得在事后再查一次。 */
-async function toWav16k(blob) {
-  const decoded = await decodeAudio(await blob.arrayBuffer());
-  const mono = resampleSinc(mixToMono(decoded), decoded.sampleRate, TARGET_SR);
-  let peak = 0;
-  for (let i = 0; i < mono.length; i++) { const a = Math.abs(mono[i]); if (a > peak) peak = a; }
-  return { blob: encodeWav(mono, TARGET_SR), peak, seconds: mono.length / TARGET_SR,
-           srcRate: decoded.sampleRate };
+/* 采到的就是 Float32 PCM，只剩重采样这一步 */
+function toWav16k(pcm, srcRate) {
+  const mono = resampleSinc(pcm, srcRate, TARGET_SR);
+  const q = analyseTake(mono, TARGET_SR);
+  return { blob: encodeWav(mono, TARGET_SR), quality: q, seconds: q.seconds };
 }
 
 /* ── 环境自检 ──
@@ -603,9 +740,8 @@ function diagnose() {
     secure: window.isSecureContext,
     framed: window.self !== window.top,
     gum: !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia),
-    rec: typeof window.MediaRecorder === "function",
+
     ac:  !!(window.AudioContext || window.webkitAudioContext),
-    oac: typeof window.OfflineAudioContext === "function",
     // 没有 download 属性就存不下文件；那样让他直接走手机那条路，
     // 别让他录完一轮才发现点「保存」毫无反应
     dl:  "download" in document.createElement("a"),
@@ -625,6 +761,7 @@ const micPill = () => document.getElementById("micPill");
 function forceRelease() {
   if (session.rafId) { cancelAnimationFrame(session.rafId); session.rafId = null; }
   if (session.stream) { session.stream.getTracks().forEach(t => t.stop()); session.stream = null; }
+  if (session.source) { try { session.source.disconnect(); } catch (_) {} session.source = null; }
   if (session.ctx) { session.ctx.close().catch(() => {}); session.ctx = null; }
   session.analyser = null;
   document.querySelectorAll(".meter i").forEach(i => (i.style.width = "0%"));
@@ -669,11 +806,11 @@ window.addEventListener("pageshow", () => {
    要自己关掉自己申请到的 track，不能写进 session 覆盖新会话的资源。 */
 async function acquireMic(token) {
   const d = diagnose();
-  if (!d.secure || !d.gum || !d.rec || !d.ac || !d.oac || !d.dl) {
+  if (!d.secure || !d.gum || !d.ac || !d.dl) {
     micPill().textContent = "✕ เบราว์เซอร์ไม่รองรับ · unsupported";
     return { th: "เบราว์เซอร์นี้อัดเสียงไม่ได้ กรุณาใช้วิธีอัดด้วยมือถือ (ดูด้านล่าง)",
              en: "This browser can't record here. Please use the phone-recorder route below.",
-             detail: `secure=${d.secure} gum=${d.gum} MediaRecorder=${d.rec} AudioContext=${d.ac} Offline=${d.oac} download=${d.dl}` };
+             detail: `secure=${d.secure} gum=${d.gum} AudioContext=${d.ac} download=${d.dl}` };
   }
   if (session.stream) return null;
 
@@ -720,14 +857,19 @@ async function acquireMic(token) {
   try {
     const AC = window.AudioContext || window.webkitAudioContext;
     session.stream = got;
-    session.ctx = new AC();
-    session.analyser = session.ctx.createAnalyser();
+    const ctx = new AC();
+    session.ctx = ctx;
+    session.analyser = ctx.createAnalyser();
     session.analyser.fftSize = 1024;
-    session.ctx.createMediaStreamSource(session.stream).connect(session.analyser);
+    session.source = ctx.createMediaStreamSource(session.stream);
+    session.source.connect(session.analyser);
     // 新建的 AudioContext 可能是 suspended，那样电平表恒为 0 —— 而电平表是
     // 页面上唯一「麦克风真的在收音」的证据，恒 0 会被读成「我没出声」。
     // 这里仍在点击的调用链里，用户激活有效，resume 拿得到。
-    if (session.ctx.state === "suspended") await session.ctx.resume();
+    if (ctx.state === "suspended") await ctx.resume();
+    // resume 是 await 点：期间可能 pagehide 过（holder 清空、ctx 关闭）。
+    // 不重新验一次的话，下面会把 pill 改成「麦克风就绪」，而流早已释放。
+    if (!owns(token) || session.ctx !== ctx) return { superseded: true };
   } catch (e) {
     forceRelease();
     return { th: "เตรียมระบบเสียงไม่สำเร็จ", en: "Could not initialise the audio pipeline.",
@@ -776,7 +918,7 @@ function textDrift(id) {
   const rec = state.get(id);
   if (!rec) return false;
   const ta = document.querySelector(`#take-${id} .script`);
-  return !!ta && ta.value.trim() !== rec.text;
+  return !!ta && normText(ta.value) !== rec.text;
 }
 
 /* 「录了」和「存了」是两回事。页脚正在警告「不按保存就没了」，清单要是
@@ -786,17 +928,24 @@ function refreshProgress() {
     const d = document.querySelector(`#take-${p.id} .drift`);
     if (d) d.hidden = !textDrift(p.id);
   });
+  const ok = id => {
+    const r = state.get(id);
+    // 「录了」「按过保存」「文本没改过」「质量体检过了（或他听完亲自放行）」
+    return !!r && r.downloadRequested && !textDrift(id)
+        && !(r.quality && r.quality.problems.length && !r.qualityOverride);
+  };
   const need = PASSAGES.filter(p => !p.optional);
   const recorded = need.filter(p => state.get(p.id)).length;
-  const done = need.filter(p => { const r = state.get(p.id); return r && r.saved && !textDrift(p.id); }).length;
+  const done = need.filter(p => ok(p.id)).length;
   const pill = document.getElementById("progPill");
-  pill.textContent = `บันทึกแล้ว ${done} / ${need.length} · saved  (อัดแล้ว ${recorded} · recorded)`;
+  pill.textContent = `เรียบร้อย ${done} / ${need.length} · done  (อัดแล้ว ${recorded} · recorded)`;
   pill.classList.toggle("ok", done === need.length);
   const items = document.querySelectorAll("#checklist li");
-  const mark = (li, ok) => { li.dataset.ok = ok ? "1" : "0"; li.querySelector(".box").textContent = ok ? "[✓]" : "[ ]"; };
+  const mark = (li, good) => { li.dataset.ok = good ? "1" : "0"; li.querySelector(".box").textContent = good ? "[✓]" : "[ ]"; };
   mark(items[0], done === need.length);
-  const free = state.get("p4-free");
-  mark(items[2], !!(free && free.saved));
+  // 磁盘上那份答案文件与当前内容是否还一致
+  mark(items[1], textExportFp !== null && textExportFp === fnv1a(buildTextExport()));
+  mark(items[2], ok("p4-free"));
 }
 
 function buildTake(p) {
@@ -832,8 +981,14 @@ function buildTake(p) {
   const dlBtn = el.querySelector(".dl"), err = el.querySelector(".err");
   const status = el.querySelector(".status");
   const ta = el.querySelector("textarea.script");     // p4-free 没有文本框
-  if (ta) ta.addEventListener("input", refreshProgress);
-  let mr = null, tickId = 0, gen = 0, audioUrl = null;
+  if (ta) {
+    // 中文/日文输入法组合期间会连发 input，那时的中间态不该被当成「改了文本」
+    let composing = false;
+    ta.addEventListener("compositionstart", () => { composing = true; });
+    ta.addEventListener("compositionend", () => { composing = false; refreshProgress(); });
+    ta.addEventListener("input", () => { if (!composing) refreshProgress(); });
+  }
+  let cap = null, finishFn = null, tickId = 0, gen = 0, audioUrl = null;
 
   const clearResult = () => {
     if (audioUrl) { URL.revokeObjectURL(audioUrl); audioUrl = null; }
@@ -848,7 +1003,7 @@ function buildTake(p) {
   recBtn.addEventListener("click", async () => {
     // 正在录这一段 → 停止
     if (session.holder && session.holder.phase === "recording"
-        && session.holder.id === p.id && mr) { mr.stop(); return; }
+        && session.holder.id === p.id && finishFn) { finishFn(); return; }
     // 会话被任何人持有（申请中/录音中/转换中）→ 忽略。
     // 这道守卫必须在 await 之前**同步**执行并立刻占位，否则权限弹窗期间
     // 连点两下，两个 handler 都能越过它。
@@ -874,68 +1029,80 @@ function buildTake(p) {
       }
       err.hidden = true;
 
-      let chunks = [];
-      let recFailed = false;              // 每次点击独立，不跨次污染
+      const myGen = ++gen;
+      let myCap;
       try {
-        mr = new MediaRecorder(session.stream);
+        myCap = await startCapture(session.ctx, session.source);
       } catch (e) {
         err.hidden = false;
         err.innerHTML = `<span class="th">เริ่มอัดเสียงไม่ได้</span>
-          <span class="en" lang="en">Could not start the recorder.</span><code>${e.name}: ${e.message}</code>`;
+          <span class="en" lang="en">Could not start recording.</span><code>${e.name}: ${e.message}</code>`;
         return;
       }
-      const thisMr = mr;
-      const myGen = ++gen;
+      // 建采集节点要 await（AudioWorklet 得加载模块），期间可能已跨代：
+      // 自己拆掉自己建的节点，绝不写进 session
+      if (!owns(token) || myGen !== gen) { myCap.take(); return; }
+      cap = myCap;
+
       // 录音当下的文本快照。**必须在这里定死** —— 事后再读文本框的话，
       // 他改一个字就能让「答案」和实际念的内容静默错开。
-      let readText = "";
+      const readText = ta ? normText(ta.value) : "";
 
-      thisMr.ondataavailable = e => e.data && e.data.size && chunks.push(e.data);
-      thisMr.onerror = () => {
-        recFailed = true;
-        if (!owns(token)) return;
-        err.hidden = false;
-        err.innerHTML = `<span class="th">เกิดข้อผิดพลาดขณะอัดเสียง กรุณาอัดใหม่</span>
-          <span class="en" lang="en">The recorder failed. Please record again.</span>`;
-      };
-
-      thisMr.onstop = async () => {
+      finishFn = async () => {
+        finishFn = null;                       // 连点两下停止只走一次
         clearInterval(tickId);
-        const captured = chunks; chunks = [];
+        const taken = cap ? cap.take() : null;
+        cap = null;
         // **先验证所有权再动任何共享状态。** 反过来的话，pagehide 之后
-        // 迟到的 onstop 会把新会话的 holder 清掉，新录音就失去了锁。
-        if (!owns(token)) return;
+        // 迟到的收尾会把新会话的 holder 清掉，新录音就失去了锁。
+        if (!owns(token) || myGen !== gen) { releaseMic(); return; }
 
         recBtn.dataset.on = "0"; lbl.textContent = "อัดใหม่ · Re-record";
-
-        // 录音过程中报过错就不要这段音频——部分数据可能能解码，
-        // 那会同时显示「录好了」和「录音失败」，用户多半把残缺的发出去
-        if (recFailed) {
-          el.dataset.state = "idle";
-          status.textContent = "";
-          session.holder = null; syncLocks(); releaseMic();
-          return;
-        }
-
         session.holder.phase = "converting";
         el.dataset.state = "converting";
         status.textContent = "กำลังแปลงไฟล์… · converting…";
         syncLocks();
+        // 重采样是同步的、会占住主线程几百毫秒；先让一帧过去，
+        // 否则「正在转换」这行字根本来不及画出来
+        await new Promise(r => setTimeout(r, 0));
         try {
-          const res = await toWav16k(new Blob(captured, { type: thisMr.mimeType || "" }));
+          if (!taken || !taken.pcm.length) throw new Error("no audio captured");
+          const res = toWav16k(taken.pcm, taken.sampleRate);
           if (!owns(token) || myGen !== gen) return;
-          state.set(p.id, { blob: res.blob, text: readText, saved: false,
-                            peak: res.peak, seconds: res.seconds });
+          state.set(p.id, {
+            blob: res.blob, text: readText, downloadRequested: false,
+            quality: res.quality, seconds: res.seconds,
+            // 采集侧的来源信息，跟着答案文件一起交出去：
+            // 不同机器/浏览器的采集链路不同，事后要能分辨
+            src: { rate: taken.sampleRate, backend: taken.backend,
+                   dropped: taken.dropped, ua: navigator.userAgent },
+          });
           audioUrl = URL.createObjectURL(res.blob);
           audio.src = audioUrl; audio.hidden = false;
           dlBtn.disabled = false;
           el.dataset.state = "done";
-          // 事后静音检查。电平表只在录音那几秒有效，而且要求他一直盯着看；
-          // 真正会被发出去的是这份数据，所以在这里再查一遍。
-          if (res.peak < 0.01) {
+          const probs = res.quality.problems;
+          if (taken.dropped) {
+            probs.push({ th: `ยาวเกิน ${MAX_TAKE_SECONDS / 60} นาที ส่วนที่เกินถูกตัดทิ้ง`,
+                         en: `longer than ${MAX_TAKE_SECONDS / 60} min — the excess was dropped` });
+          }
+          if (probs.length) {
+            // 体检只是启发式：低增益麦克风的正常朗读也可能被判「太安静」。
+            // 所以不堵死 —— 给一个「我听过了」的显式出口，但必须他自己点。
             err.hidden = false;
-            err.innerHTML = `<span class="th">ไฟล์นี้แทบไม่มีเสียงเลย (peak ${res.peak.toFixed(4)}) — ไมโครโฟนอาจถูกปิดอยู่ กรุณาอัดใหม่</span>
-              <span class="en" lang="en">This take is virtually silent (peak ${res.peak.toFixed(4)}) — the microphone may be muted or picking up the wrong device. Please record again.</span>`;
+            err.innerHTML = `<span class="th">คุณภาพไฟล์นี้อาจมีปัญหา: ${probs.map(x => x.th).join("；")}</span>
+              <span class="en" lang="en">This take may have quality problems: ${probs.map(x => x.en).join("; ")}</span>
+              <span class="th">ลองกดฟังด้านบนก่อน — ถ้าฟังชัดดีก็กดปุ่มนี้ได้เลย</span>
+              <span class="en" lang="en">Play it back above first. If it actually sounds fine, press the button.</span>
+              <button class="btn ovr" type="button">✓ ฟังแล้ว เสียงใช้ได้ · I listened, it's fine</button>`;
+            err.querySelector(".ovr").addEventListener("click", () => {
+              const r = state.get(p.id);
+              if (!r) return;
+              r.qualityOverride = true;
+              err.hidden = true;
+              status.textContent = "อัดเสร็จแล้ว — อย่าลืมกด “บันทึกเป็น WAV” · Recorded — remember to press “Save WAV”";
+              refreshProgress();
+            });
             status.textContent = "";
           } else {
             status.textContent = "อัดเสร็จแล้ว — อย่าลืมกด “บันทึกเป็น WAV” · Recorded — remember to press “Save WAV”";
@@ -955,18 +1122,6 @@ function buildTake(p) {
         }
       };
 
-      try {
-        readText = ta ? ta.value.trim() : "";
-        // 给 timeslice：不给的话整段音频要攒到 stop 才交出来，
-        // 手机上长录音容易在中途被系统回收，攒着的那份就全没了
-        thisMr.start(5000);
-      } catch (e) {
-        err.hidden = false;
-        err.innerHTML = `<span class="th">เริ่มอัดเสียงไม่ได้</span>
-          <span class="en" lang="en">Could not start recording.</span><code>${e.name}: ${e.message}</code>`;
-        return;
-      }
-
       // 到这里才算真的开始重录，此刻废弃旧结果。放更早的话，
       // acquire/构造/start 任一失败都会白删上一份有效录音，
       // 而那时重录根本没开始，删了没有防误发的价值。
@@ -979,7 +1134,12 @@ function buildTake(p) {
       el.dataset.state = "recording";
       status.textContent = "กำลังอัด… · recording…";
       timer.textContent = "00:00";
-      tickId = setInterval(() => { timer.textContent = mmss((Date.now() - t0) / 1000); }, 200);
+      tickId = setInterval(() => {
+        const secs = (Date.now() - t0) / 1000;
+        timer.textContent = mmss(secs);
+        // 缓冲在内存里，不设上限的话忘了停就一路涨到把标签页耗死
+        if (secs >= MAX_TAKE_SECONDS && finishFn) finishFn();
+      }, 200);
       levelLoop();
     } finally {
       // 没能进入录音状态就交还会话，否则所有按钮永久卡在禁用。
@@ -992,9 +1152,11 @@ function buildTake(p) {
   dlBtn.addEventListener("click", () => {
     const rec = state.get(p.id); if (!rec) return;
     saveBlob(rec.blob, `th-${speakerId()}-${p.id}.wav`);
-    rec.saved = true;                 // 清单认的是这一下，不是「录过」
+    // **这只证明「发起了下载」**，不证明文件真落了盘：下载可能被策略拦下，
+    // iOS 可能只是打开预览页。所以文案是「请自己确认文件在」，不是「已保存」。
+    rec.downloadRequested = true;
     refreshProgress();
-    status.textContent = "บันทึกแล้ว — ช่วยเปิดโฟลเดอร์ Downloads เช็กว่าไฟล์อยู่จริงนะครับ · Saved — please check the file really landed in your Downloads folder";
+    status.textContent = "กดบันทึกแล้ว — ช่วยเปิดโฟลเดอร์ Downloads/ไฟล์ เช็กว่ามีไฟล์อยู่จริงนะครับ · Download requested — please open your Downloads/Files and check the file is really there";
   });
 
   return el;
@@ -1010,7 +1172,7 @@ document.getElementById("fontUp").onclick = () => { readSize = Math.min(2.4, rea
 document.getElementById("fontDown").onclick = () => { readSize = Math.max(1, readSize - .15); applySize(); };
 applySize();
 
-document.getElementById("dlText").addEventListener("click", () => {
+function buildTextExport() {
   const drifted = PASSAGES.filter(p => !p.optional && textDrift(p.id));
   let out = "# ข้อความที่แก้แล้ว / Corrected passages\n";
   out += `# speaker: ${speakerId()}\n`;
@@ -1025,13 +1187,35 @@ document.getElementById("dlText").addEventListener("click", () => {
     const rec = state.get(p.id);
     const ta = document.querySelector(`#take-${p.id} .script`);
     // 有录音就导出**录音当时**的快照 —— 那才是他真正念出来的东西
-    const text = rec ? rec.text : (ta ? ta.value.trim() : "");
+    const text = rec ? rec.text : (ta ? normText(ta.value) : "");
     out += `\n## ${p.id}  (${p.title})\n${text}\n`;
+    // 采集来源跟着答案一起走：不同机器/浏览器的采集链路不同，
+    // 事后要能分辨「这条 CER 高」是内容难还是采集端不一样
+    if (rec && rec.src) {
+      out += `#   src: ${rec.src.rate} Hz, ${rec.src.backend}, ` +
+             `${rec.seconds.toFixed(1)}s, peak ${rec.quality.peak.toFixed(3)}, ` +
+             `voiced ${(rec.quality.voiced * 100).toFixed(0)}%\n`;
+      out += `#   ua: ${rec.src.ua}\n`;
+      // 体检不过但他亲自放行了 —— 必须留痕，否则事后分不清「干净的样本」
+      // 和「被判可疑但放行的样本」
+      if (rec.quality.problems.length) {
+        out += `#   !! quality flags: ${rec.quality.problems.map(x => x.en).join("; ")}` +
+               `${rec.qualityOverride ? " [speaker confirmed OK after listening]" : ""}\n`;
+      }
+    }
   });
+  return out;
+}
+
+document.getElementById("dlText").addEventListener("click", () => {
+  const out = buildTextExport();
   saveBlob(new Blob([out], { type: "text/plain;charset=utf-8" }), `thai-passages-${speakerId()}.txt`);
-  const li = document.querySelectorAll("#checklist li")[1];
-  li.dataset.ok = "1"; li.querySelector(".box").textContent = "[✓]";
+  textExportFp = fnv1a(out);          // 之后任何改动都会让这一项掉绿
+  refreshProgress();
 });
+
+// 署名进文件名也进答案文件，改了就得重新导出
+document.getElementById("speaker").addEventListener("input", refreshProgress);
 
 refreshProgress();
 </script>
