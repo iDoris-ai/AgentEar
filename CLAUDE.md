@@ -61,7 +61,27 @@ scripts/bundle.sh                             # 打 .app bundle → dist/
 2. **长音频仍需分段送入 ASR，单段建议 ≤5 分钟。** RSS 随音频长度增长 0.52 MB/s，54 分钟破 2 GiB。影响 `ingest-design.md` 的**路径 A**；M1 的快捷键录音不受影响。
 3. **特殊 token 需过滤，但 `--keep-tags` 必须开着。** 已实测（2026-08-22）：转写走 stdout、日志走 stderr，多个 VAD 段拼在同一行，默认不泄漏 `/sil`。**`asr.rs` 靠 `<|zh|>`/`<|en|>` 标记的存在与否区分「转写结果」和「日志」，所以不能去掉 `--keep-tags`。** 绝不要退回「按有没有汉字判断」——那会把英/日/韩/泰的结果整段丢掉（已修，见 `docs/m1-status.md`）。
 4. **中英混杂技术术语不可靠。** 实测 `raw` 一词四个模型全错（row/road/ro/roll）；Docker → `doocca`、Kubernetes → `cuubber needs`。**术语纠错是 M2 的职责**，不要指望换 ASR 解决。
-5. **语种支持边界（实测）**：中文 ✅、英文 ✅、中英混合的中文部分 ✅。**泰语 ❌** 完全不可用且被误判成 `<|en|>`，需第二个引擎（whisper.cpp 候选，ADR-0004 待写）。泰语模型**按需下载**，不随包分发（jason 2026-08-22 拍板），主包保持 241 MB。
+5. **语种支持边界（实测）**：中文 ✅、英文 ✅、中英混合的中文部分 ✅。**泰语 ❌**。
+   **`llama-funasr-sensevoice` 的语种集合里根本没有 `th`**（只有 zh/en/yue/ja/ko/nospeech），
+   所以它永远不可能把音频标成泰语——两次实测分别误判成 `<|en|>` 和 `<|yue|>`。
+   这排除了「拿 SenseVoice 的语种标记当泰语路由依据」这一条路线（**但推不出
+   「只能用户显式选择」**——显式菜单是产品决策，不是实测结论，见 ADR-0004 §1）。
+   `src/asr.rs::thai_is_not_a_sensevoice_language` 钉住这个事实。
+6. **泰语引擎见 `docs/decisions/0004-thai-asr-engine.md`（草稿，未拍板）**。已完成：
+   三个 Whisper 系泰语微调（Thonburian medium / Thonburian distil-large-v3 /
+   typhoon-whisper-turbo）已转 GGML 并量化，跑在现有 whisper.cpp 上、不引入新运行时。
+   FLEURS 泰语 test 上实测 CER（n=80 条录音，含自助法 CI）：Thonburian 两个约
+   6.1–6.5%、typhoon-turbo 约 9.5%。六组**事后固定的探索性比较**里只有两组
+   检出差异，都是 Thonburian 优于 turbo；**但 Thonburian 的模型卡声明训练用过
+   FLEURS，比较不中立**。q5_0 与 q8_0 **未检出**准确率差异
+   （「未检出」不是「等效」——没有预定义非劣界）。
+   f16 档因峰值 1.84–1.90 GB 出局。**选型卡在 code-switch 数据**——FLEURS 没有夹英文，
+   而那正是实际场景。模型**按需下载**不随包分发（jason 2026-08-22 拍板），
+   q5_0 约 540–575 MB。
+7. **⚠️ 「长音频必须分段、单段 ≤5 分钟」是 SenseVoice 的约束，在 whisper 路径上
+   状态是「未验证」，不是「不适用」。** SenseVoice 的 RSS 每秒涨 0.52 MB；
+   whisper.cpp 在 11–98 秒区间只涨 18–40 MB，但**98 秒外推不到几十分钟**，
+   要测 5/15/30/60 分钟才能下结论。见 ADR-0004 §3。
 
 ### M1 的两个红利，不要提前破坏
 
