@@ -522,6 +522,7 @@ class Cap extends AudioWorkletProcessor {
   constructor() {
     super();
     this.buf = new Float32Array(4096); this.n = 0; this.done = false;
+    this.frames = 0; this.startFrame = -1;
     // 停止协议：主线程发 stop，音频线程把不满一块的残留发出来，再发 ACK。
     // 同一个 port 保证消息顺序，所以收到 ACK 时它之前投递的块都已到齐。
     // 少了这一步，停止时最多丢 4095 个样本（48 kHz 85 ms / 44.1 kHz 93 ms），
@@ -530,7 +531,11 @@ class Cap extends AudioWorkletProcessor {
       if (e.data && e.data.type === 'stop') {
         this.done = true;
         if (this.n) { this.port.postMessage(this.buf.slice(0, this.n)); this.n = 0; }
-        this.port.postMessage({ type: 'flushed' });
+        // 起止帧号取自**音频线程**的 currentFrame。用主线程的 ctx.currentTime
+        // 的话，ACK 投递的延迟（调度/GC/切后台，30–300 ms）会被算成「丢了音频」，
+        // 直接变成不可人工放行的假硬失败。
+        this.port.postMessage({ type: 'flushed', frames: this.frames,
+                                startFrame: this.startFrame, stopFrame: currentFrame });
       }
     };
   }
@@ -538,6 +543,7 @@ class Cap extends AudioWorkletProcessor {
     if (this.done) return false;
     const inp = inputs[0];
     if (inp && inp.length) {
+      if (this.startFrame < 0) this.startFrame = currentFrame;
       const len = inp[0].length, ch = inp.length;
       for (let i = 0; i < len; i++) {
         // **平均全部声道**。只取 inputs[0][0] 的话，设备真给了立体声时
@@ -545,7 +551,7 @@ class Cap extends AudioWorkletProcessor {
         // 会产出两种不同的语料。
         let acc = 0;
         for (let c = 0; c < ch; c++) acc += inp[c][i];
-        this.buf[this.n++] = acc / ch;
+        this.buf[this.n++] = acc / ch; this.frames++;
         if (this.n === this.buf.length) { this.port.postMessage(this.buf.slice(0)); this.n = 0; }
       }
     }
@@ -619,22 +625,28 @@ async function startCapture(ctx, source) {
     async take() {
       if (taken) return null;
       taken = true;
+      // **先读时钟再等 flush。** 等待期间 ctx.currentTime 照走，而 worklet
+      // 早已停止采集 —— 把等待时间算进去就是凭空多出一段「缺失」。
+      const elapsed = ctx.currentTime - t0;
+      let ack = null, flushTimedOut = false;
       if (worklet && node.port) {
-        await new Promise(resolve => {
+        ack = await new Promise(resolve => {
           let settled = false;
-          const done = () => { if (!settled) { settled = true; resolve(); } };
+          const done = v => { if (!settled) { settled = true; resolve(v); } };
           const prev = node.port.onmessage;
           node.port.onmessage = e => {
-            if (e.data && e.data.type === "flushed") done();
+            if (e.data && e.data.type === "flushed") done(e.data);
             else prev(e);
           };
           node.port.postMessage({ type: "stop" });
-          setTimeout(done, 300);       // worklet 崩了也不能把页面卡死
+          // worklet 崩了也不能把页面卡死。但超时意味着「ACK 之前的块都已到齐」
+          // 这个保证失效了 —— 那就得说出来，不能当无事发生。
+          setTimeout(() => done(null), 300);
         });
+        if (!ack) flushTimedOut = true;
         node.port.onmessage = null;
       }
       node.onaudioprocess = null;
-      const elapsed = ctx.currentTime - t0;
       try { source.disconnect(node); } catch (_) {}
       try { node.disconnect(); } catch (_) {}
       try { sink.disconnect(); } catch (_) {}
@@ -644,7 +656,10 @@ async function startCapture(ctx, source) {
       chunks.length = 0;
       // 拿到的样本数对不上流逝的时间 = 中间掉过块。这是**必须能看见**的：
       // 时间线有洞的录音在科学上不可用，而听起来往往只是「有点跳」。
-      const expectedFrames = Math.max(0, Math.round(elapsed * ctx.sampleRate) - dropped);
+      // 有 ACK 就用音频线程自己的帧号，没有（ScriptProcessor 或超时）才退回时钟
+      const audioFrames = ack ? Math.max(0, ack.stopFrame - ack.startFrame)
+                              : Math.round(elapsed * ctx.sampleRate);
+      const expectedFrames = Math.max(0, audioFrames - dropped);
       const missing = Math.max(0, expectedFrames - total);
       // 判「有洞」要先扣掉后端固有的量化，否则会误报。
       // ScriptProcessor 没有 flush 协议，最后不满一块的部分本来就交不出来：
@@ -654,6 +669,7 @@ async function startCapture(ctx, source) {
       return {
         pcm, sampleRate: ctx.sampleRate, dropped, backend,
         timeline: { elapsed, expectedFrames, gotFrames: total,
+                    producedFrames: ack ? ack.frames : null, flushTimedOut,
                     missingSeconds: missing / ctx.sampleRate, gaps, gapSeconds, tolerance },
       };
     },
@@ -799,7 +815,10 @@ function analyseTake(x, sr, opt) {
   const pct = q => sorted.length ? sorted[Math.min(sorted.length - 1,
       Math.max(0, Math.round(q * (sorted.length - 1))))] : 0;
   const noise = pct(0.20), speech = pct(0.90);
-  const snrDb = noise > 1e-9 ? 20 * Math.log10(Math.max(speech, 1e-9) / noise) : 99;
+  // noise 为 0 时分两种：确实有语音（动态范围极大，记 99）和整段全静音（记 0）。
+  // 都记 99 的话，被人工放行的全静音样本会在答案文件里留下「SNR 99 dB」。
+  const snrDb = noise > 1e-9 ? 20 * Math.log10(Math.max(speech, 1e-9) / noise)
+                             : (speech > 1e-9 ? 99 : 0);
   const gate = Math.max(noise * 3, 0.004);
   const voiced = sorted.length ? fRms.filter(v => v > gate).length / fRms.length : 0;
   const clipRatio = n ? clipped / n : 0;
@@ -831,6 +850,11 @@ function analyseTake(x, sr, opt) {
   if (tl && (tl.missingSeconds > (tl.tolerance != null ? tl.tolerance : 0.05) || tl.gaps > 0)) hard.push({
     th: `เสียงขาดหายระหว่างอัด (~${tl.missingSeconds.toFixed(2)} วิ) — ต้องอัดใหม่`,
     en: `the recording has gaps (~${tl.missingSeconds.toFixed(2)} s missing) — must re-record` });
+  if (tl && tl.flushTimedOut) hard.push({
+    // 超时后「ACK 之前的块都已到齐」这个保证就没了，小于容差的尾部丢失
+    // 也检不出来 —— 不能因为「看起来没问题」就放行
+    th: "ปิดการอัดไม่สมบูรณ์ ท้ายไฟล์อาจขาด — ต้องอัดใหม่",
+    en: "the recorder did not shut down cleanly; the tail may be truncated — must re-record" });
 
   return { peak, rms, seconds, voiced, snrDb, noise, speech, clipRatio, problems, hard };
 }
@@ -1212,9 +1236,14 @@ function buildTake(p) {
           const expectSeconds = readText ? readText.length / 12 : 0;
           const res = toWav16k(taken.pcm, taken.sampleRate, {
             minSeconds: p.optional ? 2 : 8, expectSeconds, timeline: taken.timeline });
+          // **hash 算完再发布 state。** 先 set 再 await 的话，等待期间发生
+          // pagehide/abort，digest 回来后没人再拦，旧 finish 会继续建 URL、
+          // 显示播放器、启用下载、把卡片改回 done —— 播放器放的是旧 blob，
+          // 而下载按钮从 state 拿的是新录音，静默错配。
+          const wavSha16 = await sha256hex16(res.blob);
           if (!owns(token) || myGen !== gen) return;
           state.set(p.id, {
-            blob: res.blob, text: readText, downloadRequested: false,
+            blob: res.blob, text: readText, downloadRequested: false, wavSha16,
             quality: res.quality, seconds: res.seconds,
             // 采集侧的来源信息，跟着答案文件一起交出去：不同机器/浏览器的
             // 采集链路不同，事后要能分辨「这条 CER 高」是内容难还是采集不同。
@@ -1224,7 +1253,6 @@ function buildTake(p) {
                    dropped: taken.dropped, timeline: taken.timeline,
                    track: session.trackSettings || null, ua: navigator.userAgent },
           });
-          state.get(p.id).wavSha16 = await sha256hex16(res.blob);
           audioUrl = URL.createObjectURL(res.blob);
           audio.src = audioUrl; audio.hidden = false;
           dlBtn.disabled = false;
