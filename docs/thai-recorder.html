@@ -430,6 +430,7 @@ const TARGET_SR = 16000;
    现在任何回调改 session 之前先验证 `owns(myToken)`；不是自己的就什么都不碰。 */
 const session = {
   stream: null, ctx: null, analyser: null, source: null, rafId: null,
+  trackSettings: null,   // getUserMedia 约束**实际**生效成什么样
   // { token, id, phase: "acquiring" | "recording" | "converting" }
   holder: null,
 };
@@ -451,13 +452,10 @@ const normText = v => (v || "").normalize("NFC").trim();
 /* 已下载的答案文件会过期：下载完再改文本、再重录、改个署名，磁盘上那份
    就对不上了，而清单还绿着 —— 于是他按着绿勾把旧文本发出来，
    WAV 和参考文本静默错配。这正是本页想避免的事，只是从内存搬到了磁盘。
-   所以记下**导出内容本身**的指纹，每次刷新重算，对不上就打回未完成。 */
-let textExportFp = null;
-const fnv1a = str => {
-  let h = 0x811c9dc5;
-  for (let i = 0; i < str.length; i++) { h ^= str.charCodeAt(i); h = (h * 0x01000193) >>> 0; }
-  return h.toString(16);
-};
+   所以把**上次导出的内容原样留着**，每次刷新逐字符比。
+   （不用 32 位哈希：这文件才几 KB，直接存字符串是精确比较，
+     省掉一份没必要承担的碰撞风险。） */
+let lastExport = null;
 
 /* 文件名要能区分不同的人，否则几个人各发来一个 th-p1-devops.wav 就撞了 */
 const speakerId = () => {
@@ -521,12 +519,35 @@ function encodeWav(samples, sampleRate) {
    直接从 AudioContext 取 Float32 就没有这一层。 */
 const CAP_WORKLET = `
 class Cap extends AudioWorkletProcessor {
-  constructor() { super(); this.buf = new Float32Array(4096); this.n = 0; }
+  constructor() {
+    super();
+    this.buf = new Float32Array(4096); this.n = 0; this.done = false;
+    // 停止协议：主线程发 stop，音频线程把不满一块的残留发出来，再发 ACK。
+    // 同一个 port 保证消息顺序，所以收到 ACK 时它之前投递的块都已到齐。
+    // 少了这一步，停止时最多丢 4095 个样本（48 kHz 85 ms / 44.1 kHz 93 ms），
+    // 外加已投递但主线程还没处理的完整块。
+    this.port.onmessage = e => {
+      if (e.data && e.data.type === 'stop') {
+        this.done = true;
+        if (this.n) { this.port.postMessage(this.buf.slice(0, this.n)); this.n = 0; }
+        this.port.postMessage({ type: 'flushed' });
+      }
+    };
+  }
   process(inputs) {
-    const ch = inputs[0] && inputs[0][0];
-    if (ch) for (let i = 0; i < ch.length; i++) {
-      this.buf[this.n++] = ch[i];
-      if (this.n === this.buf.length) { this.port.postMessage(this.buf.slice(0)); this.n = 0; }
+    if (this.done) return false;
+    const inp = inputs[0];
+    if (inp && inp.length) {
+      const len = inp[0].length, ch = inp.length;
+      for (let i = 0; i < len; i++) {
+        // **平均全部声道**。只取 inputs[0][0] 的话，设备真给了立体声时
+        // 这条路拿左声道、ScriptProcessor 那条路拿的是降混，同一台设备
+        // 会产出两种不同的语料。
+        let acc = 0;
+        for (let c = 0; c < ch; c++) acc += inp[c][i];
+        this.buf[this.n++] = acc / ch;
+        if (this.n === this.buf.length) { this.port.postMessage(this.buf.slice(0)); this.n = 0; }
+      }
     }
     return true;
   }
@@ -534,14 +555,24 @@ class Cap extends AudioWorkletProcessor {
 registerProcessor('agentear-cap', Cap);
 `;
 
-const MAX_TAKE_SECONDS = 600;   // 10 分钟；48 kHz float 下约 115 MB，再长不收
+const MAX_TAKE_SECONDS = 180;   // 3 分钟。缓冲和拼接各占一份内存，
+                                // 48 kHz float 下峰值已经 ~70 MB，再长手机扛不住
+
+/* 答案文件里要能指名道姓地绑到某一份 WAV。只写「时长 12.3 秒、峰值 0.412」
+   是不够的：两次不同的录音只要这些四舍五入过的数落进同一个桶，写出来就一模一样。 */
+async function sha256hex16(blob) {
+  try {
+    const d = await crypto.subtle.digest("SHA-256", await blob.arrayBuffer());
+    return [...new Uint8Array(d)].slice(0, 8).map(b => b.toString(16).padStart(2, "0")).join("");
+  } catch (_) { return null; }        // 非安全上下文没有 subtle，不因此挡住录音
+}
 
 async function startCapture(ctx, source) {
   const chunks = [];
   let total = 0, dropped = 0;
-  const cap = Math.round(ctx.sampleRate * MAX_TAKE_SECONDS);
+  const limit = Math.round(ctx.sampleRate * MAX_TAKE_SECONDS);
   const push = a => {
-    if (total >= cap) { dropped += a.length; return; }
+    if (total >= limit) { dropped += a.length; return; }
     chunks.push(a); total += a.length;
   };
 
@@ -550,32 +581,60 @@ async function startCapture(ctx, source) {
     try {
       const url = URL.createObjectURL(new Blob([CAP_WORKLET], { type: "text/javascript" }));
       try { await ctx.audioWorklet.addModule(url); } finally { URL.revokeObjectURL(url); }
-      node = new AudioWorkletNode(ctx, "agentear-cap");
-      node.port.onmessage = e => push(e.data);
+      node = new AudioWorkletNode(ctx, "agentear-cap",
+        { channelCount: 1, channelCountMode: "explicit", channelInterpretation: "speakers" });
+      node.port.onmessage = e => { if (e.data instanceof Float32Array) push(e.data); };
       worklet = true;
     } catch (_) { node = null; }
   }
+  // ScriptProcessorNode 已废弃，但老 Safari 只有它。它在主线程上跑，
+  // 主线程一卡就可能延迟/跳过回调 —— 所以下面靠 playbackTime 查缺口。
+  let gaps = 0, gapSeconds = 0, lastPlayback = null;
   if (!node) {
-    // ScriptProcessorNode 已废弃，但老 Safari 只有它，而这条路失败的代价是
-    // 整个页面录不了音。它在主线程上跑，卡顿时会丢块——所以只当退路。
     node = ctx.createScriptProcessor(4096, 1, 1);
-    node.onaudioprocess = e => push(new Float32Array(e.inputBuffer.getChannelData(0)));
+    const expect = 4096 / ctx.sampleRate;
+    node.onaudioprocess = e => {
+      if (lastPlayback !== null) {
+        const d = e.playbackTime - lastPlayback;
+        if (d > expect * 1.5) { gaps++; gapSeconds += d - expect; }
+      }
+      lastPlayback = e.playbackTime;
+      push(new Float32Array(e.inputBuffer.getChannelData(0)));
+    };
   }
-  // 两种节点都要有下游才会被拉动；增益置 0，免得把麦克风的声音放出来
+  // 两种节点都要有下游才会被拉动；增益置 0，免得把麦克风的声音放出来。
+  // （接 destination 会激活输出设备，在 iOS/蓝牙上可能触发路由切换 ——
+  //   所以下面把 track 的实际参数一并记下来，事后能看出有没有被改过。）
   const sink = ctx.createGain();
   sink.gain.value = 0;
   source.connect(node); node.connect(sink); sink.connect(ctx.destination);
 
   const backend = worklet ? "audioworklet" : "scriptprocessor";
+  const t0 = ctx.currentTime;
   let taken = false;
+
   return {
     backend,
     get seconds() { return total / ctx.sampleRate; },
-    take() {
+    async take() {
       if (taken) return null;
       taken = true;
-      if (node.port) node.port.onmessage = null;
+      if (worklet && node.port) {
+        await new Promise(resolve => {
+          let settled = false;
+          const done = () => { if (!settled) { settled = true; resolve(); } };
+          const prev = node.port.onmessage;
+          node.port.onmessage = e => {
+            if (e.data && e.data.type === "flushed") done();
+            else prev(e);
+          };
+          node.port.postMessage({ type: "stop" });
+          setTimeout(done, 300);       // worklet 崩了也不能把页面卡死
+        });
+        node.port.onmessage = null;
+      }
       node.onaudioprocess = null;
+      const elapsed = ctx.currentTime - t0;
       try { source.disconnect(node); } catch (_) {}
       try { node.disconnect(); } catch (_) {}
       try { sink.disconnect(); } catch (_) {}
@@ -583,17 +642,29 @@ async function startCapture(ctx, source) {
       let o = 0;
       for (const c of chunks) { pcm.set(c, o); o += c.length; }
       chunks.length = 0;
-      return { pcm, sampleRate: ctx.sampleRate, dropped, backend };
+      // 拿到的样本数对不上流逝的时间 = 中间掉过块。这是**必须能看见**的：
+      // 时间线有洞的录音在科学上不可用，而听起来往往只是「有点跳」。
+      const expectedFrames = Math.max(0, Math.round(elapsed * ctx.sampleRate) - dropped);
+      const missing = Math.max(0, expectedFrames - total);
+      // 判「有洞」要先扣掉后端固有的量化，否则会误报。
+      // ScriptProcessor 没有 flush 协议，最后不满一块的部分本来就交不出来：
+      // 4096 样本在 44.1 kHz 是 92.9 ms —— 比任何合理的告警阈值都大。
+      // AudioWorklet 走了 flush，只需容忍 currentTime 的抖动。
+      const tolerance = (worklet ? 0 : 4096 / ctx.sampleRate) + 0.02;
+      return {
+        pcm, sampleRate: ctx.sampleRate, dropped, backend,
+        timeline: { elapsed, expectedFrames, gotFrames: total,
+                    missingSeconds: missing / ctx.sampleRate, gaps, gapSeconds, tolerance },
+      };
     },
   };
 }
 
-/* Blackman 窗 sinc 重采样，纯 JS，唯一的重采样路径。
+/* Kaiser 窗 sinc 重采样，纯 JS，唯一的重采样路径。
    不用 BiquadFilterNode 补救 —— 规范里 lowpass 的 Q 是**按 dB 计**的，实测
    四级串联在 5 kHz 上有 +6.8 dB 的通带增益，正是那类实现差异。这段不依赖
-   任何浏览器行为，抗混叠靠核函数自身的截止频率。
-   实测（48 kHz → 16 kHz，见 PR 描述）：通带 200/1k/3k/5k Hz 增益 1.0000，
-   7 kHz −0.75 dB，9 kHz 起的折回残留 ≤0.00016。 */
+   任何浏览器行为，抗混叠靠核函数自身的截止频率与阶数。
+   实测数字见提交说明，别在这里复述——改了参数就会对不上。 */
 function besselI0(x) {
   let sum = 1, term = 1;
   for (let k = 1; k < 64; k++) {
@@ -621,15 +692,26 @@ function resampleSinc(x, srcRate, dstRate) {
   //           通带 0.95×源 Nyquist（不能像下采样那样砍到 0.875，
   //           那是在削真实存在的源高频）。
   const nyq = Math.min(srcRate, dstRate) / 2;      // Hz
-  const fStop = nyq;
-  const fPass = nyq * (srcRate < dstRate ? 0.95 : 0.875);
+  let fPass, fStop;
+  if (srcRate < dstRate) {
+    // 上采样：镜像出现在 srcRate − f，离通带最近的一个在 2·nyq − fPass。
+    // 所以通带/阻带该**对称地夹住源 Nyquist**，而不是把阻带压在它上面
+    // ——后者会把 0.95·nyq 到 nyq 之间真实存在的源高频削掉。
+    fPass = nyq * 0.95;
+    fStop = 2 * nyq - fPass;
+  } else {
+    // 下采样：超过目标 Nyquist 的能量全都会折回带内，阻带边界只能压在它上面
+    fPass = nyq * 0.875;
+    fStop = nyq;
+  }
   const fc = (fPass + fStop) / 2;                  // −6 dB 点
   const trans = (fStop - fPass) / srcRate;         // 归一化过渡带宽
 
   // Kaiser 窗的经验公式：给定阻带衰减 A(dB) 反解 β 和阶数。
   // A=80 → 48 kHz→16 kHz 得 239 taps。阶数随过渡带收窄而增长，
   // 这正是「指标决定成本」而不是反过来。
-  const A = 80;
+  // 留 5 dB 余量：经验公式本身是近似，逐相位归一化又会动一点点
+  const A = 85;
   const beta = A > 50 ? 0.1102 * (A - 8.7) : 0.5842 * Math.pow(A - 21, 0.4) + 0.07886 * (A - 21);
   const taps = Math.max(16, Math.ceil((A - 8) / (2.285 * 2 * Math.PI * trans) / 2));
   const width = 2 * taps + 1;
@@ -649,8 +731,10 @@ function resampleSinc(x, srcRate, dstRate) {
       const t = (j - taps) - frac;
       const arg = Math.PI * cut * t;
       const sinc = Math.abs(arg) < 1e-9 ? cut : cut * Math.sin(arg) / arg;
-      // Kaiser 窗，自变量归一到 [-1, 1]
-      const u = t / (taps + 1);
+      // Kaiser 窗，自变量归一到 [-1, 1]。用 t/taps 而不是 t/(taps+1)：
+      // 后者不是长度 2·taps+1 的标准定义，端点窗值会高约 2 dB，
+      // 实际阻带就比设计值差一截。
+      const u = t / taps;
       const w = Math.abs(u) >= 1 ? 0 : besselI0(beta * Math.sqrt(1 - u * u)) / i0b;
       const v = sinc * w;
       kern[base + j] = v; sum += v;
@@ -688,7 +772,8 @@ function resampleSinc(x, srcRate, dstRate) {
    电平表只在录音那几秒有效，还要求他一直盯着看；真正会被发出去的是这份
    数据，所以在这里按整段重新判一次。单看全局峰值不行——整段静音里混一个
    0.02 的咔哒声就能过。 */
-function analyseTake(x, sr) {
+function analyseTake(x, sr, opt) {
+  opt = opt || {};
   const n = x.length, seconds = n / sr;
   let peak = 0, sumsq = 0, clipped = 0;
   for (let i = 0; i < n; i++) {
@@ -698,37 +783,62 @@ function analyseTake(x, sr) {
     sumsq += x[i] * x[i];
   }
   const rms = n ? Math.sqrt(sumsq / n) : 0;
-  // 20 ms 分帧，算「有声帧」占比。门限同时看绝对值和相对峰值：
-  // 只用相对值的话，纯噪声也能有很高的有声比。
+
+  // 20 ms 分帧
   const fr = Math.max(1, Math.round(sr * 0.02));
-  const gate = Math.max(0.004, peak * 0.1);
-  let frames = 0, voicedFrames = 0;
+  const fRms = [];
   for (let i = 0; i + fr <= n; i += fr) {
     let ss = 0;
     for (let j = i; j < i + fr; j++) ss += x[j] * x[j];
-    frames++;
-    if (Math.sqrt(ss / fr) > gate) voicedFrames++;
+    fRms.push(Math.sqrt(ss / fr));
   }
-  const voiced = frames ? voicedFrames / frames : 0;
+  // 门限走**分位数**，不走全局峰值。用 peak*0.1 的话：一次碰麦的瞬态就能
+  // 把门限拉到 0.1，正常语音帧全被判成无声；反过来，稳定的背景噪声会让
+  // 有声比接近 100%，纯噪声照样过关。
+  const sorted = fRms.slice().sort((p, q) => p - q);
+  const pct = q => sorted.length ? sorted[Math.min(sorted.length - 1,
+      Math.max(0, Math.round(q * (sorted.length - 1))))] : 0;
+  const noise = pct(0.20), speech = pct(0.90);
+  const snrDb = noise > 1e-9 ? 20 * Math.log10(Math.max(speech, 1e-9) / noise) : 99;
+  const gate = Math.max(noise * 3, 0.004);
+  const voiced = sorted.length ? fRms.filter(v => v > gate).length / fRms.length : 0;
   const clipRatio = n ? clipped / n : 0;
-  const problems = [];
-  if (seconds < 2) problems.push({ th: "สั้นเกินไป (< 2 วินาที)", en: "shorter than 2 s" });
-  if (peak < 0.02) problems.push({
+
+  // 「软问题」他听完可以自己放行；「硬问题」不行 —— 时间线有洞的录音
+  // 听起来往往只是有点跳，但在科学上不可用，不该由主观判断放行。
+  const problems = [], hard = [];
+  const minSeconds = opt.minSeconds || 2;
+  if (seconds < minSeconds) problems.push({
+    th: `สั้นเกินไป (${seconds.toFixed(1)} วิ, ควรอย่างน้อย ${minSeconds} วิ)`,
+    en: `too short (${seconds.toFixed(1)} s, expected at least ${minSeconds} s)` });
+  else if (opt.expectSeconds && seconds < opt.expectSeconds * 0.6) problems.push({
+    th: `สั้นกว่าที่ควรมาก (${seconds.toFixed(1)} วิ ต่อข้อความยาวขนาดนี้) — อาจอ่านไม่จบ`,
+    en: `much shorter than expected for this much text (${seconds.toFixed(1)} s) — possibly cut off` });
+  if (peak < 0.01) problems.push({
     th: `แทบไม่มีเสียง (peak ${peak.toFixed(4)}) — ไมโครโฟนอาจถูกปิดอยู่`,
     en: `virtually silent (peak ${peak.toFixed(4)}) — the mic may be muted or the wrong device` });
-  else if (voiced < 0.2) problems.push({
+  else if (snrDb < 10) problems.push({
+    th: `เสียงพูดแทบไม่ดังกว่าเสียงรบกวน (SNR ${snrDb.toFixed(1)} dB) — ลองหาที่เงียบกว่านี้`,
+    en: `speech barely rises above the noise floor (SNR ${snrDb.toFixed(1)} dB) — try a quieter room` });
+  else if (voiced < 0.25) problems.push({
     th: `มีเสียงพูดแค่ ${(voiced * 100).toFixed(0)}% ของความยาว — ส่วนใหญ่เป็นความเงียบ`,
     en: `only ${(voiced * 100).toFixed(0)}% of the take has speech-level energy — mostly silence` });
   if (clipRatio > 0.005) problems.push({
     th: `เสียงดังเกินจนตัดยอด ${(clipRatio * 100).toFixed(1)}% — ขยับไมค์ให้ห่างขึ้น`,
     en: `${(clipRatio * 100).toFixed(1)}% of samples are clipped — move further from the mic` });
-  return { peak, rms, seconds, voiced, clipRatio, problems };
+
+  const tl = opt.timeline;
+  if (tl && (tl.missingSeconds > (tl.tolerance != null ? tl.tolerance : 0.05) || tl.gaps > 0)) hard.push({
+    th: `เสียงขาดหายระหว่างอัด (~${tl.missingSeconds.toFixed(2)} วิ) — ต้องอัดใหม่`,
+    en: `the recording has gaps (~${tl.missingSeconds.toFixed(2)} s missing) — must re-record` });
+
+  return { peak, rms, seconds, voiced, snrDb, noise, speech, clipRatio, problems, hard };
 }
 
 /* 采到的就是 Float32 PCM，只剩重采样这一步 */
-function toWav16k(pcm, srcRate) {
+function toWav16k(pcm, srcRate, opt) {
   const mono = resampleSinc(pcm, srcRate, TARGET_SR);
-  const q = analyseTake(mono, TARGET_SR);
+  const q = analyseTake(mono, TARGET_SR, opt);
   return { blob: encodeWav(mono, TARGET_SR), quality: q, seconds: q.seconds };
 }
 
@@ -778,6 +888,7 @@ function releaseMic() {
 
 window.addEventListener("pagehide", () => {
   session.holder = null;      // 直接放弃持有权；在飞的回调会因 owns() 失败而不碰状态
+  takes.forEach(t => t.abort());   // 每张卡自己的计时器/采集器也要停，见 abort() 注释
   forceRelease();
   // 锁是跟着 holder 走的，放弃持有权就必须同步按钮。否则页面会带着
   // 「按钮全禁用」的样子被冻进 BFCache，回来时若 pageshow 没如期触发
@@ -854,10 +965,15 @@ async function acquireMic(token) {
   // 自己关掉自己拿到的 track，绝不写进 session
   if (!owns(token)) { got.getTracks().forEach(t => t.stop()); return { superseded: true }; }
 
+  let ctx = null;
   try {
     const AC = window.AudioContext || window.webkitAudioContext;
     session.stream = got;
-    const ctx = new AC();
+    // 请求了 channelCount:1、关掉 AGC/降噪，**不代表浏览器和硬件照做了**。
+    // 把实际生效的设置记下来，跟着答案文件走。
+    try { session.trackSettings = got.getAudioTracks()[0].getSettings(); }
+    catch (_) { session.trackSettings = null; }
+    ctx = new AC();
     session.ctx = ctx;
     session.analyser = ctx.createAnalyser();
     session.analyser.fftSize = 1024;
@@ -871,7 +987,14 @@ async function acquireMic(token) {
     // 不重新验一次的话，下面会把 pill 改成「麦克风就绪」，而流早已释放。
     if (!owns(token) || session.ctx !== ctx) return { superseded: true };
   } catch (e) {
-    forceRelease();
+    // **只在自己仍是持有者时清全局。** 旧请求的 resume() 迟到 reject 时，
+    // 新会话可能已经把自己的 stream/ctx 写进 session —— 无条件 forceRelease
+    // 会把新会话的资源关掉。不是自己的，就只关自己申请到的那份。
+    if (owns(token) && session.ctx === ctx) forceRelease();
+    else {
+      try { got.getTracks().forEach(t => t.stop()); } catch (_) {}
+      if (ctx) ctx.close().catch(() => {});
+    }
     return { th: "เตรียมระบบเสียงไม่สำเร็จ", en: "Could not initialise the audio pipeline.",
              detail: `${e.name}: ${e.message}` };
   }
@@ -930,9 +1053,14 @@ function refreshProgress() {
   });
   const ok = id => {
     const r = state.get(id);
-    // 「录了」「按过保存」「文本没改过」「质量体检过了（或他听完亲自放行）」
-    return !!r && r.downloadRequested && !textDrift(id)
-        && !(r.quality && r.quality.problems.length && !r.qualityOverride);
+    if (!r || !r.downloadRequested || textDrift(id)) return false;
+    // 硬问题（时间线有洞）没有人工出口
+    if (r.quality && r.quality.hard && r.quality.hard.length) return false;
+    // 软问题他听完可以放行
+    if (r.quality && r.quality.problems.length && !r.qualityOverride) return false;
+    // 署名进了 WAV 文件名。下载完再改署名，磁盘上那份的名字就对不上了，
+    // 而答案文件写的是新署名 —— 多人收集时会撞名或错配。
+    return r.downloadSpeaker === speakerId();
   };
   const need = PASSAGES.filter(p => !p.optional);
   const recorded = need.filter(p => state.get(p.id)).length;
@@ -944,7 +1072,7 @@ function refreshProgress() {
   const mark = (li, good) => { li.dataset.ok = good ? "1" : "0"; li.querySelector(".box").textContent = good ? "[✓]" : "[ ]"; };
   mark(items[0], done === need.length);
   // 磁盘上那份答案文件与当前内容是否还一致
-  mark(items[1], textExportFp !== null && textExportFp === fnv1a(buildTextExport()));
+  mark(items[1], lastExport !== null && lastExport === buildTextExport());
   mark(items[2], ok("p4-free"));
 }
 
@@ -998,7 +1126,17 @@ function buildTake(p) {
     refreshProgress();
   };
   const setBusy = busy => { recBtn.disabled = busy; };
-  takes.set(p.id, { setBusy, clearResult });
+  /* pagehide 只清全局 holder，清不掉每张卡闭包里的 tickId / finishFn / cap。
+     不清的话：从后台回来在同一段重录，**旧的 interval 还活着**，而它读的是
+     共享变量 finishFn 的当前值 —— 于是旧 interval 会去停掉新录音，
+     并一直用旧的 t0 覆盖新计时器；旧 cap 还把已采的 PCM 一直挂在内存里。 */
+  const abort = () => {
+    clearInterval(tickId);
+    gen++;                        // 让所有在飞的收尾都认不出自己
+    finishFn = null;
+    if (cap) { const c = cap; cap = null; Promise.resolve(c.take()).catch(() => {}); }
+  };
+  takes.set(p.id, { setBusy, clearResult, abort });
 
   recBtn.addEventListener("click", async () => {
     // 正在录这一段 → 停止
@@ -1051,42 +1189,58 @@ function buildTake(p) {
       finishFn = async () => {
         finishFn = null;                       // 连点两下停止只走一次
         clearInterval(tickId);
-        const taken = cap ? cap.take() : null;
-        cap = null;
-        // **先验证所有权再动任何共享状态。** 反过来的话，pagehide 之后
-        // 迟到的收尾会把新会话的 holder 清掉，新录音就失去了锁。
-        if (!owns(token) || myGen !== gen) { releaseMic(); return; }
-
-        recBtn.dataset.on = "0"; lbl.textContent = "อัดใหม่ · Re-record";
-        session.holder.phase = "converting";
-        el.dataset.state = "converting";
-        status.textContent = "กำลังแปลงไฟล์… · converting…";
-        syncLocks();
-        // 重采样是同步的、会占住主线程几百毫秒；先让一帧过去，
-        // 否则「正在转换」这行字根本来不及画出来
-        await new Promise(r => setTimeout(r, 0));
+        const myCapture = cap; cap = null;
+        // **整段包在 try 里，`take()` 也算进来。** 拼接 PCM 时 OOM 抛出的话，
+        // finishFn 会以未处理的 rejection 结束，而 holder 还停在 recording：
+        // 麦克风和所有按钮永久卡死，只能刷新页面。
         try {
+          const taken = myCapture ? await myCapture.take() : null;
+          // **先验证所有权再动任何共享状态。** 反过来的话，pagehide 之后
+          // 迟到的收尾会把新会话的 holder 清掉，新录音就失去了锁。
+          if (!owns(token) || myGen !== gen) return;
+
+          recBtn.dataset.on = "0"; lbl.textContent = "อัดใหม่ · Re-record";
+          session.holder.phase = "converting";
+          el.dataset.state = "converting";
+          status.textContent = "กำลังแปลงไฟล์… · converting…";
+          syncLocks();
+          // 重采样是同步的、会占住主线程几百毫秒；先让一帧过去，
+          // 否则「正在转换」这行字根本来不及画出来
+          await new Promise(r => setTimeout(r, 0));
           if (!taken || !taken.pcm.length) throw new Error("no audio captured");
-          const res = toWav16k(taken.pcm, taken.sampleRate);
+          // 泰文平均约 12 字/秒，据此估个应有时长，用来发现「只念了一半」
+          const expectSeconds = readText ? readText.length / 12 : 0;
+          const res = toWav16k(taken.pcm, taken.sampleRate, {
+            minSeconds: p.optional ? 2 : 8, expectSeconds, timeline: taken.timeline });
           if (!owns(token) || myGen !== gen) return;
           state.set(p.id, {
             blob: res.blob, text: readText, downloadRequested: false,
             quality: res.quality, seconds: res.seconds,
-            // 采集侧的来源信息，跟着答案文件一起交出去：
-            // 不同机器/浏览器的采集链路不同，事后要能分辨
+            // 采集侧的来源信息，跟着答案文件一起交出去：不同机器/浏览器的
+            // 采集链路不同，事后要能分辨「这条 CER 高」是内容难还是采集不同。
+            // track 的**实际**设置也记下来 —— 请求了 channelCount:1、
+            // 关掉 AGC/降噪，不代表浏览器和硬件真的照做了。
             src: { rate: taken.sampleRate, backend: taken.backend,
-                   dropped: taken.dropped, ua: navigator.userAgent },
+                   dropped: taken.dropped, timeline: taken.timeline,
+                   track: session.trackSettings || null, ua: navigator.userAgent },
           });
+          state.get(p.id).wavSha16 = await sha256hex16(res.blob);
           audioUrl = URL.createObjectURL(res.blob);
           audio.src = audioUrl; audio.hidden = false;
           dlBtn.disabled = false;
           el.dataset.state = "done";
-          const probs = res.quality.problems;
+          const probs = res.quality.problems, hard = res.quality.hard;
           if (taken.dropped) {
             probs.push({ th: `ยาวเกิน ${MAX_TAKE_SECONDS / 60} นาที ส่วนที่เกินถูกตัดทิ้ง`,
                          en: `longer than ${MAX_TAKE_SECONDS / 60} min — the excess was dropped` });
           }
-          if (probs.length) {
+          if (hard.length) {
+            // 硬问题没有「我听过了」这个出口
+            err.hidden = false;
+            err.innerHTML = `<span class="th">${hard.map(x => x.th).join("；")}</span>
+              <span class="en" lang="en">${hard.map(x => x.en).join("; ")}</span>`;
+            status.textContent = "";
+          } else if (probs.length) {
             // 体检只是启发式：低增益麦克风的正常朗读也可能被判「太安静」。
             // 所以不堵死 —— 给一个「我听过了」的显式出口，但必须他自己点。
             err.hidden = false;
@@ -1118,7 +1272,8 @@ function buildTake(p) {
             <code>${e.name}: ${e.message}</code>`;
         } finally {
           // 只有仍持有会话时才交还。旧回调不得释放新会话的锁。
-          if (owns(token)) { session.holder = null; syncLocks(); releaseMic(); }
+          if (owns(token)) { session.holder = null; syncLocks(); }
+          releaseMic();
         }
       };
 
@@ -1134,12 +1289,16 @@ function buildTake(p) {
       el.dataset.state = "recording";
       status.textContent = "กำลังอัด… · recording…";
       timer.textContent = "00:00";
-      tickId = setInterval(() => {
+      // 捕获自己的代次：读共享的 finishFn 的话，旧 interval 会去停新录音
+      let myTick;
+      myTick = setInterval(() => {
+        if (myGen !== gen) { clearInterval(myTick); return; }
         const secs = (Date.now() - t0) / 1000;
         timer.textContent = mmss(secs);
         // 缓冲在内存里，不设上限的话忘了停就一路涨到把标签页耗死
-        if (secs >= MAX_TAKE_SECONDS && finishFn) finishFn();
+        if (secs >= MAX_TAKE_SECONDS && finishFn) { const f = finishFn; f(); }
       }, 200);
+      tickId = myTick;
       levelLoop();
     } finally {
       // 没能进入录音状态就交还会话，否则所有按钮永久卡在禁用。
@@ -1151,7 +1310,9 @@ function buildTake(p) {
 
   dlBtn.addEventListener("click", () => {
     const rec = state.get(p.id); if (!rec) return;
-    saveBlob(rec.blob, `th-${speakerId()}-${p.id}.wav`);
+    const sp = speakerId();
+    saveBlob(rec.blob, `th-${sp}-${p.id}.wav`);
+    rec.downloadSpeaker = sp;
     // **这只证明「发起了下载」**，不证明文件真落了盘：下载可能被策略拦下，
     // iOS 可能只是打开预览页。所以文案是「请自己确认文件在」，不是「已保存」。
     rec.downloadRequested = true;
@@ -1178,6 +1339,13 @@ function buildTextExport() {
   out += `# speaker: ${speakerId()}\n`;
   out += "# ใช้ข้อความนี้เป็นเฉลย — ต้องตรงกับที่อ่านจริง\n";
   out += "# This is the scoring reference — it must match what was actually said.\n";
+  // 这批语料每种条件只有一篇文本、顺序固定，code-switch 密度与主题、词汇难度、
+  // 长度、朗读顺序完全混杂。它能当一个小测试集，但**支撑不了「CER 差异由夹
+  // 英文造成」这种因果结论**。不写在文件里的话，下游拿到数字就会这么用。
+  out += "#\n# NOTE ON DESIGN (read before drawing conclusions):\n";
+  out += "# One passage per condition, fixed order. Code-switch density is confounded with\n";
+  out += "# topic, vocabulary difficulty, length and reading order. This is a small test set,\n";
+  out += "# NOT a design that can attribute a CER difference to code-switching.\n";
   if (drifted.length) {
     out += "#\n# !! " + drifted.map(p => p.id).join(", ") +
            ": edited AFTER recording. The text below is what was actually read aloud,\n" +
@@ -1192,12 +1360,30 @@ function buildTextExport() {
     // 采集来源跟着答案一起走：不同机器/浏览器的采集链路不同，
     // 事后要能分辨「这条 CER 高」是内容难还是采集端不一样
     if (rec && rec.src) {
-      out += `#   src: ${rec.src.rate} Hz, ${rec.src.backend}, ` +
-             `${rec.seconds.toFixed(1)}s, peak ${rec.quality.peak.toFixed(3)}, ` +
+      // **文件名 + WAV 哈希**：答案和音频靠这两行绑死，事后能一一对上
+      out += `#   wav: th-${rec.downloadSpeaker || speakerId()}-${p.id}.wav` +
+             `${rec.wavSha16 ? `  sha256:${rec.wavSha16}` : "  (sha unavailable)"}\n`;
+      out += `#   src: ${rec.src.rate} Hz, ${rec.src.backend}, ${rec.seconds.toFixed(2)}s, ` +
+             `peak ${rec.quality.peak.toFixed(3)}, SNR ${rec.quality.snrDb.toFixed(1)} dB, ` +
              `voiced ${(rec.quality.voiced * 100).toFixed(0)}%\n`;
+      const t = rec.src.track;
+      if (t) {
+        // 请求的约束和**实际生效**的可能不一样，写实际的
+        out += `#   track: ch=${t.channelCount} rate=${t.sampleRate} ` +
+               `aec=${t.echoCancellation} ns=${t.noiseSuppression} agc=${t.autoGainControl}\n`;
+      }
+      const tl = rec.src.timeline;
+      if (tl) {
+        out += `#   timeline: got ${tl.gotFrames} / expected ${tl.expectedFrames} frames` +
+               `${tl.missingSeconds > 0.001 ? `, MISSING ${tl.missingSeconds.toFixed(3)}s` : ""}` +
+               `${tl.gaps ? `, ${tl.gaps} gap(s)` : ""}\n`;
+      }
       out += `#   ua: ${rec.src.ua}\n`;
       // 体检不过但他亲自放行了 —— 必须留痕，否则事后分不清「干净的样本」
       // 和「被判可疑但放行的样本」
+      if (rec.quality.hard.length) {
+        out += `#   !! HARD FAIL: ${rec.quality.hard.map(x => x.en).join("; ")}\n`;
+      }
       if (rec.quality.problems.length) {
         out += `#   !! quality flags: ${rec.quality.problems.map(x => x.en).join("; ")}` +
                `${rec.qualityOverride ? " [speaker confirmed OK after listening]" : ""}\n`;
@@ -1210,7 +1396,7 @@ function buildTextExport() {
 document.getElementById("dlText").addEventListener("click", () => {
   const out = buildTextExport();
   saveBlob(new Blob([out], { type: "text/plain;charset=utf-8" }), `thai-passages-${speakerId()}.txt`);
-  textExportFp = fnv1a(out);          // 之后任何改动都会让这一项掉绿
+  lastExport = out;                   // 之后任何改动都会让这一项掉绿
   refreshProgress();
 });
 
