@@ -38,6 +38,23 @@ please don't force a native-English pronunciation).
 
 ## 录音方式 / How to record
 
+**两条路都行,任选一条。**
+
+### A. 网页录音工具(有电平表,自动出 16 kHz WAV)
+
+<https://jhfnetboy.github.io/AgentEar/thai-recorder.html>
+
+在手机或电脑的浏览器里打开,按页面提示走。它会在你录完之后自己检查音量、
+时长、有没有丢帧,并把「你实际念的文本」和录音绑在一起 ——
+这几件事手机录音机做不到,是这条路唯一多出来的价值。
+⚠️ 录完**必须自己按「保存」**,页面不会自动存;关掉页面就没了。
+
+### B. 手机自带录音机(更简单,一样能用)
+
+页面里也写着这条退路。**格式、采样率都不用管**,我这边转。
+如果 A 打不开、麦克风权限拿不到、或者你就是懒得折腾,直接用 B ——
+两条路产出的语料我们一样用。
+
 - 手机自带录音机就行,不需要专业设备
   A phone voice recorder is fine — no special equipment needed
 - **安静的房间**,正常语速,像平常说话一样
@@ -140,11 +157,18 @@ cleaner than actual speech, no matter how naturally you read.
 ## 回传清单 / What to send back
 
 - [ ] 三个录音文件(第 1、2、3 段)
-- [ ] **修改后的三段文本**(如果你改过的话)← 别忘了这个
+- [ ] **修改后的三段文本**← 别忘了这个
+      - 走网页那条路:页面底部按「下载修改后的文本」,得到 `thai-passages-<你的名字>.txt`
+      - 走手机那条路:把本文档里的三段文本改好,直接发文字回来就行
 - [ ] (可选)第 4 段即兴录音
 
 - [ ] Three audio files (passages 1, 2, 3)
-- [ ] **The corrected text of all three passages** (if you edited them) ← don't forget
+- [ ] **The corrected text of all three passages** ← don't forget
+      - Web tool: press "Download corrected text" at the bottom → `thai-passages-<your-name>.txt`
+      - Phone route: just edit the three passages in this document and send the text back
 - [ ] (Optional) Passage 4, unscripted
+
+全部发回给把这份文档给你的人就行,微信 / LINE / 邮件都可以。
+Send everything back to whoever gave you this document — WeChat, LINE or email, whatever we already use.
 
 ขอบคุณมากครับ 🙏

@@ -345,6 +345,15 @@
       <li data-ok="0"><span class="box">[ ]</span><span>(ถ้าสะดวก) ตอนที่ 4 พูดสด — กดบันทึกแล้ว · (Optional) Passage 4, unscripted — download pressed</span></li>
     </ul>
     <button class="btn" id="dlText" type="button">⤓ ดาวน์โหลดข้อความที่แก้แล้ว · Download corrected text</button>
+    <p class="sendback" style="border-left:3px solid var(--rule);padding-left:.7rem">
+      ไฟล์ข้อความที่ดาวน์โหลดมีข้อมูลเครื่องของคุณด้วย (เบราว์เซอร์/รุ่น อัตราสุ่ม
+      และการตั้งค่าไมโครโฟน) — เราใช้แยกว่าความต่างมาจากเนื้อหาหรือจากอุปกรณ์
+      เปิดไฟล์ดูได้ทุกบรรทัดครับ ถ้าไม่อยากส่ง ลบบรรทัดที่ขึ้นต้นด้วย <code>#</code> ได้เลย
+      <span class="en" lang="en">The text file you download also records your browser/version,
+      sample rate and microphone settings — we use those to tell content differences from
+      device differences. It is plain text; open it and read every line. If you would rather
+      not share it, delete the lines starting with <code>#</code>.</span>
+    </p>
     <p class="sendback">
       แล้ว<strong>ส่งไฟล์ทั้งหมด (เสียง + ข้อความ) กลับไปให้คนที่ส่งลิงก์นี้ให้คุณ</strong> —
       ทาง LINE / WeChat / อีเมล ทางไหนก็ได้ที่คุยกันอยู่ครับ
@@ -561,8 +570,10 @@ class Cap extends AudioWorkletProcessor {
 registerProcessor('agentear-cap', Cap);
 `;
 
-const MAX_TAKE_SECONDS = 180;   // 3 分钟。缓冲和拼接各占一份内存，
-                                // 48 kHz float 下峰值已经 ~70 MB，再长手机扛不住
+// 4 分钟。第 4 段的提示语要「2–3 分钟」，上限若也是 3 分钟，照着上限念
+// 就会被截断 —— 那个冲突是提示语自己造的。留一分钟余量。
+// 缓冲和拼接各占一份内存，48 kHz float 下峰值约 92 MB。
+const MAX_TAKE_SECONDS = 240;
 
 /* 答案文件里要能指名道姓地绑到某一份 WAV。只写「时长 12.3 秒、峰值 0.412」
    是不够的：两次不同的录音只要这些四舍五入过的数落进同一个桶，写出来就一模一样。 */
@@ -665,7 +676,11 @@ async function startCapture(ctx, source) {
       // ScriptProcessor 没有 flush 协议，最后不满一块的部分本来就交不出来：
       // 4096 样本在 44.1 kHz 是 92.9 ms —— 比任何合理的告警阈值都大。
       // AudioWorklet 走了 flush，只需容忍 currentTime 的抖动。
-      const tolerance = (worklet ? 0 : 4096 / ctx.sampleRate) + 0.02;
+      // ScriptProcessor 置空 onaudioprocess 时，还有**一块在途**没交出来，
+      // 所以要留两块。时间线是硬失败、没有人工出口 —— 容差算小了，
+      // 老 Safari 的志愿者会被永远告知「必须重录」，而他什么也没做错。
+      const tolerance = worklet ? 0.02
+        : 2 * 4096 / ctx.sampleRate + (ctx.baseLatency || 0) + 0.02;
       return {
         pcm, sampleRate: ctx.sampleRate, dropped, backend,
         timeline: { elapsed, expectedFrames, gotFrames: total,
@@ -760,7 +775,12 @@ function resampleSinc(x, srcRate, dstRate) {
   }
 
   const len = x.length;
-  for (let i = 0; i < n; i++) {
+  // 分块 + 让出主线程。259 抽头 × 16000 样本/秒是实打实的算力：
+  // 桌面上 180 秒音频要 ~950 ms，手机会更久，一次跑完整段就是把页面冻住。
+  // 每块之后 yield 一次，让「正在转换」的动画还能动。
+  const BLOCK = 1 << 15;
+  const step = (from, to) => {
+  for (let i = from; i < to; i++) {
     const center = i / ratio;
     const i0 = Math.floor(center);
     // 最近相位而不是向下取整：非整数比时误差直接少约 6 dB
@@ -781,7 +801,14 @@ function resampleSinc(x, srcRate, dstRate) {
     }
     out[i] = acc;
   }
-  return out;
+  };
+  return (async () => {
+    for (let i = 0; i < n; i += BLOCK) {
+      step(i, Math.min(n, i + BLOCK));
+      if (i + BLOCK < n) await new Promise(r => setTimeout(r, 0));
+    }
+    return out;
+  })();
 }
 
 /* 落盘前的质量体检。
@@ -860,8 +887,8 @@ function analyseTake(x, sr, opt) {
 }
 
 /* 采到的就是 Float32 PCM，只剩重采样这一步 */
-function toWav16k(pcm, srcRate, opt) {
-  const mono = resampleSinc(pcm, srcRate, TARGET_SR);
+async function toWav16k(pcm, srcRate, opt) {
+  const mono = await resampleSinc(pcm, srcRate, TARGET_SR);
   const q = analyseTake(mono, TARGET_SR, opt);
   return { blob: encodeWav(mono, TARGET_SR), quality: q, seconds: q.seconds };
 }
@@ -1234,8 +1261,17 @@ function buildTake(p) {
           if (!taken || !taken.pcm.length) throw new Error("no audio captured");
           // 泰文平均约 12 字/秒，据此估个应有时长，用来发现「只念了一半」
           const expectSeconds = readText ? readText.length / 12 : 0;
-          const res = toWav16k(taken.pcm, taken.sampleRate, {
+          const res = await toWav16k(taken.pcm, taken.sampleRate, {
             minSeconds: p.optional ? 2 : 8, expectSeconds, timeline: taken.timeline });
+          if (!owns(token) || myGen !== gen) return;   // 转换里有 await，回来要重验
+          // 截断这条并进 res.quality.problems **在存进 state 之前**。
+          // 原来是先 set 再往同一个数组 push，靠的是引用别名 ——
+          // 将来任何一次防御性拷贝都会让被截断的样本悄悄变回合格。
+          if (taken.dropped) {
+            res.quality.problems.push({
+              th: `ยาวเกิน ${MAX_TAKE_SECONDS / 60} นาที ส่วนที่เกินถูกตัดทิ้ง`,
+              en: `longer than ${MAX_TAKE_SECONDS / 60} min — the excess was dropped` });
+          }
           // **hash 算完再发布 state。** 先 set 再 await 的话，等待期间发生
           // pagehide/abort，digest 回来后没人再拦，旧 finish 会继续建 URL、
           // 显示播放器、启用下载、把卡片改回 done —— 播放器放的是旧 blob，
@@ -1258,10 +1294,6 @@ function buildTake(p) {
           dlBtn.disabled = false;
           el.dataset.state = "done";
           const probs = res.quality.problems, hard = res.quality.hard;
-          if (taken.dropped) {
-            probs.push({ th: `ยาวเกิน ${MAX_TAKE_SECONDS / 60} นาที ส่วนที่เกินถูกตัดทิ้ง`,
-                         en: `longer than ${MAX_TAKE_SECONDS / 60} min — the excess was dropped` });
-          }
           if (hard.length) {
             // 硬问题没有「我听过了」这个出口
             err.hidden = false;
