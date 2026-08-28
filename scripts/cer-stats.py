@@ -7,8 +7,12 @@ ADR-0004 §4 的 CI 和「检出/未检出差异」由本脚本产出。**种子
 用法：
     python3 scripts/cer-stats.py <结果目录> [重采样次数，默认 4000] [粒度 cp|bcm，默认 cp]
 
-退出码：0 正常；1 输入有问题（样本集不一致、指纹不符、归一化口径不同）；
-3 跑完了但有配对比较因缺结果没做——**输出不完整，别当成功用**。
+退出码：0 全部通过；1 输入有问题（样本集不一致、指纹冲突、归一化口径不同）；
+2 用法错误；3 跑完了但有配对比较因缺结果没做（**输出不完整**）；
+4 跑完了但有结果缺指纹，「两份结果跑在同一批参考/录音上」这个前提**未经验证**。
+
+⚠️ 当前入库的六份结果都产出于指纹机制之前，所以重跑会返回 **4**。
+那不是脚本坏了，是那批数据的来源确实无法事后验证 —— 不要为了让它变 0 而回填。
 
 ## 方法
 
@@ -113,15 +117,28 @@ def main() -> int:
     if n_boot <= 0:
         print("重采样次数必须为正", file=sys.stderr)
         return 1
-    # **普查要把 baseline 自己算进去。** 之前拿 next(iter(res)) 当基线又把它
-    # 排除在普查外，于是「6 份全缺」和「只有基线缺」打出一字不差的同一行；
-    # 后一种情况点名的还恰恰是**有**指纹的那 5 份，把人指向健康的产物。
-    no_text_fp = [t for t in sorted(res) if not res[t].get("refs_norm_sha256_16")]
-    no_audio_fp = [t for t in sorted(res) if not res[t].get("refs_audio_sha256_16")]
-    # 基线自己缺指纹的话，下面 `fa and fb` 恒假，其余结果彼此参考文本不同也
-    # 查不出来 —— 正是那道守卫声称挡住的失败。所以优先挑一个有指纹的当基线。
-    with_fp = [t for t in sorted(res) if res[t].get("refs_norm_sha256_16")]
-    baseline_tag = with_fp[0] if with_fp else sorted(res)[0]
+    # **指纹校验不走「逐项与 baseline 比」。** 那样一来 baseline 自己缺字段时，
+    # 其余结果即便带着互不相同的指纹也永远不会互相比较，最后照样 exit 0；
+    # 而且「6 份全缺」和「只有 baseline 缺」会打出一字不差的同一行，
+    # 后者点名的还恰恰是**有**指纹的那几份，把人指向健康的产物。
+    # 改成集合判断：出现两个以上不同的取值就是冲突，与谁当基线无关。
+    def fp_survey(field):
+        missing = [t for t in sorted(res) if not res[t].get(field)]
+        present = sorted({res[t][field] for t in res if res[t].get(field)})
+        return missing, present
+
+    no_text_fp, text_vals = fp_survey("refs_norm_sha256_16")
+    no_audio_fp, audio_vals = fp_survey("refs_audio_sha256_16")
+    if len(text_vals) > 1:
+        print(f"!! 结果之间的参考指纹不一致（{', '.join(text_vals)}），配对无效",
+              file=sys.stderr)
+        return 1
+    if len(audio_vals) > 1:
+        print(f"!! 结果之间的**音频**指纹不一致（{', '.join(audio_vals)}）"
+              f"——参考文本相同但录音不同，配对无效", file=sys.stderr)
+        return 1
+
+    baseline_tag = sorted(res)[0]
     baseline = res[baseline_tag]
     names = sorted(baseline["per_sample"])
     if not names:
@@ -131,24 +148,7 @@ def main() -> int:
         if sorted(r["per_sample"]) != names:
             print(f"!! {tag} 的样本集与其他不一致，配对比较无效", file=sys.stderr)
             return 1
-        # 配对的前提是两份结果用的是**同一批参考文本、同一套归一化**。
-        # 首选比对参考指纹；只比长度是不够的——两段不同的文本可以等长。
-        fa, fb = r.get("refs_norm_sha256_16"), baseline.get("refs_norm_sha256_16")
-        if fa and fb:
-            if fa != fb:
-                print(f"!! {tag} 的参考指纹与 {baseline_tag} 不一致"
-                      f"（{fa} vs {fb}），配对无效", file=sys.stderr)
-                return 1
-        # 缺字段的情况在上面已统一普查过，这里不再逐个收集
-        # 参考文本一致不等于录音一致：上游换了音频、文字没动，上面那道全过。
-        aa, ab = r.get("refs_audio_sha256_16"), baseline.get("refs_audio_sha256_16")
-        if aa and ab:
-            if aa != ab:
-                print(f"!! {tag} 的**音频**指纹与 {baseline_tag} 不一致"
-                      f"（{aa} vs {ab}）——参考文本相同但录音不同，配对无效",
-                      file=sys.stderr)
-                return 1
-
+        # 指纹一致性已在上面用集合判过，这里只查归一化口径与逐句长度
         if r.get("norm") != baseline.get("norm"):
             print(f"!! {tag} 的归一化口径与 {baseline_tag} 不同"
                   f"（{r.get('norm')} vs {baseline.get('norm')}）", file=sys.stderr)
@@ -169,9 +169,6 @@ def main() -> int:
     if no_audio_fp:
         print(f"!! {len(no_audio_fp)}/{len(res)} 份结果缺 refs_audio_sha256_16，"
               f"无法校验是否跑在同一批录音上：{', '.join(no_audio_fp)}")
-    if no_text_fp:
-        print(f"!! 基线取的是 {baseline_tag}"
-              f"{'（它自己也没有指纹，参考一致性实际上未被校验）' if baseline_tag in no_text_fp else ''}")
     print()
 
     print(f"n={len(names)} 条录音，自助法 {n_boot} 次，粒度 {kind}，"
@@ -204,6 +201,12 @@ def main() -> int:
         print(f"!! {missing} 组配对比较因缺结果没做，上面这份输出不完整",
               file=sys.stderr)
         return 3
+    if no_text_fp or no_audio_fp:
+        # 跑完了，但「两份结果确实跑在同一批参考/录音上」这个前提**没能验证**。
+        # 这时 exit 0 等于把「未验证」说成「已验证」。
+        print(f"!! 有结果缺指纹，配对前提未经验证（文本 {len(no_text_fp)} 份 / "
+              f"音频 {len(no_audio_fp)} 份）", file=sys.stderr)
+        return 4
     return 0
 
 

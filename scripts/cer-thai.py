@@ -6,9 +6,17 @@
 这样统计部分可以随时重算，不用重跑推理。
 
 用法：
-    python3 scripts/cer-thai.py <ggml模型> <whisper-cli> <数据目录> [输出目录]
+    python3 scripts/cer-thai.py [--allow-unverified-audio] <ggml模型> <whisper-cli> <数据目录> [输出目录]
 
 数据目录由 `fleurs-thai-fetch.py` 生成（含 wav/ 与 refs.json）。
+
+推理前会**逐条重算磁盘上 wav 的 SHA-256** 并与 refs.json 记录的比对，
+比对结果聚合成 `refs_audio_sha256_16` 存进结果文件。只哈希 refs.json 里的
+元数据是不够的 —— 换掉 `wav/f000.wav` 而不动 refs.json，两次跑出来的指纹
+一模一样，`cer-stats.py` 会当成同一批录音接受配对。
+
+refs.json 缺 `wav_sha256_16`（旧版 fetch 生成的）时**默认拒绝运行**，
+要跑得显式加 `--allow-unverified-audio`，不静默降级。
 
 ## 归一化口径
 
@@ -106,11 +114,13 @@ def transcribe(cli: str, model: str, wav: str) -> str:
 
 
 def main() -> int:
-    if not 4 <= len(sys.argv) <= 5:
+    argv = [a for a in sys.argv[1:] if a != "--allow-unverified-audio"]
+    allow_unverified = len(argv) != len(sys.argv) - 1
+    if not 3 <= len(argv) <= 4:
         print(__doc__)
         return 2
-    model, cli, data = sys.argv[1], sys.argv[2], sys.argv[3]
-    outdir = sys.argv[4] if len(sys.argv) == 5 else os.path.join(data, "results")
+    model, cli, data = argv[0], argv[1], argv[2]
+    outdir = argv[3] if len(argv) == 4 else os.path.join(data, "results")
     for p in (model, cli, os.path.join(data, "refs.json")):
         if not os.path.exists(p):
             print(f"找不到 {p}", file=sys.stderr)
@@ -134,14 +144,36 @@ def main() -> int:
     # **只比长度不够**：两段不同的文本完全可能等长，那样就会拿不同参考的
     # 结果做「配对」而检查不出来。
     ref_fp = _refs_fingerprint(refs)
-    # **音频指纹另立一格，不并进 ref_fp。** 并进去会让已产出的六份结果文件
-    # 全部失配（它们的 ref_fp 是按旧口径算的）。
-    # 少了这一格，「上游换了音频、文字没动」这种情况配对检查完全看不出来：
-    # 两份结果参考文本一致、长度一致，却是在不同录音上跑出来的。
-    audio_fp = _audio_fingerprint(refs)
-    if audio_fp is None:
-        print("   注：refs.json 缺 audio_sha256_16，本次结果不带音频指纹"
-              "（cer-stats.py 将无法校验两份结果是否用了同一批录音）", file=sys.stderr)
+
+    # **音频指纹要哈希真正送进 CLI 的那个文件，不是 refs.json 里的元数据。**
+    # 只哈希元数据的话，把 wav/f000.wav 换掉而不动 refs.json，两次跑出来的
+    # 指纹完全相同，cer-stats.py 会当成同一批录音接受配对。
+    actual = {}
+    for name in sorted(refs):
+        p = os.path.join(data, "wav", f"{name}.wav")
+        if not os.path.exists(p):
+            print(f"!! 找不到 {p}", file=sys.stderr)
+            return 1
+        actual[name] = _file_sha16(p)
+    stale = [n for n in sorted(refs)
+             if refs[n].get("wav_sha256_16") and refs[n]["wav_sha256_16"] != actual[n]]
+    if stale:
+        print(f"!! {len(stale)} 条 wav 与 refs.json 记录的哈希不符"
+              f"（{', '.join(stale[:5])}{'…' if len(stale) > 5 else ''}）"
+              f"——磁盘上的音频被换过，数字不可比", file=sys.stderr)
+        return 1
+    unrecorded = [n for n in sorted(refs) if not refs[n].get("wav_sha256_16")]
+    if unrecorded and not allow_unverified:
+        print(f"!! refs.json 里有 {len(unrecorded)}/{len(refs)} 条没有 wav_sha256_16，"
+              f"无法核对磁盘上的音频。\n"
+              f"   用当前版本的 fleurs-thai-fetch.py 重新生成数据目录，"
+              f"或显式加 --allow-unverified-audio。", file=sys.stderr)
+        return 1
+    if unrecorded:
+        print(f"   注：{len(unrecorded)} 条未与 refs.json 对账（--allow-unverified-audio）",
+              file=sys.stderr)
+    # 指纹用**实测的**哈希，不是记录值
+    audio_fp = _audio_fingerprint(actual)
 
     per, empty, t0 = {}, 0, time.time()
     for name in sorted(refs):
@@ -163,6 +195,7 @@ def main() -> int:
         "norm": "NFC|lower|strip-space|strip-unicode-P|keep-ฯ",
         "refs_norm_sha256_16": ref_fp,
         "refs_audio_sha256_16": audio_fp,
+        "audio_verified": not unrecorded,   # 是否逐条与 refs.json 对过账
         "n": len(per),
         "empty_output": empty,
         "elapsed_s": round(time.time() - t0, 1),
@@ -178,17 +211,24 @@ def main() -> int:
     return 0
 
 
-def _audio_fingerprint(refs: dict):
-    """取到的是不是同一批**录音**的指纹。缺 audio_sha256_16 时返回 None。
+def _audio_fingerprint(hashes: dict) -> str:
+    """这批**实际音频文件**的指纹（名字 + 内容哈希，顺序也在内）。
 
-    参考文本指纹只覆盖「念的是什么」，覆盖不到「谁在念、哪一段录音」。
+    参考文本指纹只覆盖「念的是什么」，覆盖不到「哪一份录音」。
     """
     import hashlib
-    if not all(isinstance(v, dict) and v.get("audio_sha256_16") for v in refs.values()):
-        return None
-    blob = json.dumps([[k, refs[k]["audio_sha256_16"]] for k in sorted(refs)],
+    blob = json.dumps([[k, hashes[k]] for k in sorted(hashes)],
                       ensure_ascii=False).encode()
     return hashlib.sha256(blob).hexdigest()[:16]
+
+
+def _file_sha16(path: str) -> str:
+    import hashlib
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()[:16]
 
 
 def _refs_fingerprint(refs: dict) -> str:

@@ -19,12 +19,21 @@ import json
 import os
 import shutil
 import sys
+import tempfile
 import urllib.request
 
 PARQUET_URL = (
     "https://huggingface.co/api/datasets/google/fleurs/parquet/th_th/test/0.parquet"
 )
 MANIFEST = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fleurs-thai-manifest.json")
+
+
+def _file_sha16(path: str) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()[:16]
 
 
 def main() -> int:
@@ -75,8 +84,19 @@ def main() -> int:
     # 直接写正式位置的话，一批对不上的数据会留在 wav/ 和 refs.json 里，
     # 而 cer-thai.py 只认路径不认指纹，下一步会照跑不误——
     # 拿着被拒绝的评测集算出一组看着正常、实则不可比的 CER。
-    stage = os.path.join(out, ".staging")
-    shutil.rmtree(stage, ignore_errors=True)
+    # 用 mkdtemp 而不是固定的 .staging：固定名字会在每次启动时无条件递归删除，
+    # 撞上用户自己的同名目录或另一个并发实例就是直接删对方的数据。
+    stage = tempfile.mkdtemp(prefix=".staging-", dir=out)
+    try:
+        return _fetch_into(stage, out, sel, step, pq_path)
+    finally:
+        # 只删自己这一次建的那个精确路径，且不吞错误——不然
+        #「已删除本次取样」这句话不一定是真的
+        shutil.rmtree(stage, ignore_errors=True)
+
+
+def _fetch_into(stage, out, sel, step, pq_path):
+    import soundfile as sf
     wav_dir = os.path.join(stage, "wav")
     os.makedirs(wav_dir, exist_ok=True)
     manifest, total = {}, 0.0
@@ -86,10 +106,16 @@ def main() -> int:
             print(f"意外采样率 {sr}", file=sys.stderr)
             return 1
         name = f"f{i:03d}"
-        sf.write(os.path.join(wav_dir, f"{name}.wav"), data, sr, subtype="PCM_16")
+        wav_path = os.path.join(wav_dir, f"{name}.wav")
+        sf.write(wav_path, data, sr, subtype="PCM_16")
         manifest[name] = {
             "fleurs_id": r["id"],
+            # 上游压缩字节的哈希：判「取到的是不是同一批上游数据」
             "audio_sha256_16": hashlib.sha256(r["audio"]["bytes"]).hexdigest()[:16],
+            # **写出来的 WAV 文件本身**的哈希：cer-thai.py 推理前拿它对账，
+            # 判「送进 CLI 的确实是这一份」。上面那个哈希做不到这件事 ——
+            # 它是压缩字节，和磁盘上的 PCM 文件对不上。
+            "wav_sha256_16": _file_sha16(wav_path),
             "transcription": r["transcription"],
             "gender": r["gender"],
             "duration_s": round(len(data) / sr, 3),
@@ -128,10 +154,10 @@ def main() -> int:
         #   parquet 全文件 sha —— 决定整个上游文件是否原样（只改了没抽中的行
         #                        时子集仍一致，那不影响可比性，所以只提示）
         if ref.get("refs_sha256_16") != digest:
-            shutil.rmtree(stage, ignore_errors=True)
+            # 暂存目录由外层的 finally 删除，正式位置本来就还没被动过
             print(f"!! 评测子集与入库 manifest 不符（入库 {ref.get('refs_sha256_16')}，"
                   f"本次 {digest}）——ADR-0004 §4 的数字不可比。"
-                  f"\n   已删除本次取样，{out} 下不会留下不可比的数据。", file=sys.stderr)
+                  f"\n   本次取样不会被提升，{out} 下的正式数据保持原样。", file=sys.stderr)
             return 1
         print("✓ 评测子集与入库 manifest 一致")
         if ref.get("parquet_sha256") and ref["parquet_sha256"] != pq_sha:
@@ -148,14 +174,39 @@ def main() -> int:
                   ensure_ascii=False, indent=1, sort_keys=True)
         print(f"已写入 {MANIFEST}")
 
-    # 对上账了才搬进正式位置。rmtree + rename 两步不是原子的，
-    # 但这脚本是手动跑的单实例，够用；别在注释里把它说成原子。
+    # 对上账了才搬进正式位置。**wav/ 和 refs.json 要作为一组换上去。**
+    # 原来是「删旧 wav → 提升新 wav → 提升 refs.json」，中间任一步失败就留下
+    # 「新 WAV + 旧 refs」或者「有 WAV 没 refs」—— 正是 staging 想避免的那种
+    # 正式目录不一致。严格的原子发布要版本目录 + symlink 切换；这里退一步：
+    # **旧数据先挪开不删**，两步都成功才删；任一步失败就整组回滚。
     final_wav = os.path.join(out, "wav")
-    shutil.rmtree(final_wav, ignore_errors=True)
-    os.replace(wav_dir, final_wav)
-    os.replace(os.path.join(stage, "refs.json"), os.path.join(out, "refs.json"))
-    shutil.rmtree(stage, ignore_errors=True)
-    print(f"✓ 已写入 {final_wav} 与 {os.path.join(out, 'refs.json')}")
+    final_refs = os.path.join(out, "refs.json")
+    backup = tempfile.mkdtemp(prefix=".prev-", dir=out)
+    moved = []
+    try:
+        if os.path.exists(final_wav):
+            os.replace(final_wav, os.path.join(backup, "wav")); moved.append("wav")
+        if os.path.exists(final_refs):
+            os.replace(final_refs, os.path.join(backup, "refs.json")); moved.append("refs.json")
+        os.replace(wav_dir, final_wav)
+        os.replace(os.path.join(stage, "refs.json"), final_refs)
+    except BaseException:
+        # 回滚：先撤掉本次已经换上去的，再把旧数据原样搬回
+        if "wav" in moved:
+            shutil.rmtree(final_wav, ignore_errors=True)
+            os.replace(os.path.join(backup, "wav"), final_wav)
+        elif os.path.exists(final_wav):
+            shutil.rmtree(final_wav, ignore_errors=True)
+        if "refs.json" in moved:
+            if os.path.exists(final_refs):
+                os.remove(final_refs)
+            os.replace(os.path.join(backup, "refs.json"), final_refs)
+        elif os.path.exists(final_refs):
+            os.remove(final_refs)
+        shutil.rmtree(backup, ignore_errors=True)
+        raise
+    shutil.rmtree(backup, ignore_errors=True)
+    print(f"✓ 已写入 {final_wav} 与 {final_refs}")
     return 0
 
 

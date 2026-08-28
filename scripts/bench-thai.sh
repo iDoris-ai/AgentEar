@@ -58,7 +58,13 @@ STAMP="$C/.stamp"
 # 生成逻辑变了就必须重建语料——只看文本 hash 不够。改了 say 参数、
 # 改了 ffmpeg 编码、改了长度档的取句数，都要把这个版本号 +1。
 CORPUS_FORMAT_VERSION=1
-WANT="v=$CORPUS_FORMAT_VERSION corpus=$(shasum -a 256 "$CORPUS_TXT" | cut -c1-16) voice=Kanya n=$(grep -c . "$CORPUS_TXT")"
+# 每个命令替换单独赋值并校验格式。塞在一个字符串里的话，赋值的退出状态取
+# **最后一个**替换（grep）的状态，前面 shasum 失败会被后面的成功盖掉，
+# 于是指纹变成空串——语料看起来「变了」而重建出来的又是同一份。
+CORPUS_SHA="$(shasum -a 256 "$CORPUS_TXT" | cut -c1-16)" || die "语料哈希计算失败：$CORPUS_TXT"
+[[ "$CORPUS_SHA" =~ ^[0-9a-f]{16}$ ]] || die "语料哈希格式异常：'$CORPUS_SHA'"
+CORPUS_N="$(grep -c . "$CORPUS_TXT")" || die "统计语料行数失败：$CORPUS_TXT"
+WANT="v=$CORPUS_FORMAT_VERSION corpus=$CORPUS_SHA voice=Kanya n=$CORPUS_N"
 NEED=1
 if [ "$REGEN" = 0 ] && [ -f "$STAMP" ] && [ "$(cat "$STAMP")" = "$WANT" ]; then
   NEED=0
@@ -172,9 +178,13 @@ for m in "$@"; do
   rtf_of "$ts" "$DS"; RS="$RTF_OUT"
   rtf_of "$tm" "$DM"; RM="$RTF_OUT"
   rtf_of "$tl" "$DL"; RL="$RTF_OUT"
+  # 哈希也要单独算。塞进 printf 的参数里的话，shasum 失败只让那个命令替换
+  # 非零，外层 printf 照样成功 —— 于是打出一行哈希为空的测量、SKIPPED 仍是 0、
+  # 最终 exit 0。和最初那个「伪造整行」的坑是同一类。
+  MSHA="$(shasum -a 256 "$m" | cut -c1-12)" || die "模型哈希计算失败：$m"
+  [[ "$MSHA" =~ ^[0-9a-f]{12}$ ]] || die "模型哈希格式异常：'$MSHA'（$m）"
   printf '%-24s %7d %8.3f %8.3f %8.3f %8d %8d  %s\n' "$tag" \
-    $((sz/1000000)) "$RS" "$RM" "$RL" $((rs/1000000)) $((rl/1000000)) \
-    "$(shasum -a 256 "$m" | cut -c1-12)"
+    $((sz/1000000)) "$RS" "$RM" "$RL" $((rs/1000000)) $((rl/1000000)) "$MSHA"
 done
 
 [ "$SKIPPED" = 0 ] || die "$SKIPPED 个模型被跳过，上面这张表不完整"
