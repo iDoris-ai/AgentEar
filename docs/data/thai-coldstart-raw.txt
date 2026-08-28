@@ -1,0 +1,30 @@
+# whisper 载入时间与端到端墙钟的原样测量输出（2026-08-28）
+#
+# 重算：见文件尾的命令。这是脚本原样输出，不是誊抄。
+# 机器：MacBook Pro M1 Max / 64 GB，macOS 25.4.0，机器空闲
+# whisper.cpp 7de8dd78，线程 4
+# 模型 ggml-distill-q5_0.bin  sha256(12)=5bfc04f1931a  574041195 字节
+# 音频 short.wav 6.649375 秒（Kanya 合成，单句，不重复）
+#
+# ⚠️ 全部是**热文件缓存**。真冷缓存需要 sudo purge，无权限（实测 Operation not permitted）。
+# ⚠️ whisper 的 load_ms 是 whisper_model_load() 的耗时，**不含**进程启动、
+#    音频读取、state 初始化与推理，所以不能和 SenseVoice 的端到端墙钟直接比。
+#    同口径的比较是下面两个 wall_s 列。
+
+engine                       audio         load_ms     wall_s peak_rss_MB
+whisper-distill-q5_0         short          190.26       0.96        694
+whisper-distill-q5_0         short          194.62       0.98        694
+whisper-distill-q5_0         short          194.35       0.97        694
+whisper-distill-q5_0         short          196.45       0.99        694
+whisper-distill-q5_0         short          190.72       0.99        694
+whisper-distill-q5_0         short          195.18       0.98        694
+sensevoice-small-q8          short               -       0.24        298
+sensevoice-small-q8          short               -       0.20        297
+sensevoice-small-q8          short               -       0.21        298
+sensevoice-small-q8          short               -       0.22        298
+sensevoice-small-q8          short               -       0.26        298
+sensevoice-small-q8          short               -       0.22        298
+
+# 命令：
+#   whisper:    /usr/bin/time -l whisper-cli -m <model> -f short.wav -l th -t 4 -bo 1 -bs 1 -nt
+#   sensevoice: /usr/bin/time -l llama-funasr-sensevoice -m sensevoice-small-q8.gguf --vad fsmn-vad.gguf -a short.wav --keep-tags

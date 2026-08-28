@@ -11,6 +11,8 @@ ADR-0004 的数字从这里来。**保留逐样本数据**，免得只剩一张�
 |---|---|---|
 | `thai-bench-raw.txt` | 性能（体积/RTF/峰值 RSS） | ⚠️ **人工誊抄，非脚本原样输出；模型已不在本机，现阶段无法重算**。见文件头 |
 | `thai-cer-per-sample/*.json` | **逐句** hyp、edits、参考长度 | `scripts/cer-thai.py <模型> <cli> <数据目录>` |
+| `thai-coldstart-raw.txt` | 载入时间 / 端到端墙钟 / RSS（whisper vs SenseVoice） | 见文件尾的命令。**脚本原样输出** |
+| `thai-rtf-repeat.txt` | 同一模型重复三次的 RTF | `scripts/bench-thai.sh <模型>` 连跑三次。⚠️ **人工汇总**，不是原样输出 |
 | `thai-cer-stats.txt` | CI 与配对比较 | `scripts/cer-stats.py docs/data/thai-cer-per-sample 4000` — 除开头 3 行说明外**逐字节一致，已验**。⚠️ 它会 **exit 4**：这六份结果产出于指纹机制之前，「跑在同一批录音上」这个前提无法事后验证 |
 
 统计量**不需要重跑推理**——`cer-stats.py` 直接吃 `thai-cer-per-sample/`，
@@ -56,7 +58,9 @@ ADR-0004 的数字从这里来。**保留逐样本数据**，免得只剩一张�
 **没有证据证明下载那一刻的 HEAD 与此相同**——若上游当天做过更新，就对不上。
 下次必须在下载时就记下来。
 
-同样没有记录：原始权重文件的 SHA-256、转换命令的脚本 commit。
+同样没有记录：原始权重文件的 SHA-256，以及 `convert-h5-to-ggml.py` 这个**脚本
+本身**的版本（whisper.cpp 的 commit 记了，见上方「环境」的 `7de8dd78`，
+但脚本可能随仓库变动，没有单独固定）。
 GGML 产物的 sha256 只存了**前 12 位**（在逐样本 JSON 里；性能表没有这一列）。
 
 **2026-08-28 更新：「HF revision → 转换 → 量化产物」这一段已经验过了。**
