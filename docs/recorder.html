@@ -1,0 +1,508 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>录音工具 · AgentEar Recorder</title>
+<style>
+:root{color-scheme:light dark;--paper:#fbfaf7;--ink:#1b1b1a;--slate:#6b6a66;
+  --rule:#d9d6cf;--signal:#B8332B;--done:#1F6B5C;--read:1.05rem}
+@media(prefers-color-scheme:dark){:root{--paper:#16171a;--ink:#e9e7e2;--slate:#9a978f;--rule:#33353a}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--paper);color:var(--ink);
+  font:15px/1.65 -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Hiragino Sans GB",sans-serif}
+.wrap{max-width:56rem;margin:0 auto;padding:1.6rem 1.1rem 5rem}
+h1{font-size:1.35rem;margin:0 0 .2rem}
+.sub{color:var(--slate);font-size:.92rem;margin:0 0 1.4rem}
+fieldset{border:1px solid var(--rule);border-radius:9px;padding:.9rem 1rem;margin:0 0 1.2rem}
+legend{padding:0 .4rem;font-size:.86rem;color:var(--slate)}
+label{font-size:.9rem}
+input[type=text],input[type=number],select,textarea{font:inherit;color:var(--ink);
+  background:var(--paper);border:1px solid var(--rule);border-radius:6px;padding:.35rem .55rem}
+textarea{width:100%;min-height:8rem;font-size:var(--read);line-height:1.7;resize:vertical}
+.row{display:flex;gap:.9rem;align-items:center;flex-wrap:wrap;margin-bottom:.6rem}
+.hint{font-size:.83rem;color:var(--slate);margin:.3rem 0 0}
+.btn{font:inherit;cursor:pointer;border:1px solid var(--rule);background:transparent;
+  color:var(--ink);border-radius:7px;padding:.4rem .8rem}
+.btn:disabled{opacity:.4;cursor:not-allowed}
+.btn.primary{border-color:var(--signal);color:var(--signal);font-weight:600}
+.take{border:1px solid var(--rule);border-radius:9px;padding:.7rem .9rem;margin-bottom:.7rem}
+.take[data-state=recording]{border-color:var(--signal);box-shadow:inset 3px 0 0 var(--signal)}
+.take[data-state=done]{box-shadow:inset 3px 0 0 var(--done)}
+.take-head{display:flex;gap:.6rem;align-items:baseline;margin-bottom:.4rem}
+.no{font-variant-numeric:tabular-nums;color:var(--slate);font-size:.85rem;min-width:2.2rem}
+.txt{flex:1;font-size:var(--read);white-space:pre-wrap;word-break:break-word}
+.txt.free{color:var(--slate);font-style:italic}
+.ctl{display:flex;gap:.5rem;align-items:center;flex-wrap:wrap}
+.timer{font-variant-numeric:tabular-nums;color:var(--slate);min-width:3.4rem}
+.meter{display:inline-block;width:6rem;height:.5rem;border:1px solid var(--rule);border-radius:3px;overflow:hidden}
+.meter i{display:block;height:100%;width:0;background:var(--done)}
+.meter.hot i{background:var(--signal)}
+audio{height:2rem;max-width:14rem}
+.stat{font-size:.85rem;color:var(--slate);margin:.35rem 0 0}
+.bad{font-size:.85rem;color:var(--signal);margin:.35rem 0 0}
+.bad .btn{margin-top:.4rem}
+.pill{display:inline-block;border:1px solid var(--rule);border-radius:999px;
+  padding:.1rem .6rem;font-size:.82rem;color:var(--slate)}
+.pill.ok{border-color:var(--done);color:var(--done)}
+code{font-size:.85em;background:color-mix(in srgb,var(--ink) 7%,transparent);
+  padding:.05em .3em;border-radius:3px}
+footer{margin-top:2rem;padding-top:1rem;border-top:1px solid var(--rule);
+  font-size:.85rem;color:var(--slate)}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>录音工具</h1>
+  <p class="sub">本地运行，录音不离开这台机器。给声音克隆、TTS 参考音、ASR 转写校对用。</p>
+
+  <fieldset>
+    <legend>设置</legend>
+    <div class="row">
+      <label>署名 <input id="speaker" type="text" maxlength="24" placeholder="anon" size="10"></label>
+      <label>目标采样率
+        <select id="rate">
+          <option value="0" selected>原样（不重采样）</option>
+          <option value="48000">48 kHz</option>
+          <option value="32000">32 kHz</option>
+          <option value="24000">24 kHz</option>
+          <option value="22050">22.05 kHz</option>
+          <option value="16000">16 kHz</option>
+        </select>
+      </label>
+      <label>单段上限 <input id="maxsec" type="number" min="5" max="600" value="240" size="4"> 秒</label>
+      <span class="pill" id="devpill">◌ 麦克风未开</span>
+    </div>
+    <p class="hint" id="ratehint"></p>
+  </fieldset>
+
+  <fieldset>
+    <legend>脚本</legend>
+    <textarea id="script" placeholder="把要念的文字贴在这里，用空行分段。&#10;&#10;留空则是自由录音——想录几段录几段，不对文本。"></textarea>
+    <div class="row" style="margin-top:.6rem">
+      <button class="btn primary" id="apply" type="button">应用脚本</button>
+      <button class="btn" id="addfree" type="button">+ 加一段自由录音</button>
+      <span class="hint" id="scripthint"></span>
+    </div>
+  </fieldset>
+
+  <div class="row">
+    <span class="pill" id="prog">0 / 0</span>
+    <button class="btn" id="zip" type="button" disabled>⤓ 全部打包下载（.zip）</button>
+    <span class="hint">压缩包里含 <code>manifest.txt</code>：文本、WAV 文件名与 SHA-256、设备参数、质量指标</span>
+  </div>
+
+  <div id="takes"></div>
+
+  <footer>
+    <p><strong>录音不会自动保存。</strong>关掉页面就没了 —— 用「全部打包下载」或每段的 ⤓ 存下来。</p>
+    <p>音频与文本全程留在本机，不上传任何地方。脚本和署名存在浏览器的
+       localStorage 里，只在这台机器上。</p>
+    <p id="diag" class="hint"></p>
+  </footer>
+</div>
+
+<script src="recorder-core.js"></script>
+<script>
+"use strict";
+const { startCapture, toWav, sha256hex16, diagnose, normText } = RecorderCore;
+
+/* ── 会话：一次只允许一路录音 ──
+   和 thai-recorder.html 同一套纪律（那套竞态修了三次）：
+   **单一持有者令牌**，任何回调改共享状态之前先验证 `owns(token)`。
+   这里比那个页面简单一档 —— 全局只有「当前正在录哪一段」这一个状态，
+   而不是 N 个各自独立、能互相抢的按钮，在飞的异步路径少得多。 */
+const S = { stream:null, ctx:null, source:null, analyser:null, rafId:null,
+            holder:null, cap:null, finish:null, trackSettings:null, tickId:0, gen:0 };
+let tokenSeq = 0;
+const owns = t => !!S.holder && S.holder.token === t;
+
+const takes = [];              // { id, no, text, free, blob, quality, sha, seconds, src, saved, override }
+let seq = 0;
+const $ = s => document.querySelector(s);
+const mmss = s => String(Math.floor(s/60)).padStart(2,"0")+":"+String(Math.floor(s%60)).padStart(2,"0");
+const escapeHtml = s => String(s).replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+
+/* ── 本机记忆：脚本和署名，别让人重开页面就得重贴。
+   localStorage 在无痕窗口/禁用站点数据时会直接抛，所以读写都包 try。 ── */
+const LS = "agentear-recorder-v1";
+const save = () => { try { localStorage.setItem(LS, JSON.stringify(
+  { speaker:$("#speaker").value, script:$("#script").value,
+    rate:$("#rate").value, maxsec:$("#maxsec").value })); } catch (_) {} };
+const load = () => { try {
+  const d = JSON.parse(localStorage.getItem(LS) || "{}");
+  if (d.speaker) $("#speaker").value = d.speaker;
+  if (d.script) $("#script").value = d.script;
+  if (d.rate) $("#rate").value = d.rate;
+  if (d.maxsec) $("#maxsec").value = d.maxsec;
+} catch (_) {} };
+
+const speakerId = () => {
+  const v = ($("#speaker").value || "").trim().toLowerCase();
+  return v.replace(/[^a-z0-9一-龥_-]+/g,"-").replace(/^-+|-+$/g,"").slice(0,24) || "anon";
+};
+
+/* ── 采样率的取舍写在界面上，不只写在注释里 ──
+   泰语那个页面写死 16 kHz 是因为它是 ASR 语料工具；这里不能照抄。 */
+const RATE_NOTE = {
+  "0":     "保留设备原始采样率（多为 44.1 或 48 kHz）。**声音克隆首选** —— 不做任何重采样，保真最高，下游要什么率自己降。",
+  "48000": "广播级。声音克隆、后期处理都够用，文件最大。",
+  "32000": "GPT-SoVITS 的原生采样率。",
+  "24000": "XTTS / F5-TTS / CosyVoice 一类的原生采样率，体积约为 48 kHz 的一半。",
+  "22050": "较老的 TTS 栈常用。",
+  "16000": "⚠️ **ASR 语料 / 转写校对用**。拿它做声音克隆音色会明显变闷 —— 8 kHz 以上全被丢掉，而那正是齿音和空气感所在。",
+};
+const rateHint = () => {
+  const v = $("#rate").value;
+  $("#ratehint").innerHTML = (RATE_NOTE[v] || "").replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>");
+};
+
+/* ── 环境自检：不支持就当场说，别让人录完才发现存不下来 ── */
+function envCheck() {
+  const d = diagnose();
+  const ok = d.secure && d.gum && d.ac && d.dl;
+  $("#diag").textContent = ok
+    ? `环境就绪 · secure=${d.secure} download=${d.dl}${d.framed ? " · ⚠️ 页面被嵌在 iframe 里，麦克风可能拿不到" : ""}`
+    : `⚠️ 这个环境录不了：secure=${d.secure} getUserMedia=${d.gum} AudioContext=${d.ac} download=${d.dl}`;
+  $("#diag").style.color = ok ? "" : "var(--signal)";
+  return ok;
+}
+
+/* ── 麦克风 ── */
+function releaseMic(force) {
+  if (!force && S.holder) return;
+  if (S.rafId) { cancelAnimationFrame(S.rafId); S.rafId = null; }
+  if (S.stream) { S.stream.getTracks().forEach(t=>t.stop()); S.stream = null; }
+  if (S.source) { try { S.source.disconnect(); } catch(_){} S.source = null; }
+  if (S.ctx) { S.ctx.close().catch(()=>{}); S.ctx = null; }
+  S.analyser = null;
+  document.querySelectorAll(".meter i").forEach(i => i.style.width = "0%");
+  $("#devpill").textContent = "◌ 麦克风未开"; $("#devpill").classList.remove("ok");
+}
+
+async function acquireMic(token) {
+  if (S.stream) return null;
+  let got;
+  try {
+    // 关掉降噪/AGC：要的是原始音频。声音克隆尤其怕 AGC 把动态压平。
+    got = await navigator.mediaDevices.getUserMedia({ audio: {
+      channelCount:1, echoCancellation:false, noiseSuppression:false, autoGainControl:false } });
+  } catch (e) {
+    if (!owns(token)) return { superseded:true };
+    return { msg: `拿不到麦克风：${e.name} —— ${e.message}` };
+  }
+  // 申请期间可能已跨代：自己关掉自己拿到的 track，绝不写进 S
+  if (!owns(token)) { got.getTracks().forEach(t=>t.stop()); return { superseded:true }; }
+  let ctx = null;
+  try {
+    const AC = window.AudioContext || window.webkitAudioContext;
+    S.stream = got;
+    // 请求的约束不代表设备照做了，记下**实际生效**的值
+    try { S.trackSettings = got.getAudioTracks()[0].getSettings(); } catch(_) { S.trackSettings = null; }
+    ctx = new AC(); S.ctx = ctx;
+    S.analyser = ctx.createAnalyser(); S.analyser.fftSize = 1024;
+    S.source = ctx.createMediaStreamSource(S.stream);
+    S.source.connect(S.analyser);
+    if (ctx.state === "suspended") await ctx.resume();
+    // resume 是 await 点，期间可能 pagehide 过
+    if (!owns(token) || S.ctx !== ctx) return { superseded:true };
+  } catch (e) {
+    // 只在自己仍是持有者时清全局，否则只关自己申请到的那份
+    if (owns(token) && S.ctx === ctx) releaseMic(true);
+    else { try { got.getTracks().forEach(t=>t.stop()); } catch(_){} if (ctx) ctx.close().catch(()=>{}); }
+    return { msg: `音频链路初始化失败：${e.name} —— ${e.message}` };
+  }
+  const t = S.trackSettings || {};
+  $("#devpill").textContent = `● ${t.sampleRate || S.ctx.sampleRate} Hz · ${t.channelCount || 1}ch`;
+  $("#devpill").classList.add("ok");
+  return null;
+}
+
+function levelLoop() {
+  if (S.rafId || !S.analyser) return;
+  const buf = new Uint8Array(S.analyser.fftSize);
+  const tick = () => {
+    const h = S.holder;
+    if (!S.analyser || !h || h.phase !== "recording") {
+      S.rafId = null;
+      document.querySelectorAll(".meter i").forEach(i => i.style.width = "0%");
+      return;
+    }
+    S.analyser.getByteTimeDomainData(buf);
+    let peak = 0;
+    for (let i=0;i<buf.length;i++) peak = Math.max(peak, Math.abs(buf[i]-128)/128);
+    const m = document.querySelector(`#t-${h.id} .meter`);
+    if (m) { m.querySelector("i").style.width = Math.min(100, peak*160)+"%";
+             m.classList.toggle("hot", peak > 0.92); }
+    S.rafId = requestAnimationFrame(tick);
+  };
+  S.rafId = requestAnimationFrame(tick);
+}
+
+/* pagehide：放弃持有权 + 放资源 + 停掉在飞的采集，并重画一次。
+   不重画的话页面会带着「按钮全禁用」的样子被冻进 BFCache，
+   回来时若 pageshow 没如期触发（iOS 尤其不可靠），整页永久点不动。 */
+window.addEventListener("pagehide", () => {
+  S.holder = null; S.gen++; S.finish = null;
+  clearInterval(S.tickId);
+  if (S.cap) { const c = S.cap; S.cap = null; Promise.resolve(c.take()).catch(()=>{}); }
+  releaseMic(true);
+  render();
+});
+// 不看 e.persisted —— iOS 从后台回来时它未必为 true，漏一次复位就是整页卡死
+window.addEventListener("pageshow", () => render());
+
+/* ── 录音 ── */
+async function startTake(t) {
+  if (S.holder) return;                 // 这道守卫必须在任何 await 之前同步占位
+  if (!envCheck()) return;
+  const token = ++tokenSeq;
+  S.holder = { token, id:t.id, phase:"acquiring" };
+  render();
+  let started = false;
+  try {
+    const problem = await acquireMic(token);
+    if (!owns(token)) return;
+    if (problem) { if (!problem.superseded) { t.error = problem.msg; render(); } return; }
+    t.error = null;
+
+    const myGen = ++S.gen;
+    let cap;
+    const maxSeconds = Math.max(5, Math.min(600, +$("#maxsec").value || 240));
+    try {
+      cap = await startCapture(S.ctx, S.source, { maxSeconds });
+    } catch (e) { t.error = `采集启动失败：${e.name} —— ${e.message}`; render(); return; }
+    // 建采集节点要 await（AudioWorklet 得加载模块），期间可能已跨代：
+    // 自己拆掉自己建的节点，绝不写进 S
+    if (!owns(token) || myGen !== S.gen) { cap.take(); return; }
+    S.cap = cap;
+
+    const dst = +$("#rate").value || 0;
+    S.finish = async () => {
+      S.finish = null;                       // 连点两下停止只走一次
+      clearInterval(S.tickId);
+      const myCap = S.cap; S.cap = null;
+      // **整段包在 try 里，take() 也算进来** —— 拼接 PCM 时 OOM 抛出的话，
+      // 这个 async 函数会以未处理的 rejection 结束，而 holder 还停在 recording，
+      // 麦克风和所有按钮永久卡死，只能刷新页面。
+      try {
+        const taken = myCap ? await myCap.take() : null;
+        if (!owns(token) || myGen !== S.gen) return;
+        S.holder.phase = "converting"; render();
+        await new Promise(r => setTimeout(r, 0));   // 先让「转换中」画出来
+        if (!taken || !taken.pcm.length) throw new Error("没有采到音频");
+        const target = dst || taken.sampleRate;
+        const res = await toWav(taken.pcm, taken.sampleRate, target,
+          { minSeconds: 1, timeline: taken.timeline });
+        if (taken.dropped) res.quality.problems.push({ en:"超过单段上限，多出来的部分被丢弃" });
+        // hash 算完再发布 —— 先写进 t 再 await 的话，等待期间发生 pagehide，
+        // digest 回来后没人再拦，旧的收尾会把结果写到已经作废的那一代上
+        const sha = await sha256hex16(res.blob);
+        if (!owns(token) || myGen !== S.gen) return;
+        // 换 blob 就把旧的 object URL 吊销。**URL 跟着 blob 走，不跟着重画走** ——
+        // 原来每次 render 都新建一个，被移除的 <audio> 还在加载已吊销的那个，
+        // 控制台一片 ERR_FILE_NOT_FOUND，而且 URL 一直在涨。
+        if (t.url) URL.revokeObjectURL(t.url);
+        Object.assign(t, { blob:res.blob, url:URL.createObjectURL(res.blob),
+          quality:res.quality, seconds:res.seconds, sha,
+          saved:false, override:false, error:null, staleText:false,
+          src:{ rate:taken.sampleRate, dst:target, backend:taken.backend,
+                timeline:taken.timeline, track:S.trackSettings, ua:navigator.userAgent } });
+      } catch (e) {
+        if (!owns(token) || myGen !== S.gen) return;
+        t.error = `转换失败：${e.name} —— ${e.message}`;
+      } finally {
+        if (owns(token)) S.holder = null;
+        releaseMic();
+        render();
+      }
+    };
+
+    started = true;
+    const t0 = Date.now();
+    S.holder.phase = "recording";
+    render();
+    // 计时器捕获自己的代次：读共享的 S.finish 的话，旧 interval 会去停新录音
+    S.tickId = setInterval(() => {
+      if (myGen !== S.gen) { clearInterval(S.tickId); return; }
+      const secs = (Date.now()-t0)/1000;
+      const el = document.querySelector(`#t-${t.id} .timer`);
+      if (el) el.textContent = mmss(secs);
+      if (secs >= maxSeconds && S.finish) S.finish();
+    }, 200);
+    levelLoop();
+  } finally {
+    // 没能进入录音状态就交还会话，否则按钮永久卡在禁用
+    if (!started && owns(token)) { S.holder = null; releaseMic(); render(); }
+  }
+}
+
+/* ── 存盘 ── */
+function saveBlob(blob, name) {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url; a.download = name; a.rel = "noopener"; a.style.display = "none";
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 60000);   // 0 ms 会赶在下载真正开始之前
+}
+const wavName = t => `${speakerId()}-${String(t.no).padStart(3,"0")}.wav`;
+
+/* ── store-only ZIP（不压缩）──
+   为一个打包引入整个压缩库不划算，而 WAV 本来也压不动多少，
+   store 模式反而省 CPU。格式：本地头 + 数据 + 中央目录 + EOCD。 */
+function crc32(u8) {
+  let t = crc32.t;
+  if (!t) { t = crc32.t = new Uint32Array(256);
+    for (let n=0;n<256;n++){ let c=n; for(let k=0;k<8;k++) c = c&1 ? 0xEDB88320^(c>>>1) : c>>>1; t[n]=c>>>0; } }
+  let crc = 0xFFFFFFFF;
+  for (let i=0;i<u8.length;i++) crc = t[(crc ^ u8[i]) & 0xFF] ^ (crc >>> 8);
+  return (crc ^ 0xFFFFFFFF) >>> 0;
+}
+function zipStore(files) {          // files: [{name, bytes: Uint8Array}]
+  const enc = new TextEncoder(), chunks = [], central = [];
+  let off = 0;
+  const u16 = v => [v & 255, (v>>>8) & 255];
+  const u32 = v => [v & 255, (v>>>8) & 255, (v>>>16) & 255, (v>>>24) & 255];
+  for (const f of files) {
+    const nm = enc.encode(f.name), crc = crc32(f.bytes), sz = f.bytes.length;
+    // 0x0800 = 文件名按 UTF-8 解释，中文文件名才不会乱码
+    const lh = new Uint8Array([...u32(0x04034b50), ...u16(20), ...u16(0x0800), ...u16(0),
+      ...u16(0), ...u16(0), ...u32(crc), ...u32(sz), ...u32(sz), ...u16(nm.length), ...u16(0)]);
+    chunks.push(lh, nm, f.bytes);
+    central.push(new Uint8Array([...u32(0x02014b50), ...u16(20), ...u16(20), ...u16(0x0800),
+      ...u16(0), ...u16(0), ...u16(0), ...u32(crc), ...u32(sz), ...u32(sz),
+      ...u16(nm.length), ...u16(0), ...u16(0), ...u16(0), ...u16(0), ...u32(0), ...u32(off)]), nm);
+    off += lh.length + nm.length + sz;
+  }
+  const cstart = off;
+  let csize = 0; for (const c of central) csize += c.length;
+  const end = new Uint8Array([...u32(0x06054b50), ...u16(0), ...u16(0),
+    ...u16(files.length), ...u16(files.length), ...u32(csize), ...u32(cstart), ...u16(0)]);
+  return new Blob([...chunks, ...central, end], { type:"application/zip" });
+}
+
+function manifest() {
+  const L = [];
+  L.push("# AgentEar 录音工具导出");
+  L.push(`# 时间 ${new Date().toISOString()}`);
+  L.push(`# 说话人 ${speakerId()}`);
+  L.push("#");
+  L.push("# 每段：文本 / WAV 文件名 / SHA-256 前 16 位 / 采集参数 / 质量指标");
+  L.push("# ⚠️ 请求的约束（单声道、关 AGC/降噪）不代表设备照做了；");
+  L.push("#    track 那行是 getSettings() 报的**实际生效**值。");
+  for (const t of takes) {
+    if (!t.blob) continue;
+    const s = t.src || {}, q = t.quality || {};
+    L.push("");
+    L.push(`## ${wavName(t)}`);
+    L.push(`text: ${t.free ? "(自由录音，无脚本)" : t.text}`);
+    L.push(`sha256_16: ${t.sha || "(unavailable)"}`);
+    L.push(`audio: ${s.dst} Hz mono 16-bit · ${(t.seconds||0).toFixed(2)}s · 采集自 ${s.rate} Hz (${s.backend})`);
+    if (s.track) L.push(`track: ch=${s.track.channelCount} rate=${s.track.sampleRate} ` +
+      `aec=${s.track.echoCancellation} ns=${s.track.noiseSuppression} agc=${s.track.autoGainControl}`);
+    if (s.timeline) L.push(`timeline: got ${s.timeline.gotFrames} / expected ${s.timeline.expectedFrames}` +
+      (s.timeline.missingSeconds > 0.001 ? ` · MISSING ${s.timeline.missingSeconds.toFixed(3)}s` : ""));
+    L.push(`quality: peak ${(q.peak||0).toFixed(3)} · SNR ${(q.snrDb||0).toFixed(1)} dB · voiced ${((q.voiced||0)*100).toFixed(0)}%`);
+    if (q.hard && q.hard.length) L.push(`!! HARD FAIL: ${q.hard.map(x=>x.en).join("; ")}`);
+    if (q.problems && q.problems.length)
+      L.push(`!! flags: ${q.problems.map(x=>x.en).join("; ")}${t.override ? " [人工放行]" : ""}`);
+    L.push(`ua: ${s.ua || ""}`);
+  }
+  return L.join("\n") + "\n";
+}
+
+/* ── 脚本 → 段落 ── */
+function applyScript() {
+  const paras = $("#script").value.split(/\n\s*\n/).map(normText).filter(Boolean);
+  const keep = takes.filter(t => t.blob);          // 已有录音的不能因为改脚本就丢
+  takes.length = 0;
+  // 下面按顺序贴回 keep，贴不下的那些永远不会再被引用 —— 现在就吊销，
+  // 否则它们的 object URL 会一直挂到页面关闭
+  if (paras.length) paras.forEach(p => takes.push({ id: ++seq, text:p, free:false }));
+  else takes.push({ id: ++seq, text:"", free:true });
+  // 按顺序贴回已录的；文本变了就标出来，让人知道这段对不上了
+  keep.forEach((k, i) => {
+    const t = takes[i];
+    if (!t) { if (k.url) URL.revokeObjectURL(k.url); return; }
+    Object.assign(t, { blob:k.blob, url:k.url, quality:k.quality, sha:k.sha,
+      seconds:k.seconds, src:k.src, saved:k.saved, override:k.override,
+      staleText: !k.free && !t.free && t.text !== k.text }); });
+  $("#scripthint").textContent = paras.length ? `${paras.length} 段（按空行分）` : "自由录音模式";
+  save(); render();
+}
+
+/* ── 渲染 ── */
+function render() {
+  takes.forEach((t,i) => t.no = i+1);
+  const box = $("#takes");
+  box.innerHTML = "";
+  const busy = !!S.holder;
+  for (const t of takes) {
+    const rec = S.holder && S.holder.id === t.id;
+    const q = t.quality || {};
+    const hard = (q.hard || []).map(x=>x.en);
+    const soft = (q.problems || []).map(x=>x.en);
+    const el = document.createElement("section");
+    el.className = "take"; el.id = "t-" + t.id;
+    el.dataset.state = rec ? S.holder.phase : (t.blob ? "done" : "idle");
+    el.innerHTML = `
+      <div class="take-head">
+        <span class="no">${String(t.no).padStart(2,"0")}</span>
+        <div class="txt${t.free?" free":""}">${t.free ? "自由录音（不对文本）" : escapeHtml(t.text)}</div>
+      </div>
+      <div class="ctl">
+        <button class="btn rec">${rec && S.holder.phase==="recording" ? "■ 停止" : (t.blob ? "● 重录" : "● 录音")}</button>
+        <span class="timer">00:00</span>
+        <span class="meter"><i></i></span>
+        ${t.blob ? `<audio controls src="${t.url}"></audio><button class="btn dl">⤓ 存这段</button>` : ""}
+      </div>
+      ${t.staleText ? `<p class="bad">脚本改过，这段录音对应的是旧文本 —— 建议重录。</p>` : ""}
+      ${t.error ? `<p class="bad">${escapeHtml(t.error)}</p>` : ""}
+      ${hard.length ? `<p class="bad">✕ ${escapeHtml(hard.join("；"))}（不可放行，必须重录）</p>` : ""}
+      ${!hard.length && soft.length && !t.override
+        ? `<p class="bad">⚠ ${escapeHtml(soft.join("；"))}<br><button class="btn ovr">我听过了，可以用</button></p>` : ""}
+      ${t.blob ? `<p class="stat">${(t.seconds||0).toFixed(2)}s · ${t.src.dst} Hz · 峰值 ${(q.peak||0).toFixed(3)} · SNR ${(q.snrDb||0).toFixed(1)} dB · 有声 ${((q.voiced||0)*100).toFixed(0)}%${t.saved?" · 已存":""}${t.override?" · 已人工放行":""}</p>` : ""}`;
+    const rb = el.querySelector(".rec");
+    rb.disabled = busy && !(rec && S.holder.phase === "recording");
+    rb.onclick = () => {
+      if (rec && S.holder.phase === "recording" && S.finish) { S.finish(); return; }
+      startTake(t);
+    };
+    const dl = el.querySelector(".dl");
+    if (dl) dl.onclick = () => { saveBlob(t.blob, wavName(t)); t.saved = true; render(); };
+    const ov = el.querySelector(".ovr");
+    if (ov) ov.onclick = () => { t.override = true; render(); };
+    box.appendChild(el);
+  }
+  // 「可用」= 录了、时间线没洞、文本没漂、软问题要么没有要么他听过并放行了
+  const usable = takes.filter(t => t.blob && !((t.quality||{}).hard||[]).length
+    && !t.staleText && (!(((t.quality||{}).problems)||[]).length || t.override));
+  $("#prog").textContent = `${usable.length} / ${takes.length} 可用`;
+  $("#prog").classList.toggle("ok", takes.length > 0 && usable.length === takes.length);
+  $("#zip").disabled = !takes.some(t => t.blob);
+}
+
+/* ── 绑定 ── */
+$("#apply").onclick = applyScript;
+$("#addfree").onclick = () => { takes.push({ id: ++seq, text:"", free:true }); render(); };
+$("#rate").onchange = () => { rateHint(); save(); };
+$("#speaker").oninput = () => { save(); render(); };   // 署名进文件名，改了要重画
+$("#maxsec").oninput = save;
+$("#script").oninput = save;
+$("#zip").onclick = async () => {
+  const files = [];
+  for (const t of takes) {
+    if (!t.blob) continue;
+    files.push({ name: wavName(t), bytes: new Uint8Array(await t.blob.arrayBuffer()) });
+  }
+  files.push({ name:"manifest.txt", bytes: new TextEncoder().encode(manifest()) });
+  saveBlob(zipStore(files), `${speakerId()}-recordings.zip`);
+  takes.forEach(t => { if (t.blob) t.saved = true; });
+  render();
+};
+
+load(); rateHint(); envCheck(); applyScript();
+</script>
+</body>
+</html>
