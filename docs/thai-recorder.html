@@ -518,7 +518,8 @@ function encodeWav(samples, sampleRate) {
    浏览器自己的重采样器**也不用** —— 它虽然抗混叠，但各家实现不同：实测
    Chrome 的离线解码在 9 kHz 折回点上还残留 0.097，而下面的 sinc 是 0.00016。
    这批录音是要拿去和 FLEURS 比的测量样本，同一段声音在不同浏览器上得出不同
-   结果，会让语料本身失去可比性。宁可多花几百毫秒，换一份确定的结果。 */
+   结果，会让语料本身失去可比性。宁可多花这点时间，换一份确定的结果 ——
+   实测代价见提交说明，别在注释里写死数字，改了参数就会对不上。 */
 /* ── 采集原始 PCM ──
    **不用 MediaRecorder。** 各家浏览器用不同的**有损**编码器（Chrome 多为
    Opus，Safari 多为 AAC），解码回来只是把有损结果装进 PCM，恢复不了原波形；
@@ -1255,8 +1256,12 @@ function buildTake(p) {
           el.dataset.state = "converting";
           status.textContent = "กำลังแปลงไฟล์… · converting…";
           syncLocks();
-          // 重采样是同步的、会占住主线程几百毫秒；先让一帧过去，
-          // 否则「正在转换」这行字根本来不及画出来
+          // 先让一帧过去，否则「正在转换」这行字根本来不及画出来。
+          // （旧注释写的理由是「重采样是同步的」—— 那条理由已经不成立：
+          //   resampleSinc 现在分块 + 每块让出主线程。这一让仍然需要，
+          //   因为让出发生在**第一块开始之前**。
+          //   ⚠️ 别顺着旧理由推出「同步所以下面不用重验 token」——
+          //   `toWav16k` 现在是 await 的，那道重验正是为此而设。）
           await new Promise(r => setTimeout(r, 0));
           if (!taken || !taken.pcm.length) throw new Error("no audio captured");
           // 泰文平均约 12 字/秒，据此估个应有时长，用来发现「只念了一半」
