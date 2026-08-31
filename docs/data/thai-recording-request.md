@@ -42,7 +42,7 @@ please don't force a native-English pronunciation).
 
 ### A. 网页录音工具(有电平表,自动出 16 kHz WAV)
 
-**链接我单独发给你**(还在配域名,见下方说明)。
+<https://jhfnetboy.github.io/AgentEar/thai-recorder.html>
 
 在手机或电脑的浏览器里打开,按页面提示走。它会在你录完之后自己检查音量、
 时长、有没有丢帧,并把「你实际念的文本」和录音绑在一起 ——
@@ -53,7 +53,7 @@ please don't force a native-English pronunciation).
 
 页面里也写着这条退路。**格式、采样率都不用管**,我这边转。
 如果 A 打不开、麦克风权限拿不到、或者你就是懒得折腾,直接用 B ——
-两条路产出的语料我们一样用。**不用等 A 的链接,现在就可以用 B 开始。**
+两条路产出的语料我们一样用。
 
 - 手机自带录音机就行,不需要专业设备
   A phone voice recorder is fine — no special equipment needed
