@@ -74,6 +74,11 @@ rem 只绑 127.0.0.1，不暴露到局域网。
 rem stderr 写进日志而不是丢掉。原来是 `>nul 2>&1`，任何启动失败都被吞掉，
 rem 然后就绪循环跑满报「服务没起来，或打不开」—— **指向端口和网络，
 rem 而真因可能是别的**。志愿者不是开发者，得让他有东西可以发回来。
+rem
+rem 叫它「服务日志」不叫「错误输出」：http.server 的**访问日志也走 stderr**
+rem （实测 3 个请求 = 3 行 "GET ... 200 -"），文件里多半是一堆正常请求。
+rem 叫「错误输出」的话，人打开一看全是 200，会以为自己发错了文件。
+rem 启动失败时错误在最前面，所以下面只取开头几行。
 start "" /b %PY% -c "import os,functools,http.server,socketserver; open(os.environ['AE_PID'],'w').write(str(os.getpid())); h=functools.partial(http.server.SimpleHTTPRequestHandler,directory=os.environ['AE_DOCS']); socketserver.TCPServer.allow_reuse_address=True; socketserver.TCPServer(('127.0.0.1',int(os.environ['AE_PORT'])),h).serve_forever()" >nul 2>"%LOGFILE%"
 
 rem 等它真的起来再开浏览器，否则会开出一个连接失败的页面
@@ -87,7 +92,7 @@ for /l %%i in (1,1,40) do (
 if !READY!==0 (
   echo !! 服务没起来，或 http://127.0.0.1:%PORT%/ 打不开
   if exist "%LOGFILE%" (
-    echo    服务的错误输出在：%LOGFILE%
+    echo    服务日志在：%LOGFILE%（里面也有正常的访问记录，看开头几行）
     echo    ---- 开头几行 ----
     %PY% -c "import sys;[print(l,end='') for l in open(sys.argv[1],errors='replace').readlines()[:8]]" "%LOGFILE%" 2>nul
   )
