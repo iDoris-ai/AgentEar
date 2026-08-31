@@ -50,7 +50,18 @@ if not errorlevel 1 (
 )
 
 set "PIDFILE=%TEMP%\agentear-recorder-%PORT%.pid"
+set "LOGFILE=%TEMP%\agentear-recorder-%PORT%.log"
 if exist "%PIDFILE%" del "%PIDFILE%" >nul 2>&1
+if exist "%LOGFILE%" del "%LOGFILE%" >nul 2>&1
+
+rem **路径走环境变量，不进 Python 源码。**
+rem 之前是 directory=r'%DOCS%'，而 %DOCS% 来自仓库放在哪儿 ——
+rem Windows 用户名带撇号很常见（C:\Users\O'Brien\...），
+rem 那个撇号会直接把 Python 单行命令截断成 SyntaxError。
+rem 实测（macOS 等价复现）：路径含 ' → SyntaxError；走环境变量 → 正常。
+set "AE_DOCS=%DOCS%"
+set "AE_PID=%PIDFILE%"
+set "AE_PORT=%PORT%"
 
 echo ==^> 录音工具  http://127.0.0.1:%PORT%/recorder.html
 echo     泰语语料页 http://127.0.0.1:%PORT%/thai-recorder.html
@@ -60,7 +71,10 @@ echo.
 rem 服务自己把 PID 写进文件 —— 退出时才停得掉。用 `start /b` 起的进程，
 rem batch 拿不到它的 PID；靠 netstat 反查又要解析本地化输出。
 rem 只绑 127.0.0.1，不暴露到局域网。
-start "" /b %PY% -c "import os,sys,functools,http.server,socketserver; open(r'%PIDFILE%','w').write(str(os.getpid())); h=functools.partial(http.server.SimpleHTTPRequestHandler,directory=r'%DOCS%'); socketserver.TCPServer.allow_reuse_address=True; socketserver.TCPServer(('127.0.0.1',%PORT%),h).serve_forever()" >nul 2>&1
+rem stderr 写进日志而不是丢掉。原来是 `>nul 2>&1`，任何启动失败都被吞掉，
+rem 然后就绪循环跑满报「服务没起来，或打不开」—— **指向端口和网络，
+rem 而真因可能是别的**。志愿者不是开发者，得让他有东西可以发回来。
+start "" /b %PY% -c "import os,functools,http.server,socketserver; open(os.environ['AE_PID'],'w').write(str(os.getpid())); h=functools.partial(http.server.SimpleHTTPRequestHandler,directory=os.environ['AE_DOCS']); socketserver.TCPServer.allow_reuse_address=True; socketserver.TCPServer(('127.0.0.1',int(os.environ['AE_PORT'])),h).serve_forever()" >nul 2>"%LOGFILE%"
 
 rem 等它真的起来再开浏览器，否则会开出一个连接失败的页面
 set READY=0
@@ -72,6 +86,11 @@ for /l %%i in (1,1,40) do (
 )
 if !READY!==0 (
   echo !! 服务没起来，或 http://127.0.0.1:%PORT%/ 打不开
+  if exist "%LOGFILE%" (
+    echo    服务的错误输出在：%LOGFILE%
+    echo    ---- 开头几行 ----
+    %PY% -c "import sys;[print(l,end='') for l in open(sys.argv[1],errors='replace').readlines()[:8]]" "%LOGFILE%" 2>nul
+  )
   call :cleanup
   exit /b 1
 )
