@@ -7,11 +7,20 @@
 <title>录音工具 · AgentEar Recorder</title>
 <style>
 :root{color-scheme:light dark;--paper:#fbfaf7;--ink:#1b1b1a;--slate:#6b6a66;
-  --rule:#d9d6cf;--signal:#B8332B;--done:#1F6B5C;--read:1.05rem}
+  --rule:#d9d6cf;--signal:#B8332B;--done:#1F6B5C;--read:1.05rem;
+  --ui:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Hiragino Sans GB",sans-serif;
+  --thai:"Noto Sans Thai","Leelawadee UI","Sukhumvit Set",Thonburi,var(--ui)}
 @media(prefers-color-scheme:dark){:root{--paper:#16171a;--ink:#e9e7e2;--slate:#9a978f;--rule:#33353a}}
 *{box-sizing:border-box}
-body{margin:0;background:var(--paper);color:var(--ink);
-  font:15px/1.65 -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Hiragino Sans GB",sans-serif}
+body{margin:0;background:var(--paper);color:var(--ink);font:15px/1.65 var(--ui)}
+/* 泰文有上下叠加的元音和声调符号，行高不给够会糊在一起 */
+html[lang=th] body{font-family:var(--thai);line-height:1.85}
+.top{display:flex;justify-content:space-between;align-items:flex-start;gap:1rem}
+.langs{display:flex;gap:.25rem;flex:none}
+.langs button{font:inherit;font-size:.85rem;cursor:pointer;border:1px solid var(--rule);
+  background:transparent;color:var(--slate);border-radius:6px;padding:.2rem .55rem}
+.langs button[aria-pressed=true]{border-color:var(--ink);color:var(--ink);font-weight:600}
+.proof{margin-top:.8rem;font-size:.8rem;opacity:.85}
 .wrap{max-width:56rem;margin:0 auto;padding:1.6rem 1.1rem 5rem}
 h1{font-size:1.35rem;margin:0 0 .2rem}
 .sub{color:var(--slate);font-size:.92rem;margin:0 0 1.4rem}
@@ -54,17 +63,26 @@ footer{margin-top:2rem;padding-top:1rem;border-top:1px solid var(--rule);
 </head>
 <body>
 <div class="wrap">
-  <h1>录音工具</h1>
-  <p class="sub">本地运行，录音不离开这台机器。给声音克隆、TTS 参考音、ASR 转写校对用。</p>
+  <div class="top">
+    <div>
+      <h1 data-i18n="title"></h1>
+      <p class="sub" data-i18n="sub"></p>
+    </div>
+    <div class="langs" role="group" aria-label="Language">
+      <button type="button" data-lang="zh">中文</button>
+      <button type="button" data-lang="en">EN</button>
+      <button type="button" data-lang="th">ไทย</button>
+    </div>
+  </div>
 
   <fieldset>
-    <legend>设置</legend>
+    <legend data-i18n="settings"></legend>
     <div class="row">
-      <label>署名 <input id="speaker" type="text" maxlength="24" placeholder="anon" size="10"></label>
+      <label><span data-i18n="speaker"></span> <input id="speaker" type="text" maxlength="24" placeholder="anon" size="10"></label>
       <span class="hint" id="namehint"></span>
-      <label>目标采样率
+      <label><span data-i18n="rate"></span>
         <select id="rate">
-          <option value="0" selected>原样（不重采样）</option>
+          <option value="0" selected data-i18n="rate0"></option>
           <option value="48000">48 kHz</option>
           <option value="32000">32 kHz</option>
           <option value="24000">24 kHz</option>
@@ -72,36 +90,36 @@ footer{margin-top:2rem;padding-top:1rem;border-top:1px solid var(--rule);
           <option value="16000">16 kHz</option>
         </select>
       </label>
-      <label>单段上限 <input id="maxsec" type="number" min="5" max="300" value="240" size="4"> 秒</label>
+      <label><span data-i18n="maxlen"></span> <input id="maxsec" type="number" min="5" max="300" value="240" size="4"> <span data-i18n="sec"></span></label>
       <span class="hint" id="memhint"></span>
-      <span class="pill" id="devpill">◌ 麦克风未开</span>
+      <span class="pill" id="devpill"></span>
     </div>
     <p class="hint" id="ratehint"></p>
   </fieldset>
 
   <fieldset>
-    <legend>脚本</legend>
-    <textarea id="script" placeholder="把要念的文字贴在这里，用空行分段。&#10;&#10;留空则是自由录音——想录几段录几段，不对文本。"></textarea>
+    <legend data-i18n="script"></legend>
+    <textarea id="script"></textarea>
     <div class="row" style="margin-top:.6rem">
-      <button class="btn primary" id="apply" type="button">应用脚本</button>
-      <button class="btn" id="addfree" type="button">+ 加一段自由录音</button>
+      <button class="btn primary" id="apply" type="button" data-i18n="apply"></button>
+      <button class="btn" id="addfree" type="button" data-i18n="addfree"></button>
       <span class="hint" id="scripthint"></span>
     </div>
   </fieldset>
 
   <div class="row">
-    <span class="pill" id="prog">0 / 0</span>
-    <button class="btn" id="zip" type="button" disabled>⤓ 全部打包下载（.zip）</button>
-    <span class="hint">压缩包里含 <code>manifest.txt</code>：文本、WAV 文件名与 SHA-256、设备参数、质量指标</span>
+    <span class="pill" id="prog"></span>
+    <button class="btn" id="zip" type="button" disabled data-i18n="zipbtn"></button>
+    <span class="hint" data-i18n="ziphint"></span>
   </div>
 
   <div id="takes"></div>
 
   <footer>
-    <p><strong>录音不会自动保存。</strong>关掉页面就没了 —— 用「全部打包下载」或每段的 ⤓ 存下来。</p>
-    <p>音频与文本全程留在本机，不上传任何地方。脚本和署名存在浏览器的
-       localStorage 里，只在这台机器上。</p>
+    <p data-i18n="foot1"></p>
+    <p data-i18n="foot2"></p>
     <p id="diag" class="hint"></p>
+    <p class="proof" data-i18n="proof"></p>
   </footer>
 </div>
 
@@ -112,16 +130,171 @@ footer{margin-top:2rem;padding-top:1rem;border-top:1px solid var(--rule);
    「把失败说出来」的 envCheck() 都跑不到，页面白着，人不知道发生了什么。
    拆成两个文件之后多出来的失败模式，先堵上。 */
 if (typeof RecorderCore === "undefined") {
+  // 这段跑在 i18n 表建立**之前**，只能硬编码 —— 但三语都要有，
+  // 否则泰语/英语的使用者撞上它只会看到一段看不懂的中文。
   document.body.innerHTML =
-    '<div style="max-width:40rem;margin:4rem auto;padding:0 1rem;font:15px/1.7 system-ui">' +
-    '<h1 style="font-size:1.2rem">录音核心没加载起来</h1>' +
-    '<p><code>recorder-core.js</code> 没能载入，页面无法工作。</p>' +
-    '<p>多半是没有通过 <code>scripts/recorder.sh</code> 启动，而是直接双击了 HTML 文件 —— ' +
-    '那样浏览器既拿不到麦克风（不是安全上下文），也可能加载不了同目录的脚本。</p>' +
-    '<p>请在项目根目录运行：<code>scripts/recorder.sh</code></p></div>';
+    '<div style="max-width:44rem;margin:4rem auto;padding:0 1rem;font:15px/1.7 system-ui">' +
+    '<h1 style="font-size:1.15rem">recorder-core.js not loaded</h1>' +
+    '<p>请通过 <code>scripts/recorder.sh</code>（Windows：<code>scripts\\recorder.bat</code>）启动，' +
+    '不要直接双击 HTML —— 那样浏览器既拿不到麦克风（不是安全上下文），' +
+    '也可能加载不了同目录的脚本。</p>' +
+    '<p>Start it with <code>scripts/recorder.sh</code> (Windows: <code>scripts\\recorder.bat</code>) ' +
+    'rather than opening the file directly — <code>file://</code> is not a secure context, ' +
+    'so the microphone will not work.</p>' +
+    '<p>กรุณาเปิดด้วย <code>scripts/recorder.sh</code> แทนการดับเบิลคลิกไฟล์ ' +
+    'เพราะ <code>file://</code> ใช้ไมโครโฟนไม่ได้</p></div>';
   throw new Error("recorder-core.js not loaded");
 }
+
 const { startCapture, toWav, sha256hex16, diagnose, normText } = RecorderCore;
+
+/* ── 三语字符串表 ────────────────────────────────────────────────
+   **不走「每句话并排写两遍」那种写法。** thai-recorder.html 是那么写的，
+   每个字符串翻倍；再加一门就是三倍，而且改一处要改三处，必然分叉。
+   这里页面只写 key，语言集中在一张表里。
+
+   ⚠️ 泰文由非母语者撰写、**未经母语者校对**（与 src/i18n.rs 同一状态）。
+   泰语界面底部对使用者明说了这一点 —— 别默默当它是校对过的。 */
+const I18N = {
+  zh: {
+    lang:"zh", title:"录音工具",
+    sub:"本地运行，录音不离开这台机器。给声音克隆、TTS 参考音、ASR 转写校对用。",
+    settings:"设置", speaker:"署名", rate:"目标采样率", rate0:"原样（不重采样）",
+    maxlen:"单段上限", sec:"秒", micoff:"◌ 麦克风未开", micon:"● {rate} Hz · {ch}ch",
+    script:"脚本",
+    scriptph:"把要念的文字贴在这里，用空行分段。\n\n留空则是自由录音——想录几段录几段，不对文本。",
+    apply:"应用脚本", addfree:"+ 加一段自由录音",
+    nparas:"{n} 段（按空行分）", freemode:"自由录音模式",
+    prog:"{ok} / {all} 可用", zipbtn:"⤓ 全部打包下载（.zip）", zipping:"打包中…",
+    ziphint:"压缩包里含 manifest.txt：文本、WAV 文件名与 SHA-256、设备参数、质量指标",
+    freetake:"自由录音（不对文本）",
+    rec:"● 录音", rerec:"● 重录", stop:"■ 停止", savetake:"⤓ 存这段",
+    stale:"脚本改过，这段录音对应的是旧文本 —— 建议重录。",
+    hardsuffix:"（不可人工放行）", override:"我听过了，可以用",
+    statline:"{secs}s · {rate} Hz · 峰值 {peak} · SNR {snr} dB · 有声 {voiced}%",
+    saved:" · 已存", overridden:" · 已人工放行",
+    foot1:"录音不会自动保存。关掉页面就没了 —— 用「全部打包下载」或每段的 ⤓ 存下来。",
+    foot2:"音频与文本全程留在本机，不上传任何地方。脚本和署名存在浏览器的 localStorage 里，只在这台机器上。",
+    proof:"",
+    envok:"环境就绪 · secure={secure} download={dl}",
+    framed:" · ⚠️ 页面被嵌在 iframe 里，麦克风可能拿不到",
+    envbad:"⚠️ 这个环境录不了：secure={secure} getUserMedia={gum} AudioContext={ac} download={dl}",
+    micfail:"拿不到麦克风：{name} —— {msg}",
+    audiofail:"音频链路初始化失败：{name} —— {msg}",
+    capfail:"采集启动失败：{name} —— {msg}",
+    convfail:"转换失败：{name} —— {msg}",
+    noaudio:"没有采到音频", dropped:"超过单段上限，多出来的部分被丢弃",
+    memhint:"≈ 峰值 {mb} MB 内存（48 kHz 估）",
+    namehint:"文件名会用 “{id}”（只用 ASCII）；manifest 里仍记 “{raw}”",
+    confirmdrop:"这样会丢掉 {n} 段还没保存的录音（脚本只剩 {m} 段）。\n先「全部打包下载」再改脚本？\n\n确定要继续吗？",
+    zipfail:"打包失败：{msg}",
+    ziptoomany:"文件数 {n} 超过 ZIP32 上限 65535 —— 请分批下载",
+    ziptoobig:"总大小约 {gb} GB，超过 ZIP32 的 4 GB 上限 —— 请分批下载，或把目标采样率调低",
+    r0:"保留设备原始采样率（多为 44.1 或 48 kHz）。**声音克隆首选** —— 不做任何重采样，保真最高，下游要什么率自己降。",
+    r48:"广播级。声音克隆、后期处理都够用，文件最大。",
+    r32:"GPT-SoVITS 的原生采样率。",
+    r24:"XTTS / F5-TTS / CosyVoice 一类的原生采样率，体积约为 48 kHz 的一半。",
+    r22:"较老的 TTS 栈常用。",
+    r16:"⚠️ **ASR 语料 / 转写校对用**。拿它做声音克隆音色会明显变闷 —— 8 kHz 以上全被丢掉，而那正是齿音和空气感所在。",
+  },
+  en: {
+    lang:"en", title:"Recorder",
+    sub:"Runs locally; nothing leaves this machine. For voice cloning, TTS reference audio, and checking ASR transcripts.",
+    settings:"Settings", speaker:"Your name", rate:"Output sample rate", rate0:"As captured (no resampling)",
+    maxlen:"Max per take", sec:"s", micoff:"◌ mic off", micon:"● {rate} Hz · {ch}ch",
+    script:"Script",
+    scriptph:"Paste what you want to read here. Blank lines split it into takes.\n\nLeave it empty for free recording — as many takes as you like, with no reference text.",
+    apply:"Apply script", addfree:"+ Add a free take",
+    nparas:"{n} takes (split on blank lines)", freemode:"Free-recording mode",
+    prog:"{ok} / {all} usable", zipbtn:"⤓ Download all (.zip)", zipping:"packing…",
+    ziphint:"The archive includes manifest.txt: text, WAV filenames and SHA-256, device settings, quality metrics",
+    freetake:"Free take (no reference text)",
+    rec:"● Record", rerec:"● Re-record", stop:"■ Stop", savetake:"⤓ Save this take",
+    stale:"The script changed after this take was recorded — it matches the old text. Please record it again.",
+    hardsuffix:" (cannot be overridden)", override:"I listened, it's fine",
+    statline:"{secs}s · {rate} Hz · peak {peak} · SNR {snr} dB · voiced {voiced}%",
+    saved:" · saved", overridden:" · manually accepted",
+    foot1:"Recordings are NOT saved automatically. Close the page and they are gone — use “Download all” or the ⤓ on each take.",
+    foot2:"Audio and text stay on this machine; nothing is uploaded. The script and your name live in this browser's localStorage only.",
+    proof:"",
+    envok:"Ready · secure={secure} download={dl}",
+    framed:" · ⚠️ This page is inside an iframe; the microphone may be unavailable",
+    envbad:"⚠️ This environment cannot record: secure={secure} getUserMedia={gum} AudioContext={ac} download={dl}",
+    micfail:"Could not open the microphone: {name} — {msg}",
+    audiofail:"Could not initialise the audio pipeline: {name} — {msg}",
+    capfail:"Could not start capture: {name} — {msg}",
+    convfail:"Conversion failed: {name} — {msg}",
+    noaudio:"no audio was captured", dropped:"longer than the per-take limit — the excess was dropped",
+    memhint:"≈ {mb} MB peak memory (estimated at 48 kHz)",
+    namehint:"Files will use “{id}” (ASCII only); the manifest still records “{raw}”",
+    confirmdrop:"This will discard {n} unsaved take(s) (the script now has only {m}).\nDownload them first?\n\nContinue anyway?",
+    zipfail:"Packing failed: {msg}",
+    ziptoomany:"{n} files exceeds the ZIP32 limit of 65535 — please download in batches",
+    ziptoobig:"About {gb} GB total, over the 4 GB ZIP32 limit — download in batches, or pick a lower sample rate",
+    r0:"Keep the device's own rate (usually 44.1 or 48 kHz). **Best for voice cloning** — no resampling at all; let the downstream tool decide.",
+    r48:"Broadcast grade. Plenty for cloning and post-processing; largest files.",
+    r32:"The native rate of GPT-SoVITS.",
+    r24:"Native rate of XTTS / F5-TTS / CosyVoice; about half the size of 48 kHz.",
+    r22:"Common in older TTS stacks.",
+    r16:"⚠️ **For ASR corpora / transcript checking.** A voice clone made from this will sound noticeably dull — everything above 8 kHz is gone, and that is where sibilance and air live.",
+  },
+  th: {
+    lang:"th", title:"เครื่องอัดเสียง",
+    sub:"ทำงานในเครื่องนี้ล้วน ๆ เสียงไม่ถูกส่งออกไปไหน ใช้สำหรับโคลนเสียง เสียงอ้างอิงของ TTS และตรวจทานผลถอดเสียง",
+    settings:"ตั้งค่า", speaker:"ชื่อของคุณ", rate:"อัตราสุ่มปลายทาง", rate0:"ตามต้นฉบับ (ไม่แปลงอัตราสุ่ม)",
+    maxlen:"ยาวสุดต่อตอน", sec:"วิ", micoff:"◌ ไมโครโฟนปิดอยู่", micon:"● {rate} Hz · {ch}ch",
+    script:"บทอ่าน",
+    scriptph:"วางข้อความที่จะอ่านตรงนี้ บรรทัดว่างจะแบ่งเป็นตอน ๆ\n\nถ้าเว้นว่างไว้ จะเป็นการอัดแบบอิสระ — อัดกี่ตอนก็ได้ ไม่ต้องมีบท",
+    apply:"ใช้บทนี้", addfree:"+ เพิ่มตอนแบบอิสระ",
+    nparas:"{n} ตอน (แบ่งด้วยบรรทัดว่าง)", freemode:"โหมดอัดอิสระ",
+    prog:"ใช้ได้ {ok} / {all}", zipbtn:"⤓ ดาวน์โหลดทั้งหมด (.zip)", zipping:"กำลังบีบอัด…",
+    ziphint:"ในไฟล์ zip มี manifest.txt: ข้อความ ชื่อไฟล์ WAV และ SHA-256 ค่าอุปกรณ์ และตัวชี้วัดคุณภาพ",
+    freetake:"ตอนอิสระ (ไม่มีบทอ้างอิง)",
+    rec:"● อัดเสียง", rerec:"● อัดใหม่", stop:"■ หยุด", savetake:"⤓ บันทึกตอนนี้",
+    stale:"บทถูกแก้หลังจากอัดตอนนี้แล้ว เสียงตรงกับข้อความเดิม — กรุณาอัดใหม่",
+    hardsuffix:" (ข้ามไม่ได้)", override:"ฟังแล้ว ใช้ได้",
+    statline:"{secs}s · {rate} Hz · peak {peak} · SNR {snr} dB · มีเสียง {voiced}%",
+    saved:" · บันทึกแล้ว", overridden:" · ผู้พูดยืนยันเอง",
+    foot1:"เสียงไม่ถูกบันทึกอัตโนมัติ ปิดหน้านี้แล้วจะหายไป — ใช้ “ดาวน์โหลดทั้งหมด” หรือปุ่ม ⤓ ของแต่ละตอน",
+    foot2:"เสียงและข้อความอยู่ในเครื่องคุณเท่านั้น ไม่มีการอัปโหลด บทอ่านและชื่อถูกเก็บใน localStorage ของเบราว์เซอร์นี้เท่านั้น",
+    proof:"⚠️ ข้อความภาษาไทยในหน้านี้เขียนโดยผู้ที่ไม่ใช่เจ้าของภาษา และยังไม่ได้ตรวจทาน หากพบที่ผิดโปรดแจ้งกลับด้วยครับ",
+    envok:"พร้อมใช้งาน · secure={secure} download={dl}",
+    framed:" · ⚠️ หน้านี้อยู่ในกรอบ iframe อาจใช้ไมโครโฟนไม่ได้",
+    envbad:"⚠️ สภาพแวดล้อมนี้อัดไม่ได้: secure={secure} getUserMedia={gum} AudioContext={ac} download={dl}",
+    micfail:"เปิดไมโครโฟนไม่ได้: {name} — {msg}",
+    audiofail:"เตรียมระบบเสียงไม่สำเร็จ: {name} — {msg}",
+    capfail:"เริ่มอัดเสียงไม่ได้: {name} — {msg}",
+    convfail:"แปลงไฟล์ไม่สำเร็จ: {name} — {msg}",
+    noaudio:"ไม่มีเสียงถูกบันทึก", dropped:"ยาวเกินขีดจำกัดต่อตอน ส่วนที่เกินถูกตัดทิ้ง",
+    memhint:"≈ ใช้หน่วยความจำสูงสุด {mb} MB (ประเมินที่ 48 kHz)",
+    namehint:"ชื่อไฟล์จะใช้ “{id}” (ASCII เท่านั้น) ส่วน manifest ยังบันทึก “{raw}”",
+    confirmdrop:"การทำแบบนี้จะทิ้งเสียงที่ยังไม่ได้บันทึก {n} ตอน (บทเหลือ {m} ตอน)\nดาวน์โหลดก่อนไหม?\n\nจะทำต่อหรือไม่?",
+    zipfail:"บีบอัดไม่สำเร็จ: {msg}",
+    ziptoomany:"จำนวนไฟล์ {n} เกินขีดจำกัด ZIP32 ที่ 65535 — กรุณาแบ่งดาวน์โหลด",
+    ziptoobig:"รวมประมาณ {gb} GB เกินขีดจำกัด 4 GB ของ ZIP32 — แบ่งดาวน์โหลด หรือลดอัตราสุ่ม",
+    r0:"คงอัตราสุ่มเดิมของอุปกรณ์ (มักเป็น 44.1 หรือ 48 kHz) **เหมาะที่สุดสำหรับโคลนเสียง** — ไม่แปลงอัตราสุ่มเลย",
+    r48:"ระดับออกอากาศ เพียงพอสำหรับโคลนเสียงและงานหลังการผลิต ไฟล์ใหญ่ที่สุด",
+    r32:"อัตราสุ่มดั้งเดิมของ GPT-SoVITS",
+    r24:"อัตราสุ่มดั้งเดิมของ XTTS / F5-TTS / CosyVoice ขนาดราวครึ่งหนึ่งของ 48 kHz",
+    r22:"พบบ่อยใน TTS รุ่นเก่า",
+    r16:"⚠️ **สำหรับคลังข้อมูล ASR / ตรวจทานผลถอดเสียง** ถ้าเอาไปโคลนเสียง เสียงจะทึบลงชัดเจน — ความถี่เหนือ 8 kHz หายไปหมด ซึ่งเป็นย่านของเสียงลมและเสียงเสียดแทรก",
+  },
+};
+let LANG = "zh";
+/* 叫 T 不叫 t —— 这个文件里 `t` 一直是「段落」变量（startTake(t)、
+   for (const t of takes)），同名会在那些作用域里把翻译函数遮蔽掉，
+   而且是运行时才炸、语法检查看不出来。 */
+const T = (k, vars) => {
+  let out = (I18N[LANG] && I18N[LANG][k] !== undefined) ? I18N[LANG][k]
+          : (I18N.zh[k] !== undefined ? I18N.zh[k] : k);
+  if (vars) for (const [a, b] of Object.entries(vars)) out = out.split("{" + a + "}").join(b);
+  return out;
+};
+let lastParaCount = 0;
+const bold = x => x.replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>");
+/* 质量提示在核心里带 {zh,th,en}，按界面语言取；缺哪门回退英文 */
+const qmsg = p => p[LANG] || p.en || p.zh;
+
 
 /* ── 会话：一次只允许一路录音 ──
    和 thai-recorder.html 同一套纪律（那套竞态修了三次）：
@@ -144,13 +317,20 @@ const escapeHtml = s => String(s).replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt
 const LS = "agentear-recorder-v1";
 const save = () => { try { localStorage.setItem(LS, JSON.stringify(
   { speaker:$("#speaker").value, script:$("#script").value,
-    rate:$("#rate").value, maxsec:$("#maxsec").value })); } catch (_) {} };
+    rate:$("#rate").value, maxsec:$("#maxsec").value, lang:LANG })); } catch (_) {} };
 const load = () => { try {
   const d = JSON.parse(localStorage.getItem(LS) || "{}");
   if (d.speaker) $("#speaker").value = d.speaker;
   if (d.script) $("#script").value = d.script;
   if (d.rate) $("#rate").value = d.rate;
   if (d.maxsec) $("#maxsec").value = d.maxsec;
+  if (d.lang && I18N[d.lang]) LANG = d.lang;
+  else {                       // 没存过就跟浏览器；认不出就回中文
+    const p = (navigator.languages || [navigator.language || ""]).map(x => String(x).toLowerCase());
+    if (p.some(x => x.startsWith("th"))) LANG = "th";
+    else if (p.some(x => x.startsWith("zh"))) LANG = "zh";
+    else if (p.length && p[0]) LANG = "en";
+  }
 } catch (_) {} };
 
 /* 文件名里的署名**只用 ASCII**。
@@ -166,26 +346,16 @@ const speakerLabel = () => ($("#speaker").value || "").trim() || "anon";
 
 /* ── 采样率的取舍写在界面上，不只写在注释里 ──
    泰语那个页面写死 16 kHz 是因为它是 ASR 语料工具；这里不能照抄。 */
-const RATE_NOTE = {
-  "0":     "保留设备原始采样率（多为 44.1 或 48 kHz）。**声音克隆首选** —— 不做任何重采样，保真最高，下游要什么率自己降。",
-  "48000": "广播级。声音克隆、后期处理都够用，文件最大。",
-  "32000": "GPT-SoVITS 的原生采样率。",
-  "24000": "XTTS / F5-TTS / CosyVoice 一类的原生采样率，体积约为 48 kHz 的一半。",
-  "22050": "较老的 TTS 栈常用。",
-  "16000": "⚠️ **ASR 语料 / 转写校对用**。拿它做声音克隆音色会明显变闷 —— 8 kHz 以上全被丢掉，而那正是齿音和空气感所在。",
-};
-const rateHint = () => {
-  const v = $("#rate").value;
-  $("#ratehint").innerHTML = (RATE_NOTE[v] || "").replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>");
-};
+const RATE_KEY = { "0":"r0","48000":"r48","32000":"r32","24000":"r24","22050":"r22","16000":"r16" };
+const rateHint = () => { $("#ratehint").innerHTML = bold(T(RATE_KEY[$("#rate").value] || "r0")); };
 
 /* ── 环境自检：不支持就当场说，别让人录完才发现存不下来 ── */
 function envCheck() {
   const d = diagnose();
   const ok = d.secure && d.gum && d.ac && d.dl;
   $("#diag").textContent = ok
-    ? `环境就绪 · secure=${d.secure} download=${d.dl}${d.framed ? " · ⚠️ 页面被嵌在 iframe 里，麦克风可能拿不到" : ""}`
-    : `⚠️ 这个环境录不了：secure=${d.secure} getUserMedia=${d.gum} AudioContext=${d.ac} download=${d.dl}`;
+    ? T("envok", { secure:d.secure, dl:d.dl }) + (d.framed ? T("framed") : "")
+    : T("envbad", { secure:d.secure, gum:d.gum, ac:d.ac, dl:d.dl });
   $("#diag").style.color = ok ? "" : "var(--signal)";
   return ok;
 }
@@ -199,7 +369,7 @@ function releaseMic(force) {
   if (S.ctx) { S.ctx.close().catch(()=>{}); S.ctx = null; }
   S.analyser = null;
   document.querySelectorAll(".meter i").forEach(i => i.style.width = "0%");
-  $("#devpill").textContent = "◌ 麦克风未开"; $("#devpill").classList.remove("ok");
+  $("#devpill").textContent = T("micoff"); $("#devpill").classList.remove("ok");
 }
 
 async function acquireMic(token) {
@@ -211,7 +381,7 @@ async function acquireMic(token) {
       channelCount:1, echoCancellation:false, noiseSuppression:false, autoGainControl:false } });
   } catch (e) {
     if (!owns(token)) return { superseded:true };
-    return { msg: `拿不到麦克风：${e.name} —— ${e.message}` };
+    return { msg: T("micfail", { name:e.name, msg:e.message }) };
   }
   // 申请期间可能已跨代：自己关掉自己拿到的 track，绝不写进 S
   if (!owns(token)) { got.getTracks().forEach(t=>t.stop()); return { superseded:true }; }
@@ -232,10 +402,10 @@ async function acquireMic(token) {
     // 只在自己仍是持有者时清全局，否则只关自己申请到的那份
     if (owns(token) && S.ctx === ctx) releaseMic(true);
     else { try { got.getTracks().forEach(t=>t.stop()); } catch(_){} if (ctx) ctx.close().catch(()=>{}); }
-    return { msg: `音频链路初始化失败：${e.name} —— ${e.message}` };
+    return { msg: T("audiofail", { name:e.name, msg:e.message }) };
   }
-  const t = S.trackSettings || {};
-  $("#devpill").textContent = `● ${t.sampleRate || S.ctx.sampleRate} Hz · ${t.channelCount || 1}ch`;
+  const ts = S.trackSettings || {};
+  $("#devpill").textContent = T("micon", { rate: ts.sampleRate || S.ctx.sampleRate, ch: ts.channelCount || 1 });
   $("#devpill").classList.add("ok");
   return null;
 }
@@ -293,7 +463,7 @@ async function startTake(t) {
     const maxSeconds = Math.max(5, Math.min(600, +$("#maxsec").value || 240));
     try {
       cap = await startCapture(S.ctx, S.source, { maxSeconds });
-    } catch (e) { t.error = `采集启动失败：${e.name} —— ${e.message}`; render(); return; }
+    } catch (e) { t.error = T("capfail", { name:e.name, msg:e.message }); render(); return; }
     // 建采集节点要 await（AudioWorklet 得加载模块），期间可能已跨代：
     // 自己拆掉自己建的节点，绝不写进 S
     // take() 里 new Float32Array(total) 在长录音下可能抛；不接的话
@@ -314,7 +484,7 @@ async function startTake(t) {
         if (!owns(token) || myGen !== S.gen) return;
         S.holder.phase = "converting"; render();
         await new Promise(r => setTimeout(r, 0));   // 先让「转换中」画出来
-        if (!taken || !taken.pcm.length) throw new Error("没有采到音频");
+        if (!taken || !taken.pcm.length) throw new Error(T("noaudio"));
         const target = dst || taken.sampleRate;
         // 估个应有时长，用来发现「只念了一半」。中文朗读约 4.5 字/秒、
         // 拉丁字母约 14 字符/秒 —— 分开算比用一个平均数诚实。
@@ -325,7 +495,8 @@ async function startTake(t) {
         const expectSeconds = txt ? cjk / 4.5 + (txt.length - cjk) / 14 : 0;
         const res = await toWav(taken.pcm, taken.sampleRate, target,
           { minSeconds: 1, expectSeconds, timeline: taken.timeline });
-        if (taken.dropped) res.quality.problems.push({ en:"超过单段上限，多出来的部分被丢弃" });
+        if (taken.dropped) res.quality.problems.push(
+          { zh:I18N.zh.dropped, en:I18N.en.dropped, th:I18N.th.dropped });
         // hash 算完再发布 —— 先写进 t 再 await 的话，等待期间发生 pagehide，
         // digest 回来后没人再拦，旧的收尾会把结果写到已经作废的那一代上
         const sha = await sha256hex16(res.blob);
@@ -345,7 +516,7 @@ async function startTake(t) {
                 timeline:taken.timeline, track:S.trackSettings, ua:navigator.userAgent } });
       } catch (e) {
         if (!owns(token) || myGen !== S.gen) return;
-        t.error = `转换失败：${e.name} —— ${e.message}`;
+        t.error = T("convfail", { name:e.name, msg:e.message });
       } finally {
         if (owns(token)) S.holder = null;
         releaseMic();
@@ -403,10 +574,9 @@ function zipStore(files) {          // files: [{name, bytes: Uint8Array}]
   let totalBytes = 0;
   for (const f of files) totalBytes += f.bytes.length + f.name.length * 3 + 76;
   if (files.length > 65535)
-    throw new Error(`文件数 ${files.length} 超过 ZIP32 上限 65535 —— 请分批下载`);
+    throw new Error(T("ziptoomany", { n: files.length }));
   if (totalBytes > 0xFFFFFFFF - (1 << 20))
-    throw new Error(`总大小约 ${(totalBytes/1e9).toFixed(2)} GB，超过 ZIP32 的 4 GB 上限 —— ` +
-                    `请分批下载，或把目标采样率调低`);
+    throw new Error(T("ziptoobig", { gb: (totalBytes/1e9).toFixed(2) }));
 
   const enc = new TextEncoder(), chunks = [], central = [];
   let off = 0;
@@ -432,15 +602,19 @@ function zipStore(files) {          // files: [{name, bytes: Uint8Array}]
 
 function manifest() {
   const L = [];
-  L.push("# AgentEar 录音工具导出");
-  L.push(`# 时间 ${new Date().toISOString()}`);
-  L.push(`# 说话人 ${speakerLabel()}`);
-  if (speakerLabel() !== speakerId()) L.push(`# 文件名前缀 ${speakerId()}（文件名只用 ASCII，见工具说明）`);
+  // **固定中英双语，不跟界面语言走** —— manifest 是给收集方看的，
+  // 而收集方未必和录音的人用同一种语言；质量提示取英文，因为下游按
+  // `!! flags:` 解析。
+  L.push("# AgentEar recorder export / 录音工具导出");
+  L.push(`# time ${new Date().toISOString()}`);
+  L.push(`# speaker ${speakerLabel()}`);
+  if (speakerLabel() !== speakerId()) L.push(`# filename prefix ${speakerId()} (filenames are ASCII-only)`);
+  L.push(`# ui language ${LANG}`);
   L.push("#");
-  L.push("# 每段：文本 / WAV 文件名 / SHA-256 前 16 位 / 采集参数 / 质量指标");
-  L.push("# text 行里的 \\n 是转义的换行、\\\\ 是转义的反斜杠（这个文件按行解析）。");
-  L.push("# ⚠️ 请求的约束（单声道、关 AGC/降噪）不代表设备照做了；");
-  L.push("#    track 那行是 getSettings() 报的**实际生效**值。");
+  L.push("# per take: text / WAV filename / SHA-256 (first 16) / capture settings / quality");
+  L.push("# In `text:` lines, \\n is an escaped newline and \\\\ an escaped backslash (line-oriented file).");
+  L.push("# ⚠️ The requested constraints (mono, AGC/NS off) are not proof the device obeyed;");
+  L.push("#    the `track:` line is what getSettings() actually reported.");
   for (const t of takes) {
     if (!t.blob) continue;
     const s = t.src || {}, q = t.quality || {};
@@ -448,9 +622,9 @@ function manifest() {
     L.push(`## ${wavName(t)}`);
     // 段落内部允许有单换行（分段用的是空行），直接塞进按行解析的清单会撑破它。
     // 转义成 \n，并在文件头说明 —— 下游 `^text: ` 取一行就不会静默截断。
-    L.push(`text: ${t.free ? "(自由录音，无脚本)" : t.text.replace(/\\/g,"\\\\").replace(/\n/g,"\\n")}`);
+    L.push(`text: ${t.free ? "(free take, no reference text)" : t.text.replace(/\\/g,"\\\\").replace(/\n/g,"\\n")}`);
     L.push(`sha256_16: ${t.sha || "(unavailable)"}`);
-    L.push(`audio: ${s.dst} Hz mono 16-bit · ${(t.seconds||0).toFixed(2)}s · 采集自 ${s.rate} Hz (${s.backend})`);
+    L.push(`audio: ${s.dst} Hz mono 16-bit · ${(t.seconds||0).toFixed(2)}s · captured at ${s.rate} Hz (${s.backend})`);
     if (s.track) L.push(`track: ch=${s.track.channelCount} rate=${s.track.sampleRate} ` +
       `aec=${s.track.echoCancellation} ns=${s.track.noiseSuppression} agc=${s.track.autoGainControl}`);
     if (s.timeline) L.push(`timeline: got ${s.timeline.gotFrames} / expected ${s.timeline.expectedFrames}` +
@@ -458,7 +632,7 @@ function manifest() {
     L.push(`quality: peak ${(q.peak||0).toFixed(3)} · SNR ${(q.snrDb||0).toFixed(1)} dB · voiced ${((q.voiced||0)*100).toFixed(0)}%`);
     if (q.hard && q.hard.length) L.push(`!! HARD FAIL: ${q.hard.map(x=>x.en).join("; ")}`);
     if (q.problems && q.problems.length)
-      L.push(`!! flags: ${q.problems.map(x=>x.en).join("; ")}${t.override ? " [人工放行]" : ""}`);
+      L.push(`!! flags: ${q.problems.map(x=>x.en).join("; ")}${t.override ? " [speaker confirmed after listening]" : ""}`);
     L.push(`ua: ${s.ua || ""}`);
   }
   return L.join("\n") + "\n";
@@ -484,9 +658,8 @@ function applyScript() {
   // 段落变少时多出来的录音会被永久丢弃。**未存过的必须先问一声** ——
   // 页脚那句「关掉页面就没了」防不住这个，因为人不觉得改脚本 = 删录音。
   const willDrop = keep.slice(Math.max(1, paras.length)).filter(t => !t.saved);
-  if (willDrop.length && !confirm(
-      `这样会丢掉 ${willDrop.length} 段**还没保存**的录音（脚本只剩 ${paras.length || 1} 段）。\n` +
-      `先「全部打包下载」再改脚本？\n\n确定要继续吗？`)) return;
+  if (willDrop.length && !confirm(T("confirmdrop",
+      { n: willDrop.length, m: paras.length || 1 }))) return;
   takes.length = 0;
   // 下面按顺序贴回 keep，贴不下的那些永远不会再被引用 —— 现在就吊销，
   // 否则它们的 object URL 会一直挂到页面关闭
@@ -500,7 +673,8 @@ function applyScript() {
       seconds:k.seconds, src:k.src, saved:k.saved, override:k.override,
       recText: k.recText });
     t.staleText = isStale(t); });
-  $("#scripthint").textContent = paras.length ? `${paras.length} 段（按空行分）` : "自由录音模式";
+  lastParaCount = paras.length;
+  $("#scripthint").textContent = paras.length ? T("nparas", { n: paras.length }) : T("freemode");
   save(); render();
 }
 
@@ -513,28 +687,31 @@ function render() {
   for (const t of takes) {
     const rec = S.holder && S.holder.id === t.id;
     const q = t.quality || {};
-    const hard = (q.hard || []).map(x=>x.en);
-    const soft = (q.problems || []).map(x=>x.en);
+    const hard = (q.hard || []).map(qmsg);
+    const soft = (q.problems || []).map(qmsg);
     const el = document.createElement("section");
     el.className = "take"; el.id = "t-" + t.id;
     el.dataset.state = rec ? S.holder.phase : (t.blob ? "done" : "idle");
     el.innerHTML = `
       <div class="take-head">
         <span class="no">${String(t.no).padStart(2,"0")}</span>
-        <div class="txt${t.free?" free":""}">${t.free ? "自由录音（不对文本）" : escapeHtml(t.text)}</div>
+        <div class="txt${t.free?" free":""}">${t.free ? escapeHtml(T("freetake")) : escapeHtml(t.text)}</div>
       </div>
       <div class="ctl">
-        <button class="btn rec">${rec && S.holder.phase==="recording" ? "■ 停止" : (t.blob ? "● 重录" : "● 录音")}</button>
+        <button class="btn rec">${escapeHtml(rec && S.holder.phase==="recording" ? T("stop") : (t.blob ? T("rerec") : T("rec")))}</button>
         <span class="timer">00:00</span>
         <span class="meter"><i></i></span>
-        ${t.blob ? `<audio controls src="${t.url}"></audio><button class="btn dl">⤓ 存这段</button>` : ""}
+        ${t.blob ? `<audio controls src="${t.url}"></audio><button class="btn dl">${escapeHtml(T("savetake"))}</button>` : ""}
       </div>
-      ${t.staleText ? `<p class="bad">脚本改过，这段录音对应的是旧文本 —— 建议重录。</p>` : ""}
+      ${t.staleText ? `<p class="bad">${escapeHtml(T("stale"))}</p>` : ""}
       ${t.error ? `<p class="bad">${escapeHtml(t.error)}</p>` : ""}
-      ${hard.length ? `<p class="bad">✕ ${escapeHtml(hard.join("；"))}（不可放行，必须重录）</p>` : ""}
+      ${hard.length ? `<p class="bad">✕ ${escapeHtml(hard.join("；") + T("hardsuffix"))}</p>` : ""}
       ${!hard.length && soft.length && !t.override
-        ? `<p class="bad">⚠ ${escapeHtml(soft.join("；"))}<br><button class="btn ovr">我听过了，可以用</button></p>` : ""}
-      ${t.blob ? `<p class="stat">${(t.seconds||0).toFixed(2)}s · ${t.src.dst} Hz · 峰值 ${(q.peak||0).toFixed(3)} · SNR ${(q.snrDb||0).toFixed(1)} dB · 有声 ${((q.voiced||0)*100).toFixed(0)}%${t.saved?" · 已存":""}${t.override?" · 已人工放行":""}</p>` : ""}`;
+        ? `<p class="bad">⚠ ${escapeHtml(soft.join("；"))}<br><button class="btn ovr">${escapeHtml(T("override"))}</button></p>` : ""}
+      ${t.blob ? `<p class="stat">${escapeHtml(T("statline", {
+          secs:(t.seconds||0).toFixed(2), rate:t.src.dst, peak:(q.peak||0).toFixed(3),
+          snr:(q.snrDb||0).toFixed(1), voiced:((q.voiced||0)*100).toFixed(0) })
+          + (t.saved ? T("saved") : "") + (t.override ? T("overridden") : ""))}</p>` : ""}`;
     const rb = el.querySelector(".rec");
     rb.disabled = busy && !(rec && S.holder.phase === "recording");
     rb.onclick = () => {
@@ -550,7 +727,7 @@ function render() {
   // 「可用」= 录了、时间线没洞、文本没漂、软问题要么没有要么他听过并放行了
   const usable = takes.filter(t => t.blob && !((t.quality||{}).hard||[]).length
     && !t.staleText && (!(((t.quality||{}).problems)||[]).length || t.override));
-  $("#prog").textContent = `${usable.length} / ${takes.length} 可用`;
+  $("#prog").textContent = T("prog", { ok: usable.length, all: takes.length });
   $("#prog").classList.toggle("ok", takes.length > 0 && usable.length === takes.length);
   $("#zip").disabled = busy || !takes.some(t => t.blob);
   // **会重建 takes 的控件在录音期间必须锁住。**
@@ -561,7 +738,24 @@ function render() {
   ["#apply","#addfree","#script","#rate","#maxsec"].forEach(sel => $(sel).disabled = busy);
 }
 
+/* ── 语言切换：只重画，不碰任何录音状态 ── */
+function applyLang() {
+  document.documentElement.lang = T("lang");
+  document.title = "AgentEar " + T("title");
+  document.querySelectorAll("[data-i18n]").forEach(el => { el.textContent = T(el.dataset.i18n); });
+  $("#script").placeholder = T("scriptph");
+  document.querySelectorAll(".langs button").forEach(b =>
+    b.setAttribute("aria-pressed", String(b.dataset.lang === LANG)));
+  rateHint(); memHint(); nameHint(); envCheck();
+  $("#scripthint").textContent = lastParaCount ? T("nparas", { n: lastParaCount }) : T("freemode");
+  if (!S.stream) { $("#devpill").textContent = T("micoff"); $("#devpill").classList.remove("ok"); }
+  render();
+}
+
 /* ── 绑定 ── */
+document.querySelectorAll(".langs button").forEach(b => b.onclick = () => {
+  LANG = b.dataset.lang; save(); applyLang();
+});
 $("#apply").onclick = applyScript;
 $("#addfree").onclick = () => { takes.push({ id: ++seq, text:"", free:true }); render(); };
 $("#rate").onchange = () => { rateHint(); save(); };
@@ -569,9 +763,7 @@ $("#rate").onchange = () => { rateHint(); save(); };
    原样的署名仍然写进 manifest，不丢信息。 */
 const nameHint = () => {
   const raw = speakerLabel(), id = speakerId();
-  $("#namehint").textContent = (raw === "anon" || raw === id) ? ""
-    : `文件名会用 “${id}”（只用 ASCII，中文名解压时在部分工具上会丢文件）；` +
-      `manifest 里仍记 “${raw}”`;
+  $("#namehint").textContent = (raw === "anon" || raw === id) ? "" : T("namehint", { id, raw });
 };
 $("#speaker").oninput = () => { save(); nameHint(); render(); };   // 署名进文件名，改了要重画
 /* 缓冲、拼接、重采样输出、WAV 各占一份内存。上限放太宽的话，
@@ -579,14 +771,14 @@ $("#speaker").oninput = () => { save(); nameHint(); render(); };   // 署名进�
 const memHint = () => {
   const secs = Math.max(5, Math.min(300, +$("#maxsec").value || 240));
   const mb = Math.round(secs * 48000 * 4 * 2 / 1e6);
-  $("#memhint").textContent = `≈ 峰值 ${mb} MB 内存（48 kHz 估）`;
+  $("#memhint").textContent = T("memhint", { mb });
   $("#memhint").style.color = mb > 150 ? "var(--signal)" : "";
 };
 $("#maxsec").oninput = () => { save(); memHint(); };
 $("#script").oninput = save;
 $("#zip").onclick = async () => {
-  const btn = $("#zip"), label = btn.textContent;
-  btn.disabled = true; btn.textContent = "打包中…";
+  const btn = $("#zip");
+  btn.disabled = true; btn.textContent = T("zipping");
   try {
     const files = [];
     for (const t of takes) {
@@ -598,14 +790,14 @@ $("#zip").onclick = async () => {
     // **打包成功才算存过。** 抛异常时不能标 saved —— 那会让人以为存好了
     takes.forEach(t => { if (t.blob) t.saved = true; });
   } catch (e) {
-    alert(`打包失败：${e.message}`);
+    alert(T("zipfail", { msg: e.message }));
   } finally {
-    btn.textContent = label;
+    btn.textContent = T("zipbtn");
     render();          // render 会按有没有 blob 重新决定按钮可用性
   }
 };
 
-load(); rateHint(); memHint(); nameHint(); envCheck(); applyScript();
+load(); applyLang(); applyScript();
 </script>
 </body>
 </html>

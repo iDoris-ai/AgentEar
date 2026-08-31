@@ -20,6 +20,9 @@
      没法像纯函数那样对拍，改为**文本对拍** —— 后两者逐字节相同，
      `startCapture` 仅 5 行差异，正是上面第 2 条那处参数化本身。
 
+   `analyseTake` 的每条问题都带 `{zh, th, en}` 三种措辞，调用方按界面语言取。
+   ⚠️ 加语言是**追加字段**，不要改已有的 —— thai-recorder.html 读的是 .th/.en。
+
    ⚠️ **16 kHz 是 ASR 语料的采样率，不是声音克隆的。** 拿 16 kHz 的参考音
    去做 voice clone，音色会明显变闷 —— 主流 TTS 栈原生是 22.05/24/32 kHz。
    所以目标采样率由调用方传，核心不替你决定。 */
@@ -408,31 +411,39 @@ function analyseTake(x, sr, opt) {
   const problems = [], hard = [];
   const minSeconds = opt.minSeconds || 2;
   if (seconds < minSeconds) problems.push({
+    zh: `太短了（${seconds.toFixed(1)} 秒，至少要 ${minSeconds} 秒）`,
     th: `สั้นเกินไป (${seconds.toFixed(1)} วิ, ควรอย่างน้อย ${minSeconds} วิ)`,
     en: `too short (${seconds.toFixed(1)} s, expected at least ${minSeconds} s)` });
   else if (opt.expectSeconds && seconds < opt.expectSeconds * 0.6) problems.push({
+    zh: `比这段文字应有的长度短得多（${seconds.toFixed(1)} 秒）—— 可能没念完`,
     th: `สั้นกว่าที่ควรมาก (${seconds.toFixed(1)} วิ ต่อข้อความยาวขนาดนี้) — อาจอ่านไม่จบ`,
     en: `much shorter than expected for this much text (${seconds.toFixed(1)} s) — possibly cut off` });
   if (peak < 0.01) problems.push({
+    zh: `几乎没有声音（峰值 ${peak.toFixed(4)}）—— 麦克风可能被静音或选错了设备`,
     th: `แทบไม่มีเสียง (peak ${peak.toFixed(4)}) — ไมโครโฟนอาจถูกปิดอยู่`,
     en: `virtually silent (peak ${peak.toFixed(4)}) — the mic may be muted or the wrong device` });
   else if (snrDb < 10) problems.push({
+    zh: `人声几乎没盖过底噪（SNR ${snrDb.toFixed(1)} dB）—— 换个安静点的地方`,
     th: `เสียงพูดแทบไม่ดังกว่าเสียงรบกวน (SNR ${snrDb.toFixed(1)} dB) — ลองหาที่เงียบกว่านี้`,
     en: `speech barely rises above the noise floor (SNR ${snrDb.toFixed(1)} dB) — try a quieter room` });
   else if (voiced < 0.25) problems.push({
+    zh: `只有 ${(voiced * 100).toFixed(0)}% 的时长有人声 —— 大部分是静音`,
     th: `มีเสียงพูดแค่ ${(voiced * 100).toFixed(0)}% ของความยาว — ส่วนใหญ่เป็นความเงียบ`,
     en: `only ${(voiced * 100).toFixed(0)}% of the take has speech-level energy — mostly silence` });
   if (clipRatio > 0.005) problems.push({
+    zh: `${(clipRatio * 100).toFixed(1)}% 的采样被削顶 —— 离麦克风远一点`,
     th: `เสียงดังเกินจนตัดยอด ${(clipRatio * 100).toFixed(1)}% — ขยับไมค์ให้ห่างขึ้น`,
     en: `${(clipRatio * 100).toFixed(1)}% of samples are clipped — move further from the mic` });
 
   const tl = opt.timeline;
   if (tl && (tl.missingSeconds > (tl.tolerance != null ? tl.tolerance : 0.05) || tl.gaps > 0)) hard.push({
+    zh: `录音过程中丢了音频（约 ${tl.missingSeconds.toFixed(2)} 秒）—— 必须重录`,
     th: `เสียงขาดหายระหว่างอัด (~${tl.missingSeconds.toFixed(2)} วิ) — ต้องอัดใหม่`,
     en: `the recording has gaps (~${tl.missingSeconds.toFixed(2)} s missing) — must re-record` });
   if (tl && tl.flushTimedOut) hard.push({
     // 超时后「ACK 之前的块都已到齐」这个保证就没了，小于容差的尾部丢失
     // 也检不出来 —— 不能因为「看起来没问题」就放行
+    zh: "录音没有干净地收尾，末尾可能被截断 —— 必须重录",
     th: "ปิดการอัดไม่สมบูรณ์ ท้ายไฟล์อาจขาด — ต้องอัดใหม่",
     en: "the recorder did not shut down cleanly; the tail may be truncated — must re-record" });
 

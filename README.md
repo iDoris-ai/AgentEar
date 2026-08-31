@@ -90,12 +90,21 @@ agentear --debug-keys         # 打印每个修饰键事件,排查按键问题
 ## 附带的小工具:浏览器录音器
 
 ```bash
-scripts/recorder.sh          # 起本地服务并打开浏览器（端口默认 8899）
+scripts/recorder.sh          # macOS / Linux，端口默认 8899
 scripts/recorder.sh 8900     # 换端口
+scripts\recorder.bat         # Windows（⚠️ 见下）
 ```
 
 在浏览器里录自己的声音,拿去做**声音克隆 / TTS 参考音 / 转写校对**。
 录音全程在本机,不上传任何地方;Ctrl-C 停掉服务。
+
+**界面三语**(中 / English / ไทย),右上角切换,选择存在本机 localStorage。
+首次打开跟随浏览器语言。⚠️ **泰文由非母语者撰写、未经母语者校对**
+(与 `src/i18n.rs` 同一状态),泰语界面底部对使用者明说了这一点。
+
+⚠️ **`scripts/recorder.bat` 没有在真实 Windows 上跑过**(开发机是 macOS)。
+里面两段 Python 单行命令单独验过(端口探测、就绪探测),
+但 cmd.exe 的语法部分未验证。跑不起来请把报错发回来。
 
 **为什么要起个 HTTP 服务而不是直接双击 HTML**:`getUserMedia` 只在
 **安全上下文**里可用。`file://` 不算,而 `http://127.0.0.1` 算。
