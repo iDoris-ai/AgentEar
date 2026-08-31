@@ -173,7 +173,7 @@ const I18N = {
     hardsuffix:"（不可人工放行）", override:"我听过了，可以用",
     statline:"{secs}s · {rate} Hz · 峰值 {peak} · SNR {snr} dB · 有声 {voiced}%",
     saved:" · 已存", overridden:" · 已人工放行",
-    foot1:"录音不会自动保存。关掉页面就没了 —— 用「全部打包下载」或每段的 ⤓ 存下来。",
+    foot1:"录音不会自动保存。关掉页面就没了 —— 用「全部打包下载」或每段的 ⤓ 存下来。离开页面时若还有没存的，会弹一次确认；但浏览器崩溃或手机把标签页回收掉时拦不住。",
     foot2:"音频与文本全程留在本机，不上传任何地方。脚本和署名存在浏览器的 localStorage 里，只在这台机器上。",
     proof:"",
     envok:"环境就绪 · secure={secure} download={dl}",
@@ -214,7 +214,7 @@ const I18N = {
     hardsuffix:" (cannot be overridden)", override:"I listened, it's fine",
     statline:"{secs}s · {rate} Hz · peak {peak} · SNR {snr} dB · voiced {voiced}%",
     saved:" · saved", overridden:" · manually accepted",
-    foot1:"Recordings are NOT saved automatically. Close the page and they are gone — use “Download all” or the ⤓ on each take.",
+    foot1:"Recordings are NOT saved automatically. Close the page and they are gone — use “Download all” or the ⤓ on each take.You'll get a confirmation if you leave with unsaved takes — but that cannot catch a browser crash or the phone discarding the tab.",
     foot2:"Audio and text stay on this machine; nothing is uploaded. The script and your name live in this browser's localStorage only.",
     proof:"",
     envok:"Ready · secure={secure} download={dl}",
@@ -255,7 +255,7 @@ const I18N = {
     hardsuffix:" (ข้ามไม่ได้)", override:"ฟังแล้ว ใช้ได้",
     statline:"{secs}s · {rate} Hz · peak {peak} · SNR {snr} dB · มีเสียง {voiced}%",
     saved:" · บันทึกแล้ว", overridden:" · ผู้พูดยืนยันเอง",
-    foot1:"เสียงไม่ถูกบันทึกอัตโนมัติ ปิดหน้านี้แล้วจะหายไป — ใช้ “ดาวน์โหลดทั้งหมด” หรือปุ่ม ⤓ ของแต่ละตอน",
+    foot1:"เสียงไม่ถูกบันทึกอัตโนมัติ ปิดหน้านี้แล้วจะหายไป — ใช้ “ดาวน์โหลดทั้งหมด” หรือปุ่ม ⤓ ของแต่ละตอนถ้าออกจากหน้านี้ทั้งที่ยังไม่ได้บันทึก จะมีกล่องยืนยัน — แต่กันไม่ได้ถ้าเบราว์เซอร์แครชหรือมือถือคืนหน่วยความจำ",
     foot2:"เสียงและข้อความอยู่ในเครื่องคุณเท่านั้น ไม่มีการอัปโหลด บทอ่านและชื่อถูกเก็บใน localStorage ของเบราว์เซอร์นี้เท่านั้น",
     proof:"⚠️ ข้อความภาษาไทยในหน้านี้เขียนโดยผู้ที่ไม่ใช่เจ้าของภาษา และยังไม่ได้ตรวจทาน หากพบที่ผิดโปรดแจ้งกลับด้วยครับ",
     envok:"พร้อมใช้งาน · secure={secure} download={dl}",
@@ -443,6 +443,24 @@ window.addEventListener("pagehide", () => {
 });
 // 不看 e.persisted —— iOS 从后台回来时它未必为 true，漏一次复位就是整页卡死
 window.addEventListener("pageshow", () => render());
+
+/* ── 离开页面前拦一下 ──
+   `takes` 只在内存里。志愿者录二十条、手滑刷新一次 → 全没了，而且事前
+   毫无提示。这个 URL 已经写进征集文档发给外人了，代价不对称。
+
+   **只在真的有「录了但没存」的东西时才拦。** 空手离开也弹的话，人很快
+   就学会无视这个框，等真该拦的时候它已经不起作用了。
+
+   ⚠️ 它挡不住的：浏览器崩溃、系统重启、以及**手机上标签页被内存压力
+   丢弃**（iOS Safari 尤其激进）。要真正不丢得把音频落进 IndexedDB —— 
+   那是另一件事，没做，别把这个警告当成「录音是安全的」。 */
+const unsavedCount = () => takes.filter(tk => tk.blob && !tk.saved).length;
+window.addEventListener("beforeunload", e => {
+  if (!unsavedCount()) return;      // 反向：没有未保存的就不该拦
+  e.preventDefault();
+  e.returnValue = "";               // 老浏览器要这个才弹
+  return "";
+});
 
 /* ── 录音 ── */
 async function startTake(t) {
