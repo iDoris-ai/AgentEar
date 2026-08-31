@@ -54,13 +54,26 @@ SRV=$!
 # 下次再跑就撞「端口已被占用」，而人根本不知道是自己上次留下的
 trap 'kill "$SRV" 2>/dev/null || true' EXIT INT TERM HUP
 
-# 等它真的起来再开浏览器，否则会开出一个连接失败的页面
+# 等它真的起来再开浏览器，否则会开出一个连接失败的页面。
+# 探测用 python3 而不是 curl：curl 上面没有被检查过，缺 curl 的机器上
+# 40 次全失败、最后死在「服务起来了但打不开」—— 而服务其实好好的。
+# 这和刚把 nc 换掉是同一类口子的反面：**别依赖没检查过的东西**。
+probe() {
+  python3 - "$URL" <<'PY' 2>/dev/null
+import sys, urllib.request
+try:
+    with urllib.request.urlopen(sys.argv[1], timeout=1) as r:
+        sys.exit(0 if r.status == 200 else 1)
+except Exception:
+    sys.exit(1)
+PY
+}
 for _ in $(seq 1 40); do
-  if curl -fsS -o /dev/null --max-time 1 "$URL" 2>/dev/null; then break; fi
-  kill -0 "$SRV" 2>/dev/null || die "http.server 没起来"
+  probe && break
+  kill -0 "$SRV" 2>/dev/null || die "http.server 没起来（端口被占？换一个端口试试）"
   sleep 0.1
 done
-curl -fsS -o /dev/null --max-time 2 "$URL" 2>/dev/null || die "服务起来了但 $URL 打不开"
+probe || die "服务起来了但 $URL 打不开"
 
 case "$(uname -s)" in
   Darwin) open "$URL" 2>/dev/null || true ;;

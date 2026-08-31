@@ -61,6 +61,7 @@ footer{margin-top:2rem;padding-top:1rem;border-top:1px solid var(--rule);
     <legend>设置</legend>
     <div class="row">
       <label>署名 <input id="speaker" type="text" maxlength="24" placeholder="anon" size="10"></label>
+      <span class="hint" id="namehint"></span>
       <label>目标采样率
         <select id="rate">
           <option value="0" selected>原样（不重采样）</option>
@@ -71,7 +72,8 @@ footer{margin-top:2rem;padding-top:1rem;border-top:1px solid var(--rule);
           <option value="16000">16 kHz</option>
         </select>
       </label>
-      <label>单段上限 <input id="maxsec" type="number" min="5" max="600" value="240" size="4"> 秒</label>
+      <label>单段上限 <input id="maxsec" type="number" min="5" max="300" value="240" size="4"> 秒</label>
+      <span class="hint" id="memhint"></span>
       <span class="pill" id="devpill">◌ 麦克风未开</span>
     </div>
     <p class="hint" id="ratehint"></p>
@@ -106,6 +108,19 @@ footer{margin-top:2rem;padding-top:1rem;border-top:1px solid var(--rule);
 <script src="recorder-core.js"></script>
 <script>
 "use strict";
+/* 核心是外部文件，404 或被拦就整段脚本抛 ReferenceError —— 连专门用来
+   「把失败说出来」的 envCheck() 都跑不到，页面白着，人不知道发生了什么。
+   拆成两个文件之后多出来的失败模式，先堵上。 */
+if (typeof RecorderCore === "undefined") {
+  document.body.innerHTML =
+    '<div style="max-width:40rem;margin:4rem auto;padding:0 1rem;font:15px/1.7 system-ui">' +
+    '<h1 style="font-size:1.2rem">录音核心没加载起来</h1>' +
+    '<p><code>recorder-core.js</code> 没能载入，页面无法工作。</p>' +
+    '<p>多半是没有通过 <code>scripts/recorder.sh</code> 启动，而是直接双击了 HTML 文件 —— ' +
+    '那样浏览器既拿不到麦克风（不是安全上下文），也可能加载不了同目录的脚本。</p>' +
+    '<p>请在项目根目录运行：<code>scripts/recorder.sh</code></p></div>';
+  throw new Error("recorder-core.js not loaded");
+}
 const { startCapture, toWav, sha256hex16, diagnose, normText } = RecorderCore;
 
 /* ── 会话：一次只允许一路录音 ──
@@ -138,10 +153,16 @@ const load = () => { try {
   if (d.maxsec) $("#maxsec").value = d.maxsec;
 } catch (_) {} };
 
+/* 文件名里的署名**只用 ASCII**。
+   zip 里设了 UTF-8 标志位（0x0800）没错，但实测 Info-ZIP 的 `unzip`
+   在 macOS 上解中文文件名会 `Illegal byte sequence` —— 只解出 manifest.txt，
+   WAV 全丢（ditto / Finder 正常）。志愿者在 Linux 或命令行解包就会踩到。
+   原样的署名仍然写进 manifest 的 speaker 字段，不丢信息。 */
 const speakerId = () => {
   const v = ($("#speaker").value || "").trim().toLowerCase();
-  return v.replace(/[^a-z0-9一-龥_-]+/g,"-").replace(/^-+|-+$/g,"").slice(0,24) || "anon";
+  return v.replace(/[^a-z0-9_-]+/g,"-").replace(/^-+|-+$/g,"").slice(0,24) || "anon";
 };
+const speakerLabel = () => ($("#speaker").value || "").trim() || "anon";
 
 /* ── 采样率的取舍写在界面上，不只写在注释里 ──
    泰语那个页面写死 16 kHz 是因为它是 ASR 语料工具；这里不能照抄。 */
@@ -275,7 +296,9 @@ async function startTake(t) {
     } catch (e) { t.error = `采集启动失败：${e.name} —— ${e.message}`; render(); return; }
     // 建采集节点要 await（AudioWorklet 得加载模块），期间可能已跨代：
     // 自己拆掉自己建的节点，绝不写进 S
-    if (!owns(token) || myGen !== S.gen) { cap.take(); return; }
+    // take() 里 new Float32Array(total) 在长录音下可能抛；不接的话
+    // 变成 unhandled rejection。同文件 pagehide 分支就是这么写的。
+    if (!owns(token) || myGen !== S.gen) { Promise.resolve(cap.take()).catch(()=>{}); return; }
     S.cap = cap;
 
     const dst = +$("#rate").value || 0;
@@ -293,8 +316,15 @@ async function startTake(t) {
         await new Promise(r => setTimeout(r, 0));   // 先让「转换中」画出来
         if (!taken || !taken.pcm.length) throw new Error("没有采到音频");
         const target = dst || taken.sampleRate;
+        // 估个应有时长，用来发现「只念了一半」。中文朗读约 4.5 字/秒、
+        // 拉丁字母约 14 字符/秒 —— 分开算比用一个平均数诚实。
+        // 这条只是**软**提示（analyseTake 里走 problems 不走 hard），
+        // 估歪了他点「我听过了」就能放行。
+        const txt = t.free ? "" : t.text;
+        const cjk = (txt.match(/[\u3400-\u9fff\u3040-\u30ff\uac00-\ud7af]/g) || []).length;
+        const expectSeconds = txt ? cjk / 4.5 + (txt.length - cjk) / 14 : 0;
         const res = await toWav(taken.pcm, taken.sampleRate, target,
-          { minSeconds: 1, timeline: taken.timeline });
+          { minSeconds: 1, expectSeconds, timeline: taken.timeline });
         if (taken.dropped) res.quality.problems.push({ en:"超过单段上限，多出来的部分被丢弃" });
         // hash 算完再发布 —— 先写进 t 再 await 的话，等待期间发生 pagehide，
         // digest 回来后没人再拦，旧的收尾会把结果写到已经作废的那一代上
@@ -306,6 +336,10 @@ async function startTake(t) {
         if (t.url) URL.revokeObjectURL(t.url);
         Object.assign(t, { blob:res.blob, url:URL.createObjectURL(res.blob),
           quality:res.quality, seconds:res.seconds, sha,
+          // **录音当时的文本快照。** 判「对不对得上」只能靠它 ——
+          // 靠比较新旧两个列表的话，「先录一段自由录音、再贴脚本」这条路
+          // （而且它是默认路径）会把无脚本的音频无警告地配上段落文本。
+          recText: t.free ? null : t.text,
           saved:false, override:false, error:null, staleText:false,
           src:{ rate:taken.sampleRate, dst:target, backend:taken.backend,
                 timeline:taken.timeline, track:S.trackSettings, ua:navigator.userAgent } });
@@ -400,9 +434,11 @@ function manifest() {
   const L = [];
   L.push("# AgentEar 录音工具导出");
   L.push(`# 时间 ${new Date().toISOString()}`);
-  L.push(`# 说话人 ${speakerId()}`);
+  L.push(`# 说话人 ${speakerLabel()}`);
+  if (speakerLabel() !== speakerId()) L.push(`# 文件名前缀 ${speakerId()}（文件名只用 ASCII，见工具说明）`);
   L.push("#");
   L.push("# 每段：文本 / WAV 文件名 / SHA-256 前 16 位 / 采集参数 / 质量指标");
+  L.push("# text 行里的 \\n 是转义的换行、\\\\ 是转义的反斜杠（这个文件按行解析）。");
   L.push("# ⚠️ 请求的约束（单声道、关 AGC/降噪）不代表设备照做了；");
   L.push("#    track 那行是 getSettings() 报的**实际生效**值。");
   for (const t of takes) {
@@ -410,7 +446,9 @@ function manifest() {
     const s = t.src || {}, q = t.quality || {};
     L.push("");
     L.push(`## ${wavName(t)}`);
-    L.push(`text: ${t.free ? "(自由录音，无脚本)" : t.text}`);
+    // 段落内部允许有单换行（分段用的是空行），直接塞进按行解析的清单会撑破它。
+    // 转义成 \n，并在文件头说明 —— 下游 `^text: ` 取一行就不会静默截断。
+    L.push(`text: ${t.free ? "(自由录音，无脚本)" : t.text.replace(/\\/g,"\\\\").replace(/\n/g,"\\n")}`);
     L.push(`sha256_16: ${t.sha || "(unavailable)"}`);
     L.push(`audio: ${s.dst} Hz mono 16-bit · ${(t.seconds||0).toFixed(2)}s · 采集自 ${s.rate} Hz (${s.backend})`);
     if (s.track) L.push(`track: ch=${s.track.channelCount} rate=${s.track.sampleRate} ` +
@@ -426,10 +464,29 @@ function manifest() {
   return L.join("\n") + "\n";
 }
 
+/* 录音当时对着的文本，和这一段现在应该对着的文本，是不是同一个。
+   四种情况都要判到：
+     录时无脚本 → 现在有脚本   （默认路径！先录自由录音再贴脚本）
+     录时有脚本 → 现在无脚本
+     两边都有脚本但内容不同
+     两边都没脚本            → 不算漂移 */
+function isStale(t) {
+  if (!t.blob) return false;
+  const had = t.recText !== null && t.recText !== undefined;
+  if (had !== !t.free) return true;
+  return had && t.recText !== t.text;
+}
+
 /* ── 脚本 → 段落 ── */
 function applyScript() {
   const paras = $("#script").value.split(/\n\s*\n/).map(normText).filter(Boolean);
   const keep = takes.filter(t => t.blob);          // 已有录音的不能因为改脚本就丢
+  // 段落变少时多出来的录音会被永久丢弃。**未存过的必须先问一声** ——
+  // 页脚那句「关掉页面就没了」防不住这个，因为人不觉得改脚本 = 删录音。
+  const willDrop = keep.slice(Math.max(1, paras.length)).filter(t => !t.saved);
+  if (willDrop.length && !confirm(
+      `这样会丢掉 ${willDrop.length} 段**还没保存**的录音（脚本只剩 ${paras.length || 1} 段）。\n` +
+      `先「全部打包下载」再改脚本？\n\n确定要继续吗？`)) return;
   takes.length = 0;
   // 下面按顺序贴回 keep，贴不下的那些永远不会再被引用 —— 现在就吊销，
   // 否则它们的 object URL 会一直挂到页面关闭
@@ -441,7 +498,8 @@ function applyScript() {
     if (!t) { if (k.url) URL.revokeObjectURL(k.url); return; }
     Object.assign(t, { blob:k.blob, url:k.url, quality:k.quality, sha:k.sha,
       seconds:k.seconds, src:k.src, saved:k.saved, override:k.override,
-      staleText: !k.free && !t.free && t.text !== k.text }); });
+      recText: k.recText });
+    t.staleText = isStale(t); });
   $("#scripthint").textContent = paras.length ? `${paras.length} 段（按空行分）` : "自由录音模式";
   save(); render();
 }
@@ -494,15 +552,37 @@ function render() {
     && !t.staleText && (!(((t.quality||{}).problems)||[]).length || t.override));
   $("#prog").textContent = `${usable.length} / ${takes.length} 可用`;
   $("#prog").classList.toggle("ok", takes.length > 0 && usable.length === takes.length);
-  $("#zip").disabled = !takes.some(t => t.blob);
+  $("#zip").disabled = busy || !takes.some(t => t.blob);
+  // **会重建 takes 的控件在录音期间必须锁住。**
+  // 不锁的话：录音中点「应用脚本」→ takes 全换成新 id → S.holder.id 匹配不上
+  // 任何一段 → 每段的 rec 都是 false → 所有按钮 disabled，**页面上不再有
+  // 「停止」** → 用户被锁到 maxSeconds 超时，而那段录音写进了一个已经不在
+  // takes 里的孤儿对象，静默丢失。
+  ["#apply","#addfree","#script","#rate","#maxsec"].forEach(sel => $(sel).disabled = busy);
 }
 
 /* ── 绑定 ── */
 $("#apply").onclick = applyScript;
 $("#addfree").onclick = () => { takes.push({ id: ++seq, text:"", free:true }); render(); };
 $("#rate").onchange = () => { rateHint(); save(); };
-$("#speaker").oninput = () => { save(); render(); };   // 署名进文件名，改了要重画
-$("#maxsec").oninput = save;
+/* 文件名只用 ASCII，中文署名会被换成 anon 之类 —— 那是静默的，得说出来。
+   原样的署名仍然写进 manifest，不丢信息。 */
+const nameHint = () => {
+  const raw = speakerLabel(), id = speakerId();
+  $("#namehint").textContent = (raw === "anon" || raw === id) ? ""
+    : `文件名会用 “${id}”（只用 ASCII，中文名解压时在部分工具上会丢文件）；` +
+      `manifest 里仍记 “${raw}”`;
+};
+$("#speaker").oninput = () => { save(); nameHint(); render(); };   // 署名进文件名，改了要重画
+/* 缓冲、拼接、重采样输出、WAV 各占一份内存。上限放太宽的话，
+   手机会在「转换中」那一刻 OOM，整段录音丢失，而错误只会显示「转换失败」。 */
+const memHint = () => {
+  const secs = Math.max(5, Math.min(300, +$("#maxsec").value || 240));
+  const mb = Math.round(secs * 48000 * 4 * 2 / 1e6);
+  $("#memhint").textContent = `≈ 峰值 ${mb} MB 内存（48 kHz 估）`;
+  $("#memhint").style.color = mb > 150 ? "var(--signal)" : "";
+};
+$("#maxsec").oninput = () => { save(); memHint(); };
 $("#script").oninput = save;
 $("#zip").onclick = async () => {
   const btn = $("#zip"), label = btn.textContent;
@@ -525,7 +605,7 @@ $("#zip").onclick = async () => {
   }
 };
 
-load(); rateHint(); envCheck(); applyScript();
+load(); rateHint(); memHint(); nameHint(); envCheck(); applyScript();
 </script>
 </body>
 </html>
