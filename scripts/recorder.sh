@@ -22,9 +22,23 @@ for f in recorder.html recorder-core.js; do
   [ -f "$DOCS/$f" ] || die "缺文件：$DOCS/$f"
 done
 
-# 端口被占就直接说，别让人对着一个别人的页面纳闷
-if command -v nc >/dev/null && nc -z 127.0.0.1 "$PORT" 2>/dev/null; then
-  die "端口 $PORT 已被占用。换一个：scripts/recorder.sh 8900"
+# 端口被占就直接说，别让人对着一个别人的页面纳闷。
+# 用 python 而不是 nc：nc 不是每台机器都有，`command -v nc && nc -z ...`
+# 在没有 nc 的机器上会**静默跳过整个检查** —— 一个不会失败的检查等于没检查。
+# python3 上面已经确认存在，用它就没有这个口子。
+if python3 - "$PORT" <<'PY'
+import socket, sys
+s = socket.socket()
+try:
+    s.bind(("127.0.0.1", int(sys.argv[1])))
+except OSError:
+    sys.exit(0)      # 绑不上 = 被占
+finally:
+    s.close()
+sys.exit(1)          # 绑得上 = 空闲
+PY
+then
+  die "端口 $PORT 已被占用。换一个：$(basename "$0") $((PORT+1))"
 fi
 
 URL="http://127.0.0.1:$PORT/recorder.html"

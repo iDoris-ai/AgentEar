@@ -360,6 +360,20 @@ function crc32(u8) {
   return (crc ^ 0xFFFFFFFF) >>> 0;
 }
 function zipStore(files) {          // files: [{name, bytes: Uint8Array}]
+  // **先挡住 ZIP32 的边界，别静默产出坏包。**
+  // 偏移和大小都是 u32、文件数是 u16 —— 超了就悄悄截断，
+  // 打出来的 zip 能列目录、解压却是错的。240 秒 @48 kHz 每段约 23 MB，
+  // 录一百多段就到 4 GB，声音克隆场景够得着。
+  // 真要支持得上 ZIP64（多一套 64 位字段 + 额外的定位记录），
+  // 那不是这个小工具该背的；这里改成当场拒绝并说清怎么办。
+  let totalBytes = 0;
+  for (const f of files) totalBytes += f.bytes.length + f.name.length * 3 + 76;
+  if (files.length > 65535)
+    throw new Error(`文件数 ${files.length} 超过 ZIP32 上限 65535 —— 请分批下载`);
+  if (totalBytes > 0xFFFFFFFF - (1 << 20))
+    throw new Error(`总大小约 ${(totalBytes/1e9).toFixed(2)} GB，超过 ZIP32 的 4 GB 上限 —— ` +
+                    `请分批下载，或把目标采样率调低`);
+
   const enc = new TextEncoder(), chunks = [], central = [];
   let off = 0;
   const u16 = v => [v & 255, (v>>>8) & 255];
@@ -491,15 +505,24 @@ $("#speaker").oninput = () => { save(); render(); };   // 署名进文件名，�
 $("#maxsec").oninput = save;
 $("#script").oninput = save;
 $("#zip").onclick = async () => {
-  const files = [];
-  for (const t of takes) {
-    if (!t.blob) continue;
-    files.push({ name: wavName(t), bytes: new Uint8Array(await t.blob.arrayBuffer()) });
+  const btn = $("#zip"), label = btn.textContent;
+  btn.disabled = true; btn.textContent = "打包中…";
+  try {
+    const files = [];
+    for (const t of takes) {
+      if (!t.blob) continue;
+      files.push({ name: wavName(t), bytes: new Uint8Array(await t.blob.arrayBuffer()) });
+    }
+    files.push({ name:"manifest.txt", bytes: new TextEncoder().encode(manifest()) });
+    saveBlob(zipStore(files), `${speakerId()}-recordings.zip`);
+    // **打包成功才算存过。** 抛异常时不能标 saved —— 那会让人以为存好了
+    takes.forEach(t => { if (t.blob) t.saved = true; });
+  } catch (e) {
+    alert(`打包失败：${e.message}`);
+  } finally {
+    btn.textContent = label;
+    render();          // render 会按有没有 blob 重新决定按钮可用性
   }
-  files.push({ name:"manifest.txt", bytes: new TextEncoder().encode(manifest()) });
-  saveBlob(zipStore(files), `${speakerId()}-recordings.zip`);
-  takes.forEach(t => { if (t.blob) t.saved = true; });
-  render();
 };
 
 load(); rateHint(); envCheck(); applyScript();
