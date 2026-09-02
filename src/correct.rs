@@ -57,17 +57,39 @@ const TIMEOUT: Duration = Duration::from_secs(20);
 /// 3. **「如果没有需要修正的，原样输出」** —— 不给这句的话，
 ///    模型会对本来就正确的句子做「润色」，把口语改成书面语。
 ///    用户要的是逐字记录，不是作文。
-const PROMPT: &str = "\
+const PROMPT_HEAD: &str = "\
 你是语音转写的后处理器。下面这段文字是语音识别的输出，其中的**技术术语**可能被识别错了\
-（同音或近音），比如 raw 被识别成 road/row、knowledge base 被识别成「闹铃是base」、\
-Docker 被识别成 doocca。
+（同音或近音）。
 
-请只修正明显是技术术语识别错误的部分，保持其余内容一字不变。
+下面是本项目的术语表。请按表里的规则还原，**严格照右边的写法输出（包括大小写）**：
+
+";
+
+/// 术语表和正文之间那一段。
+///
+/// 「表里没有的词一律不动」这句是本轮新增的**要害**：M2a 那次失败
+/// （`ro的目录` 被纠成 `repo`）恰恰是模型自由发挥的产物——`repo` 在
+/// 那个语境里完全说得通，只是不在我们的词汇表里。给了表还不约束范围，
+/// 等于白给。
+const PROMPT_TAIL: &str = "
+先看两个例子，注意**同一个词在不同上下文里的处理完全相反**：
+
+例 1（该替换）：
+  输入：然后把内容存到 road 目录里面
+  输出：然后把内容存到 raw 目录里面
+  理由：在谈文件目录，说的是技术术语 raw
+
+例 2（**不该替换**）：
+  输入：这条 road 很宽，可以走两辆车
+  输出：这条 road 很宽，可以走两辆车
+  理由：在谈道路和车，road 就是它字面的意思，与本项目术语无关
 
 规则：
+- **表里没有的词一律不动。** 不要凭上下文猜测别的术语，不要替换成你觉得更常见的词
 - 只输出修正后的文本，不要解释，不要加引号，不要写「修正后：」之类的前缀
 - 如果没有需要修正的地方，把原文原样输出
-- 不要润色、不要把口语改成书面语、不要增删标点之外的内容
+- **除术语替换之外，不要增删或修改任何内容**，包括标点、空格和语气词
+- 不要润色，不要把口语改成书面语
 
 待修正的文字：
 ";
@@ -104,11 +126,22 @@ pub fn service_reachable() -> bool {
 
 pub struct Corrector {
     url: String,
+    /// 渲染好的术语清单。
+    ///
+    /// **每次纠错前重新加载**（见 `main` 的调用点），不缓存到进程生命周期——
+    /// 用户改完术语表，下一次录音就该生效，不必重启守护进程。
+    /// 表只有几 KB，读一次的代价远小于一次推理。
+    terms_block: String,
 }
 
 impl Corrector {
     pub fn new(url: impl Into<String>) -> Self {
-        Self { url: url.into() }
+        Self { url: url.into(), terms_block: String::new() }
+    }
+
+    /// 带术语表构造。没有术语表时（探测、测试）用 `new`。
+    pub fn with_terms(url: impl Into<String>, terms: &crate::terms::Terms) -> Self {
+        Self { url: url.into(), terms_block: terms.to_prompt_block() }
     }
 
     /// 确认对端**确实是我们的模型服务**。
@@ -155,7 +188,10 @@ impl Corrector {
     fn try_correct(&self, text: &str) -> Result<String> {
         let body = serde_json::json!({
             "model": "ornith",
-            "messages": [{ "role": "user", "content": format!("{PROMPT}{text}") }],
+            "messages": [{
+                "role": "user",
+                "content": format!("{PROMPT_HEAD}{}{PROMPT_TAIL}{text}", self.terms_block),
+            }],
             // 纠错要的是确定性，不是创造力
             "temperature": 0.0,
             // 输出长度按输入给，留 2 倍余量。不设上限的话，模型跑飞时
@@ -176,6 +212,14 @@ impl Corrector {
 
         let v: serde_json::Value = serde_json::from_str(&out)
             .with_context(|| format!("解析响应失败: {}", out.chars().take(200).collect::<String>()))?;
+        // **必须检查结束原因。** `finish_reason: "length"` 表示输出被
+        // max_tokens 截断了——`content` 里是**半句话**，而它一样非空。
+        // 不检查的话，半句话会被当成纠错成功，自动上屏并写进 transcript，
+        // 覆盖掉本来完整的原文。宁可不纠错，也不能上屏半句。
+        let finish = v["choices"][0]["finish_reason"].as_str().unwrap_or("");
+        if finish != "stop" {
+            bail!("响应未正常结束（finish_reason={finish:?}），按原文处理");
+        }
         let content = v["choices"][0]["message"]["content"]
             .as_str()
             .context("响应里没有 choices[0].message.content")?;
@@ -305,5 +349,34 @@ mod tests {
     fn multibyte_slicing_is_safe() {
         assert_eq!(tidy("“中文引号”"), "中文引号");
         assert_eq!(tidy("「」"), "");
+    }
+
+    /// 真实的 `road`（道路）和 `ID`（身份标识）**不能**被术语表改成
+    /// `raw` / `idea`。
+    ///
+    /// codex 评审指出：默认表里恰好有 `road → raw`、`ID → idea` 两条，
+    /// 写成无条件替换就会误伤。改成「由上下文决定」之后需要真的验一次。
+    ///
+    /// **要真调边车，所以标 ignore**：`cargo test -- --ignored`，
+    /// 前提是 scripts/serve-llm.sh 在跑。
+    #[test]
+    #[ignore = "需要 LLM 边车在跑：scripts/serve-llm.sh"]
+    fn real_road_and_id_survive() {
+        let terms = crate::terms::Terms::default();
+        let c = Corrector::with_terms(DEFAULT_URL, &terms);
+
+        let cases = [
+            ("这条 road 很宽，可以走两辆车", "road"),
+            ("他的 ID 是 12345，不要弄错", "ID"),
+            ("今天中午吃的肉很好吃", "肉"),
+            ("帮我写个日报交上去", "日报"),
+        ];
+        for (input, must_keep) in cases {
+            let out = c.correct(input).unwrap_or_else(|| input.to_string());
+            assert!(
+                out.contains(must_keep),
+                "术语表把真实的 {must_keep} 改掉了：{input:?} → {out:?}"
+            );
+        }
     }
 }

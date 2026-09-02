@@ -2,13 +2,14 @@
 
 > 此刻在做什么、卡在哪、分支与 PR。每推进一步就更新，宁可啰嗦不可与仓库脱节。
 
-**更新时间**：2026-09-02
-**当前分支**：main（干净）
+**更新时间**：2026-09-02（T2.1.1 codex 评审后）
+**当前分支**：`feat/T2.1.1-terms-table`（worktree `../AgentEar-F2.1`）
 **main HEAD**：2ccb538 — feat(m2a): 技术术语纠错（PR #9 已合并）
 
 ## 此刻状态
 
-规划刚建立，尚未开工。7 个 READY task 等待按序执行，见 [`tasks.md`](tasks.md)。
+**进行中**：T2.1.1 术语表数据结构与默认表（F2.1）
+**分支**：`feat/T2.1.1-terms-table`，worktree `../AgentEar-F2.1`
 
 ## 环境前置（开工前必须确认）
 
@@ -39,7 +40,11 @@ scripts/serve-llm.sh          # 默认 127.0.0.1:8793
 
 ## 分支与 PR
 
-无 open PR。无 worktree。
+| Task | 分支 | PR | 状态 |
+|---|---|---|---|
+| T2.1.1 | `feat/T2.1.1-terms-table` | — | IN_PROGRESS |
+
+worktree：`../AgentEar-F2.1`（F2.1 专属）、`../AgentEar-plan`（已合并，待人工清理）
 
 ## 变更日志
 

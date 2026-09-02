@@ -14,6 +14,7 @@ mod hotkey;
 mod i18n;
 mod paste;
 mod store;
+mod terms;
 mod tray;
 
 use anyhow::{Context, Result};
@@ -53,6 +54,12 @@ fn main() -> Result<()> {
     // 那种错很难发现，因为默认配置恰好是大多数情况下对的那个。
     let data_root = data_root()?;
     download::set_data_root(data_root.clone());
+    // 术语表在**启动时**就确保存在，不等到第一次纠错。
+    //
+    // 早先只在纠错路径里 load，而纠错默认是关的——于是「首次启动写入默认表」
+    // 这条规格实际上从没发生过：用户想去编辑术语表，会发现文件根本不在。
+    // 失败只记日志，不阻断启动（同 config 的策略）。
+    let _ = terms::load(&data_root);
     let cfg = config::load(&data_root);
 
     // 引擎指纹要在对账之前设好——`download::is_installed` 拿它判断
@@ -110,7 +117,8 @@ fn main() -> Result<()> {
         // 只能靠反复录音来复现。配置关着就跳过，行为和守护进程一致。
         if cfg.correct_terms && !t.text.is_empty() {
             let url = cfg.llm_url.as_deref().unwrap_or(correct::DEFAULT_URL);
-            if let Some(fixed) = correct::Corrector::new(url).correct(&t.text) {
+            let tb = terms::load(&data_root);
+            if let Some(fixed) = correct::Corrector::with_terms(url, &tb).correct(&t.text) {
                 if fixed != t.text {
                     println!("{fixed}");
                     eprintln!("（纠错前：{}）", t.text);
@@ -415,7 +423,9 @@ fn finish(state: State, store: &store::Store, asr: &asr::Asr) -> Result<State> {
             let (text, corrected) = if cfg.correct_terms {
                 let t_fix = Instant::now();
                 let url = cfg.llm_url.as_deref().unwrap_or(correct::DEFAULT_URL);
-                match correct::Corrector::new(url).correct(&raw_text) {
+                // 每次都重新读术语表：用户改完下次录音即生效，不用重启。
+                let tb = terms::load(store.root());
+                match correct::Corrector::with_terms(url, &tb).correct(&raw_text) {
                     Some(fixed) if fixed != raw_text => {
                         log::info!("术语纠错 {:.1}s: {raw_text:?} → {fixed:?}",
                                    t_fix.elapsed().as_secs_f32());
