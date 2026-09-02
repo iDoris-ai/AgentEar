@@ -276,7 +276,7 @@ pub fn load(data_root: &Path) -> Terms {
                 "terms.json 有 {} 字节，超过 {MAX_FILE} 上限，按上一次成功加载的表工作",
                 m.len()
             );
-            return fallback();
+            return fallback(data_root);
         }
     }
 
@@ -297,20 +297,24 @@ pub fn load(data_root: &Path) -> Terms {
                 };
                 let clean = sanitize(t);
                 *LAST_GOOD.lock().unwrap_or_else(|e| e.into_inner()) = Some(clean.clone());
+                // 只在成功之后写备份——坏内容绝不进备份，否则备份也跟着坏
+                save_backup(data_root, &clean);
                 clean
             }
             Err(e) => {
                 log::warn!("terms.json 解析失败（正在编辑？），改用上一次成功加载的表: {e}");
-                fallback()
+                fallback(data_root)
             }
         },
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             // **文件不存在不等于首次启动。** 已经成功加载过的话，
             // 多半是编辑器或同步工具正把文件挪开重写——此时退回 last-good，
             // 绝不能把缓存覆盖成默认表。
-            if let Some(good) = LAST_GOOD.lock().unwrap_or_else(|e| e.into_inner()).clone() {
-                log::warn!("terms.json 暂时不见了（正在保存？），沿用上一次成功加载的表");
-                return good;
+            if LAST_GOOD.lock().unwrap_or_else(|e| e.into_inner()).is_some()
+                || backup_path(data_root).exists()
+            {
+                log::warn!("terms.json 暂时不见了（正在保存？），沿用上一次成功的表");
+                return fallback(data_root);
             }
             let d = Terms::default();
             if let Err(e) = write_default(&path, &d) {
@@ -321,22 +325,55 @@ pub fn load(data_root: &Path) -> Terms {
         }
         Err(e) => {
             log::warn!("读取 terms.json 失败，改用上一次成功加载的表: {e}");
-            fallback()
+            fallback(data_root)
         }
     }
 }
 
-/// 读不成时用什么。**上一次成功的表优先于内置默认表**——
-/// 见 `LAST_GOOD` 的说明。
-fn fallback() -> Terms {
-    LAST_GOOD
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .clone()
-        .unwrap_or_else(|| {
-            log::warn!("还没有成功加载过术语表，用内置默认表");
-            Terms::default()
-        })
+/// 磁盘上的 last-good 备份。
+///
+/// `LAST_GOOD` 只活在进程内存里，**重启就没了**。而最需要它的场景恰恰
+/// 跨重启：编辑器截断文件后崩溃、写到一半断电、机器直接关机——
+/// 下次启动时主文件是坏的，内存缓存是空的，只能退回内置默认表，
+/// 用户自己加的词就这么没了（codex Low 5 / FU-12）。
+///
+/// 备份**只在解析并清洗成功之后**更新。坏内容绝不进备份，
+/// 否则备份也跟着坏，等于没有。
+fn backup_path(data_root: &Path) -> PathBuf {
+    data_root.join("terms.json.bak")
+}
+
+fn save_backup(data_root: &Path, terms: &Terms) {
+    let p = backup_path(data_root);
+    if let Err(e) = overwrite(&p, terms) {
+        // 备份写不成不影响本次使用，只是下次重启少一层保险
+        log::warn!("更新术语表备份失败（不影响本次）: {e}");
+    }
+}
+
+/// 读不成时用什么。三级回退，**越靠前越接近用户最近一次有效的意图**：
+///
+/// 1. 内存里的 last-good（同一次运行内改坏了）
+/// 2. 磁盘上的备份（跨重启：上次崩在保存中途）
+/// 3. 内置默认表（真的什么都没有）
+fn fallback(data_root: &Path) -> Terms {
+    if let Some(good) = LAST_GOOD.lock().unwrap_or_else(|e| e.into_inner()).clone() {
+        return good;
+    }
+    // 内存里没有，试磁盘备份。备份自己也可能坏（掉电写了一半），
+    // 所以照样要走完整的解析 + 清洗，不能直接信。
+    let bp = backup_path(data_root);
+    if let Ok(text) = std::fs::read_to_string(&bp) {
+        if let Ok(t) = serde_json::from_str::<Terms>(&text) {
+            let clean = sanitize(t);
+            log::warn!("主文件不可用，改用备份 {}", bp.display());
+            *LAST_GOOD.lock().unwrap_or_else(|e| e.into_inner()) = Some(clean.clone());
+            return clean;
+        }
+        log::warn!("备份 {} 也坏了，用内置默认表", bp.display());
+    }
+    log::warn!("没有可用的 last-good 也没有备份，用内置默认表");
+    Terms::default()
 }
 
 /// 仅供测试：清掉 last-good 缓存，并**串行化**所有会碰它的测试。
@@ -668,6 +705,81 @@ mod tests {
         std::fs::write(&p, "x".repeat((1 << 20) + 10)).unwrap();
         let t = load(&d);
         assert_eq!(t.terms[0].canonical, "好词", "超大文件应该被拒，退回 last-good");
+
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    /// **跨重启的场景：主文件坏了、内存缓存是空的 → 读磁盘备份。**
+    ///
+    /// 这是 FU-12 的验收。最需要 last-good 的场景恰恰跨重启：
+    /// 编辑器截断文件后崩溃、写到一半断电。内存缓存那时是空的，
+    /// 没有磁盘备份就只能退回内置默认表，用户加的词就没了。
+    #[test]
+    fn corrupt_main_file_with_empty_cache_reads_the_backup() {
+        let _g = reset_last_good();
+        let d = tmp();
+        let p = path_in(&d);
+
+        // 第一次成功加载：应该同时写出备份
+        let mine = format!(
+            r#"{{"version":{DEFAULT_VERSION},"terms":[{{"canonical":"我加的词","aliases":[]}}]}}"#
+        );
+        std::fs::write(&p, &mine).unwrap();
+        assert_eq!(load(&d).terms[0].canonical, "我加的词");
+        assert!(backup_path(&d).exists(), "成功加载后应该写出备份");
+
+        // 模拟「保存到一半崩了 + 进程重启」：主文件坏、内存缓存清空
+        std::fs::write(&p, "{ 半截").unwrap();
+        drop(_g);
+        let _g2 = reset_last_good();
+
+        let t = load(&d);
+        assert_eq!(
+            t.terms[0].canonical, "我加的词",
+            "内存缓存为空时应该读磁盘备份，而不是退回内置默认表"
+        );
+
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    /// **坏内容绝不进备份**，否则备份跟着坏就等于没有。
+    #[test]
+    fn a_corrupt_main_file_never_overwrites_the_backup() {
+        let _g = reset_last_good();
+        let d = tmp();
+        let p = path_in(&d);
+
+        let good = format!(
+            r#"{{"version":{DEFAULT_VERSION},"terms":[{{"canonical":"好词","aliases":[]}}]}}"#
+        );
+        std::fs::write(&p, &good).unwrap();
+        load(&d);
+        let backup_before = std::fs::read_to_string(backup_path(&d)).unwrap();
+
+        // 主文件坏掉，再加载几次
+        std::fs::write(&p, "坏的").unwrap();
+        load(&d);
+        load(&d);
+
+        assert_eq!(
+            std::fs::read_to_string(backup_path(&d)).unwrap(),
+            backup_before,
+            "备份被坏内容覆盖了"
+        );
+
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    /// 备份自己也可能坏（掉电写了一半）——那时退回内置默认表，不能崩。
+    #[test]
+    fn a_corrupt_backup_falls_through_to_builtin() {
+        let _g = reset_last_good();
+        let d = tmp();
+        std::fs::write(path_in(&d), "坏的主文件").unwrap();
+        std::fs::write(backup_path(&d), "坏的备份").unwrap();
+
+        let t = load(&d);
+        assert!(t.terms.len() > 5, "两个都坏时应该用内置默认表");
 
         std::fs::remove_dir_all(&d).ok();
     }
