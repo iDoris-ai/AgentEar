@@ -23,7 +23,12 @@ mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 
 cp "$ROOT/target/release/agentear" "$APP/Contents/MacOS/AgentEar"
 
-# ASR 二进制与模型随 bundle 走，运行时从 Resources/vendor 读
+# ASR 二进制与模型随 bundle 走，运行时从 Resources/vendor 读。
+#
+# **泰语模型不在这里**——它 574 MB，按需下载到 ~/.agentear/models/。
+# 往 bundle 里写会破坏代码签名（TCC 把辅助功能授权钉在 cdhash 上），
+# 而且升级时整个 .app 被替换，下载的模型会直接消失。见 src/download.rs。
+# 这里只带泰语**引擎**（whisper-cli，2.5 MB）。
 if [ -d "$ROOT/vendor" ]; then
   cp -R "$ROOT/vendor" "$APP/Contents/Resources/vendor"
   cp "$ROOT/LICENSE" "$ROOT/NOTICE" "$APP/Contents/Resources/"
@@ -148,15 +153,25 @@ codesign -d -r- "$APP" 2>&1 | grep '^designated' | sed 's/^/      /'
 # 架构一致性校验。ASR 运行时（FunASR 官方 macOS 版）只有 arm64，
 # 所以整个 app 是 Apple Silicon only——做通用二进制没有意义，
 # Intel 机器上 ASR 子进程照样跑不起来。
+#
+# 2026-09-02 复核过上游：`modelscope/FunASR` 从 runtime-llamacpp-v0.1.9 到
+# v0.2.6，macOS 只发 `macos-arm64`，**从来没有过 macos-x64**
+# （Linux/Windows 才有 x64）。所以这不是「暂时没做」，是上游没有。
 echo "==> 架构校验"
 APP_ARCH="$(lipo -archs "$APP/Contents/MacOS/AgentEar")"
-ASR_ARCH="$(lipo -archs "$APP/Contents/Resources/vendor/bin/llama-funasr-sensevoice")"
-echo "    AgentEar:              $APP_ARCH"
-echo "    llama-funasr-sensevoice: $ASR_ARCH"
-if [ "$APP_ARCH" != "$ASR_ARCH" ]; then
-  echo "!! 架构不一致，ASR 子进程会起不来" >&2
-  exit 1
-fi
+# 逐个校验 vendor 里的**每一个**可执行文件，不是只看主 ASR 那一个。
+# 泰语引擎是后加的，只校验一个的话，加进来一个 x86_64 的二进制
+# 不会有任何提示——直到用户切到泰语才炸。
+echo "    AgentEar: $APP_ARCH"
+for bin in "$APP/Contents/Resources/vendor/bin/"*; do
+  [ -f "$bin" ] || continue
+  BIN_ARCH="$(lipo -archs "$bin" 2>/dev/null || echo '?')"
+  echo "    $(basename "$bin"): $BIN_ARCH"
+  if [ "$BIN_ARCH" != "$APP_ARCH" ]; then
+    echo "!! $(basename "$bin") 架构是 $BIN_ARCH，与 app 的 $APP_ARCH 不一致，子进程会起不来" >&2
+    exit 1
+  fi
+done
 
 # 冒烟测试：确认打出来的 app 能找到 bundle 内的 vendor 并跑通自检
 echo "==> 冒烟测试"
@@ -165,6 +180,14 @@ echo "==> 冒烟测试"
 SMOKE="$("$APP/Contents/MacOS/AgentEar" --diagnose 2>&1 || true)"
 if grep -q "Resources/vendor" <<<"$SMOKE"; then
   echo "    ✅ bundle 内 vendor 解析正确"
+  # --diagnose 会打印泰语引擎那一行。缺了它泰语根本不能用，
+  # 而主链路照常——那种「一半功能悄悄没了」的包不该发出去。
+  if grep -q "✅ 引擎" <<<"$SMOKE"; then
+    echo "    ✅ 泰语引擎已随包"
+  else
+    echo "!! bundle 里没有泰语引擎（跑 scripts/build-whisper-cli.sh）" >&2
+    exit 1
+  fi
 else
   echo "!! bundle 找不到 Resources/vendor" >&2
   echo "$SMOKE" | sed 's/^/    /' >&2

@@ -30,7 +30,9 @@ use objc2_app_kit::{
 };
 use objc2_foundation::{NSObjectProtocol, NSString, NSTimer};
 
+use crate::asr::AsrLang;
 use crate::config::{self, Trigger};
+use crate::download;
 use crate::i18n::{self, Key, Lang};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -62,6 +64,7 @@ const TAG_QUIT: isize = 4;
 const TAG_TRIGGER_BASE: isize = 100;
 const TAG_RETENTION_BASE: isize = 200;
 const TAG_UI_LANG_BASE: isize = 300;
+const TAG_ASR_LANG_BASE: isize = 400;
 /// `+0` 是「系统默认」，`+1..` 对应 `DEVICE_SNAPSHOT` 的下标。
 const TAG_DEVICE_BASE: isize = 1000;
 
@@ -262,6 +265,37 @@ fn populate(menu: &NSMenu, mtm: MainThreadMarker, target: &MenuTarget) {
     );
     menu.addItem(&lang_item);
 
+    // —— 识别语言 ——
+    //
+    // 紧挨着界面语言放，但**文案必须让人分清**（i18n 里有一条测试钉着
+    // 两个标题不许相同）。泰语那项的标题带下载状态，见 i18n::thai_option。
+    let asr_item = item(mtm, target, i18n::t(lang, Key::AsrLangSection), -1, false);
+    asr_item.setEnabled(true);
+    let thai_state = download::state(&download::THAI);
+    submenu(
+        mtm,
+        &asr_item,
+        vec![
+            item(
+                mtm,
+                target,
+                i18n::t(lang, Key::AsrLangAuto),
+                TAG_ASR_LANG_BASE,
+                cfg.asr_lang == AsrLang::Auto,
+            ),
+            item(
+                mtm,
+                target,
+                &i18n::thai_option(lang, thai_state),
+                TAG_ASR_LANG_BASE + 1,
+                // **只有模型真的就绪时才显示勾**。配置里写着 Thai 但模型
+                // 被删了，勾上就是在骗人——那种状态下一录音就报错。
+                cfg.asr_lang == AsrLang::Thai && thai_state == download::State::Ready,
+            ),
+        ],
+    );
+    menu.addItem(&asr_item);
+
     // —— 输入设备 ——
     let devices = crate::audio::list_input_devices();
     let default_name = crate::audio::default_input_name().unwrap_or_else(|| "?".into());
@@ -382,6 +416,32 @@ fn handle(tag: isize, mtm: MainThreadMarker) {
             // 菜单栏标题由 0.5s 定时器刷新。但**当前这个已经打开的菜单
             // 不会原地重绘**——点完它就关了，下次展开才是新语言。
             log::info!("界面语言改为 {}（下次展开菜单生效）", want.endonym());
+        }
+        TAG_ASR_LANG_BASE => {
+            config::update(|c| c.asr_lang = AsrLang::Auto);
+            log::info!("识别语言改为自动（中/英/日/韩/粤，下次录音生效）");
+        }
+        t if t == TAG_ASR_LANG_BASE + 1 => {
+            match download::state(&download::THAI) {
+                download::State::Ready => {
+                    config::update(|c| c.asr_lang = AsrLang::Thai);
+                    log::info!("识别语言改为泰语（下次录音生效）");
+                }
+                download::State::Downloading(pct) => {
+                    log::info!("泰语模型正在下载（{pct}%），完成后会自动切过去");
+                }
+                // 没下过、或者上次失败了 —— 两种都是「点一下开始下」。
+                //
+                // ⚠️ **这里故意不改 `asr_lang`。** 下载要几分钟，
+                // 期间把识别语言设成泰语的话，用户这几分钟里每次录音
+                // 都会失败，而失败只写在日志里。
+                // 配置在下载完成**并通过加载冒烟之后**才提交，
+                // 见 `asr::finish_thai_install`。
+                _ => {
+                    log::info!("开始下载泰语模型（574 MB）");
+                    download::start(&download::THAI, crate::asr::finish_thai_install);
+                }
+            }
         }
         t if t >= TAG_DEVICE_BASE => {
             let idx = (t - TAG_DEVICE_BASE) as usize;

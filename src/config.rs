@@ -10,6 +10,7 @@ use serde::{Deserialize, Deserializer, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::{OnceLock, RwLock};
 
+use crate::asr::AsrLang;
 use crate::i18n::Lang;
 
 /// 单个字段解析失败时退回默认值，**而不是让整份配置解析失败**。
@@ -83,6 +84,14 @@ pub struct Config {
     /// **界面**语言（菜单文案），不影响识别。默认英文。
     #[serde(deserialize_with = "lenient")]
     pub ui_lang: Lang,
+    /// **识别**语言，决定走哪个 ASR 引擎。默认 Auto（SenseVoice，
+    /// 中/英/粤/日/韩自动判别）。切到 Thai 需要先下载模型。
+    ///
+    /// 和 `ui_lang` 各存各的：界面泰文 + 识别中文，或者界面英文 + 识别泰语，
+    /// 都是合理组合。把两者绑在一起是很容易犯的错——一个在泰国工作的
+    /// 英语用户，界面要英文，识别要泰语。
+    #[serde(deserialize_with = "lenient")]
+    pub asr_lang: AsrLang,
 }
 
 // 这两个字段的「默认」不是 `Default::default()`，坏值要退回文档里写的默认，
@@ -105,6 +114,7 @@ impl Default for Config {
             trigger: Trigger::RightCommand,
             retention_days: default_retention_days(),
             ui_lang: Lang::default(),
+            asr_lang: AsrLang::default(),
         }
     }
 }
@@ -196,6 +206,7 @@ mod tests {
         assert_eq!(c.trigger, Trigger::RightCommand);
         assert_eq!(c.retention_days, 30);
         assert_eq!(c.ui_lang, Lang::En, "没有 ui_lang 字段时应取默认英文");
+        assert_eq!(c.asr_lang, AsrLang::Auto, "没有 asr_lang 字段时应取默认 Auto");
     }
 
     #[test]
@@ -223,6 +234,7 @@ mod tests {
     fn unknown_enum_value_does_not_reset_everything() {
         let json = r#"{
             "ui_lang": "fr",
+            "asr_lang": "klingon",
             "input_device": "MacBook Pro麦克风",
             "trigger": "ctrl_shift_r",
             "retention_days": 90,
@@ -230,6 +242,7 @@ mod tests {
         }"#;
         let c: Config = serde_json::from_str(json).expect("坏字段不该让整份配置解析失败");
         assert_eq!(c.ui_lang, Lang::En, "未知语言退回默认");
+        assert_eq!(c.asr_lang, AsrLang::Auto, "未知识别语言退回默认");
         assert_eq!(c.input_device.as_deref(), Some("MacBook Pro麦克风"), "设备被连累了");
         assert_eq!(c.trigger, Trigger::CtrlShiftR, "触发键被连累了");
         assert_eq!(c.retention_days, 90, "保留期被连累了");
@@ -255,6 +268,26 @@ mod tests {
             .expect("类型错误不该让整份配置解析失败");
         assert_eq!(c.retention_days, 30, "坏值必须退回 30，不能退回 0（=永不清理）");
         assert_eq!(c.trigger, Trigger::RightCommand);
+    }
+
+    /// 界面语言和识别语言是**两个独立的字段**，不能互相影响。
+    ///
+    /// 这条挡的是一类很自然的错误实现：「用户把界面切成泰文，那识别
+    /// 大概也想要泰语吧」。不对——在泰国工作的英语用户要的是
+    /// 英文界面 + 泰语识别，而一个学泰语的中国人可能要中文界面 + 泰语识别。
+    #[test]
+    fn ui_lang_and_asr_lang_are_independent() {
+        for ui in Lang::ALL {
+            for asr in [AsrLang::Auto, AsrLang::Thai] {
+                let mut c = Config::default();
+                c.ui_lang = ui;
+                c.asr_lang = asr;
+                let back: Config =
+                    serde_json::from_str(&serde_json::to_string(&c).unwrap()).unwrap();
+                assert_eq!(back.ui_lang, ui);
+                assert_eq!(back.asr_lang, asr);
+            }
+        }
     }
 
     #[test]
