@@ -49,6 +49,7 @@
 //! 加载模型时报错。
 
 use anyhow::{Context, Result};
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::fs;
 use std::io::Read;
@@ -135,6 +136,22 @@ pub fn set_data_root(p: PathBuf) {
     DATA_ROOT.set(p).ok();
 }
 
+/// 当前引擎的身份指纹。由 `main` 在启动时设进来（`asr::engine_fingerprint`）。
+///
+/// **为什么安装记录必须绑定引擎**：模型跨版本升级是保留的（在数据目录里），
+/// 引擎却是随 .app 走的。升级换掉 `whisper-cli` 之后，上一次的加载冒烟
+/// 就不再能说明任何问题了——新引擎可能根本读不了这个量化格式。
+/// 不绑的话，用户升级完一录音就失败，而自检还说「已安装」。
+static ENGINE_ID: OnceLock<String> = OnceLock::new();
+
+pub fn set_engine_id(id: String) {
+    ENGINE_ID.set(id).ok();
+}
+
+fn engine_id() -> Option<&'static str> {
+    ENGINE_ID.get().map(String::as_str)
+}
+
 /// 下载的模型放哪。
 ///
 /// **和 `vendor/` 分开**（见模块文档）：`vendor/` 是随包分发、只读、
@@ -147,41 +164,120 @@ pub fn path_of(spec: &ModelSpec) -> Option<PathBuf> {
     models_root().map(|r| r.join(spec.file))
 }
 
-/// 安装清单的路径。内容是这次**校验并冒烟通过**的 sha256。
-///
-/// 为什么需要它：光看「同名文件存在且非空」判不出装没装好——
-/// 下到一半被 kill、用户手动塞了个别的文件、旧版本残留，
-/// 都长得一模一样。清单是「这个文件被这套代码验过」的凭据。
+/// 安装记录：这一份模型，被哪个引擎验过。
+#[derive(Serialize, Deserialize)]
+struct Manifest {
+    /// 校验通过的模型 sha256。换模型（改 `ModelSpec`）就对不上。
+    model_sha256: String,
+    /// 跑冒烟的那个引擎的指纹。app 升级换了引擎就对不上。
+    engine_id: String,
+}
+
 fn manifest_of(spec: &ModelSpec) -> Option<PathBuf> {
     models_root().map(|r| r.join(format!("{}.installed", spec.file)))
 }
 
 /// 真的装好了吗。**这是 `Ready` 的唯一判据。**
 ///
-/// 三条都要成立：清单在、清单里的 sha 是当前期望的、模型文件体积对得上。
-/// 体积检查便宜（一次 stat），能挡住截断；内容级别的保证由「清单只在
-/// SHA 校验 + 加载冒烟都过了之后才写」提供，不必每次启动重算 574 MB。
+/// 四条都要成立：模型文件在且是普通文件、体积对得上、安装记录在、
+/// 记录里的模型 sha 和**引擎指纹**都是当前这一套。
+///
+/// ## 这份记录能证明什么、不能证明什么
+///
+/// 它是**优化，不是完整性边界**。真正的保证来自「记录只在 SHA 全量校验 +
+/// 加载冒烟都通过之后才写」；这里省掉的只是每次启动重算 574 MB 的开销
+/// （那要几百毫秒，菜单每次展开都算会明显卡顿）。
+///
+/// 所以它挡得住的是**意外**：下到一半被 kill、手动拷进来一个同名文件、
+/// 升级后引擎换了、旧版本残留。**挡不住蓄意伪造**——能写
+/// `~/.agentear/models/` 的进程完全可以造一个同体积的文件再把公开可知的
+/// sha 写进记录里。但那样的进程同样能改 app 自己的二进制，
+/// 所以这条不在威胁模型内，加密签名也解决不了同用户权限下的问题。
 pub fn is_installed(spec: &ModelSpec) -> bool {
     let (Some(m), Some(f)) = (manifest_of(spec), path_of(spec)) else {
         return false;
     };
-    if !is_present(&f) {
+    if !is_present(&f) || !fs::symlink_metadata(&f).is_ok_and(|x| x.len() == spec.bytes) {
         return false;
     }
-    if !fs::symlink_metadata(&f).is_ok_and(|x| x.len() == spec.bytes) {
-        return false;
-    }
-    // 清单本身也可能被符号链接冒充，一样要 symlink_metadata 把关
+    // 记录本身也可能被符号链接冒充，一样要 symlink_metadata 把关
     if !fs::symlink_metadata(&m).is_ok_and(|x| x.is_file()) {
         return false;
     }
-    fs::read_to_string(&m).is_ok_and(|c| c.trim() == spec.sha256)
+    let Ok(text) = fs::read_to_string(&m) else {
+        return false;
+    };
+    let Ok(rec) = serde_json::from_str::<Manifest>(&text) else {
+        return false;
+    };
+    // 引擎指纹还没设进来时**一律判未安装**：宁可让用户多点一次，
+    // 也不能在不知道引擎是谁的情况下声称装好了。
+    rec.model_sha256 == spec.sha256 && Some(rec.engine_id.as_str()) == engine_id()
+}
+
+/// 没装好的**具体原因**，给 `--diagnose` 用。
+///
+/// 不合并进 `is_installed`（那个只回答是非题，菜单每次展开都要调）。
+/// 分开是为了自检能说人话：「引擎换了」和「文件是手动放的」处置完全不同，
+/// 前者重新校验几秒就好，后者可能要重下。
+pub fn install_issue(spec: &ModelSpec) -> Option<String> {
+    if is_installed(spec) {
+        return None;
+    }
+    let (Some(m), Some(f)) = (manifest_of(spec), path_of(spec)) else {
+        return Some("数据目录未初始化".into());
+    };
+    if !f.exists() {
+        return Some("未下载——菜单里选「识别语言 → ไทย」，或跑 --fetch-thai".into());
+    }
+    if !is_present(&f) {
+        return Some("⚠️ 不是普通文件（符号链接或目录）".into());
+    }
+    let size = fs::symlink_metadata(&f).map(|x| x.len()).unwrap_or(0);
+    if size != spec.bytes {
+        return Some(format!(
+            "⚠️ 体积不符（{} MiB，期望 {} MiB）——重跑 --fetch-thai",
+            size / 1048576,
+            spec.bytes / 1048576
+        ));
+    }
+    if engine_id().is_none() {
+        return Some("⚠️ 泰语引擎不在 vendor 里，模型没法用".into());
+    }
+    match fs::read_to_string(&m).ok().and_then(|t| serde_json::from_str::<Manifest>(&t).ok()) {
+        None => Some("⚠️ 没有安装记录（手动放的？装到一半？）——跑 --fetch-thai 校验一次".into()),
+        Some(rec) if rec.model_sha256 != spec.sha256 => {
+            Some("⚠️ 安装记录指向另一个模型版本——跑 --fetch-thai".into())
+        }
+        // 最常见的一种：app 升级换了引擎。**不用重下**，重新校验几秒就好。
+        Some(_) => Some("⚠️ 引擎已更换，需重新校验——跑 --fetch-thai（不会重下）".into()),
+    }
 }
 
 fn write_manifest(spec: &ModelSpec) -> Result<()> {
     let m = manifest_of(spec).context("数据目录未初始化")?;
-    let tmp = m.with_extension("installed.tmp");
-    fs::write(&tmp, spec.sha256)
+    let id = engine_id()
+        .context("引擎指纹未初始化，拒绝写安装记录")?
+        .to_string();
+    let rec = Manifest {
+        model_sha256: spec.sha256.to_string(),
+        engine_id: id,
+    };
+    let json = serde_json::to_string(&rec)
+        .map_err(|e| anyhow::Error::new(Fail::Io).context(format!("序列化清单失败: {e}")))?;
+
+    // 临时文件名带 pid，且**写之前把可能存在的符号链接清掉**——
+    // `fs::write` 会顺着链接写，这是和 `.part` 同一类的问题
+    // （第一轮修了 .part 却漏了这里）。
+    let tmp = m.with_file_name(format!(
+        "{}.tmp.{}",
+        m.file_name().and_then(|x| x.to_str()).unwrap_or("installed"),
+        std::process::id()
+    ));
+    if fs::symlink_metadata(&tmp).is_ok() {
+        fs::remove_file(&tmp).ok();
+    }
+    fs::write(&tmp, json)
         .map_err(|e| anyhow::Error::new(Fail::Io).context(format!("写清单失败: {e}")))?;
     fs::rename(&tmp, &m)
         .map_err(|e| anyhow::Error::new(Fail::Io).context(format!("落地清单失败: {e}")))?;
@@ -336,6 +432,27 @@ fn run(spec: &ModelSpec, on_verify: fn(&Path) -> Result<()>) -> Result<()> {
         return Ok(());
     }
 
+    // 模型文件还在、体积也对，只是安装记录不认了——最常见的原因是
+    // **app 升级换了引擎**（记录绑定引擎指纹，见 `is_installed`）。
+    // 这种情况**不该重下 574 MB**：字节大概率还是好的，
+    // 重新校验 + 用新引擎跑一次冒烟就够了。
+    if fs::symlink_metadata(&dest).is_ok_and(|m| m.is_file() && m.len() == spec.bytes) {
+        log::info!("模型文件在但安装记录不匹配（多半是引擎变了），重新校验而不是重下");
+        PHASE.store(3, Ordering::Release);
+        match verify(&dest, spec).and_then(|()| on_verify(&dest)) {
+            Ok(()) => {
+                write_manifest(spec)?;
+                sync_dir(&dir);
+                return Ok(());
+            }
+            Err(e) => {
+                // 重验不过就说明文件真坏了（verify 失败时已经把它删了）
+                // 或者新引擎读不了它。往下走正常下载流程。
+                log::warn!("重新校验失败，改为重新下载: {e:#}");
+            }
+        }
+    }
+
     // —— `.part` 的卫生检查。**这一段每一条都是真会出事的** ——
     //
     // curl 用 `-o` 写这个路径，它顺着符号链接写。`.part` 要是个指向别处的
@@ -381,6 +498,12 @@ fn run(spec: &ModelSpec, on_verify: fn(&Path) -> Result<()>) -> Result<()> {
         fetch(spec, &part)?;
     }
 
+    // 相位切到「验证中」。SHA 要几百毫秒，Metal 首次冒烟要几秒——
+    // 这段时间界面显示「下载中 100%」会让人以为卡住了。
+    // （第一轮加了 Verifying 这一档，第二轮才发现把冒烟移进 run() 之后
+    // 忘了在这里发布它，那个分支一直是死代码。）
+    PHASE.store(3, Ordering::Release);
+
     verify(&part, spec)?;
 
     // **加载冒烟在 rename 之前。** 这是整个流程的要害：
@@ -423,9 +546,14 @@ fn fetch(spec: &ModelSpec, part: &Path) -> Result<()> {
         // ⚠️ **进度条必须关掉。** curl 默认往 stderr 持续写进度，而我们把
         // stderr 接成了管道。管道有容量上限，写满之后 curl 会阻塞在写上、
         // 永远不退出，而我们的轮询循环只调 try_wait()——于是双方一起卡死，
-        // 还攥着 flock 不放。`-S` 保证真出错时错误信息仍然写出来。
-        .arg("--no-progress-meter")
-        .arg("-S")
+        // 还攥着 flock 不放。
+        //
+        // 用 `-sS` 而不是 `--no-progress-meter`：后者是 curl **7.67** 才有的，
+        // 而我们在 Info.plist 里声明支持到 macOS 11，那上面自带的是 curl 7.64。
+        // 传一个不认识的选项，curl 会直接以「unknown option」退出——
+        // 结果就是在最老的受支持系统上，下载功能一次都成功不了。
+        // `-s` 关掉进度条，`-S` 保证真出错时错误信息仍然写出来。
+        .arg("-sS")
         .arg("-o").arg(part)
         .arg(spec.url)
         .stdout(std::process::Stdio::null())
@@ -437,12 +565,28 @@ fn fetch(spec: &ModelSpec, part: &Path) -> Result<()> {
     // 而且我们要拿它做诊断（原来的实现把它丢了，日志里只剩一个退出码）。
     let mut err_pipe = child.stderr.take();
     let err_thread = std::thread::spawn(move || {
-        let mut buf = String::new();
+        // **必须读到 EOF**，不能读满 64 KiB 就撒手——那样管道读端提前关闭，
+        // curl 还在写就会被打回来，等于把刚修掉的阻塞风险又请回来了。
+        // 内存上只留最后 64 KiB（滚动丢弃前面的），诊断信息里有用的
+        // 本来就在末尾。
+        const KEEP: usize = 64 * 1024;
+        let mut tail = Vec::new();
         if let Some(p) = err_pipe.as_mut() {
             use std::io::Read;
-            let _ = p.take(64 * 1024).read_to_string(&mut buf);
+            let mut chunk = [0u8; 8192];
+            loop {
+                match p.read(&mut chunk) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => {
+                        tail.extend_from_slice(&chunk[..n]);
+                        if tail.len() > KEEP {
+                            tail.drain(..tail.len() - KEEP);
+                        }
+                    }
+                }
+            }
         }
-        buf
+        String::from_utf8_lossy(&tail).into_owned()
     });
 
     // 进度靠轮询 .part 的体积。curl 自己的进度条要解析终端控制字符，
@@ -482,13 +626,22 @@ fn fetch(spec: &ModelSpec, part: &Path) -> Result<()> {
     let stderr = err_thread.join().unwrap_or_default();
 
     if !status.success() {
-        // .part **不删**：留着给下次续传。curl 的 -C - 会接着写。
-        // （超大和越界那两种毒文件已经在 run() 开头处理掉了。）
-        return Err(anyhow::Error::new(Fail::Network).context(format!(
-            "curl 退出码 {:?}: {}",
-            status.code(),
-            stderr.trim()
-        )));
+        let code = status.code();
+        // 断点续传本身谈崩了的两种退出码：
+        //   33 = 服务端不支持 byte range
+        //   36 = 续传位置不对（bad download resume）
+        // 这两种下**留着 .part 就是永久卡住**：每次重试都从同一个偏移
+        // 续起，服务端每次都拒绝。清掉它，下一次从零开始还有救。
+        // 其余失败（断网、超时）保留 .part，续传是有价值的。
+        let range_broken = matches!(code, Some(33) | Some(36))
+            || stderr.contains("Range")
+            || stderr.contains("resume");
+        if range_broken {
+            log::warn!("续传被拒（exit {code:?}），删掉 .part 以便下次从零开始");
+            let _ = fs::remove_file(part);
+        }
+        return Err(anyhow::Error::new(Fail::Network)
+            .context(format!("curl 退出码 {code:?}: {}", stderr.trim())));
     }
 
     PCT.store(100, Ordering::Relaxed);

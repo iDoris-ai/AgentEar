@@ -54,6 +54,16 @@ fn main() -> Result<()> {
     download::set_data_root(data_root.clone());
     let cfg = config::load(&data_root);
 
+    // 引擎指纹要在对账之前设好——`download::is_installed` 拿它判断
+    // 「验过这个模型的引擎，是不是现在这一个」。
+    match asr::engine_fingerprint() {
+        Some(id) => {
+            log::debug!("泰语引擎指纹 {id}");
+            download::set_engine_id(id);
+        }
+        None => log::debug!("vendor 里没有泰语引擎，泰语功能不可用"),
+    }
+
     // **配置和实际安装状态对账。**
     //
     // 配置里写着泰语，但模型可能已经被删了、被换过、或者当初压根没装完。
@@ -61,7 +71,10 @@ fn main() -> Result<()> {
     // 错误只出现在日志里——用户看到的是「按了键，什么都没出来」。
     // 宁可退回自动（那条链路的模型随包走，一定在），并把原因写清楚。
     let cfg = if cfg.asr_lang == asr::AsrLang::Thai && !download::is_installed(&download::THAI) {
-        log::warn!("配置里选的是泰语，但泰语模型没有装好（缺失或未通过校验）");
+        // 「没装好」涵盖三种：模型不在、模型坏了、**以及引擎换了**——
+        // 升级把 whisper-cli 换成不兼容的版本时，旧的冒烟结果不再作数
+        // （安装记录绑定了引擎指纹）。三种的处置一样：退回自动。
+        log::warn!("配置里选的是泰语，但泰语模型现在不可用（缺失、损坏，或引擎已更换）");
         log::warn!("  已退回自动识别。要用泰语：菜单「识别语言 → ไทย」，或跑 --fetch-thai");
         config::update(|c| c.asr_lang = asr::AsrLang::Auto);
         config::get()
@@ -309,8 +322,15 @@ fn worker(
 fn begin(store: &store::Store) -> Result<State> {
     let t0 = Instant::now();
     log::debug!("打开麦克风……（首次运行时 macOS 会在此弹出权限请求）");
-    // 每次录音才读配置，所以菜单里换设备立刻生效，不用重启
-    let recorder = audio::Recorder::start(config::get().input_device.as_deref())?;
+    // **一次读完，两处都用这一份快照。**
+    //
+    // 每次录音才读配置，所以菜单里换设备立刻生效，不用重启。
+    // 但设备和识别语言必须来自**同一时刻**：`Recorder::start` 可能要花
+    // 好几秒（首次运行时 macOS 在这里弹权限框），期间用户改了识别语言、
+    // 或者泰语模型刚好下载完成自动切了过去，事后再读就把这段音频
+    // 送去了另一个引擎——而用户按下录音键时看到的还是旧设置。
+    let cfg = config::get();
+    let recorder = audio::Recorder::start(cfg.input_device.as_deref())?;
     let session = store.begin()?;
     tray::set(tray::Status::Recording);
     println!("● 开始录音…… 再按一次停止");
@@ -319,7 +339,7 @@ fn begin(store: &store::Store) -> Result<State> {
         session,
         recorder,
         started: Instant::now(),
-        asr_lang: config::get().asr_lang,
+        asr_lang: cfg.asr_lang,
     })
 }
 
@@ -515,26 +535,18 @@ fn diagnose(vendor: &std::path::Path) -> Result<()> {
             // 用 exists 的话，删掉清单、清单里 sha 对不上、文件被截断
             // 这三种坏情况自检全都报 ✅，而实际一录音就失败——
             // 自检骗人比没有自检更糟。
-            let installed = download::is_installed(&download::THAI);
+            // 判据必须是 `is_installed`（记录 + 体积 + 引擎指纹），
+            // **不能是 `exists()`**。用 exists 的话，删掉记录、记录对不上、
+            // 文件被截断、引擎换了这几种坏情况自检全都报 ✅，
+            // 而实际一录音就失败——自检骗人比没有自检更糟。
+            let issue = download::install_issue(&download::THAI);
             let size = m.metadata().map(|x| x.len() / 1048576).unwrap_or(0);
-            let note = if installed {
-                String::new()
-            } else if m.metadata().is_ok_and(|x| x.len() == download::THAI.bytes) {
-                // 体积对上了、只是没有安装记录：多半是手动拷进来的，
-                // 或者上一次装到一半被打断。说清楚是哪种，别让人以为文件坏了。
-                "，⚠️ 体积对得上但没有安装记录（手动放的？装到一半？）——跑 --fetch-thai 校验一次".into()
-            } else if m.exists() {
-                format!("，⚠️ 体积不符（{size} MiB，期望 {} MiB）——重跑 --fetch-thai",
-                        download::THAI.bytes / 1048576)
-            } else {
-                "，未下载——菜单里选「识别语言 → ไทย」，或跑 --fetch-thai".into()
-            };
             println!(
                 "  {} 模型: {} ({} MiB{})",
-                if installed { "✅" } else { "⚪" },
+                if issue.is_none() { "✅" } else { "⚪" },
                 m.display(),
                 size,
-                note
+                issue.map(|r| format!("，{r}")).unwrap_or_default()
             );
         }
         None => println!("  ⚪ 模型: 数据目录未初始化"),

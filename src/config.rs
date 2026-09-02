@@ -120,6 +120,9 @@ impl Default for Config {
 }
 
 static CURRENT: RwLock<Option<Config>> = RwLock::new(None);
+/// 写者之间的串行锁。见 `update` 的说明——它和 `CURRENT` 分工不同，
+/// 别合并成一把。
+static SAVE: std::sync::Mutex<()> = std::sync::Mutex::new(());
 static PATH: OnceLock<PathBuf> = OnceLock::new();
 
 /// 从数据目录读配置。文件不存在或解析失败都退回默认值——**配置损坏不能
@@ -155,7 +158,7 @@ pub fn get() -> Config {
 
 /// 改配置并立即落盘。写失败只记日志，内存里的改动仍然生效。
 ///
-/// ## 为什么落盘在写锁**里面**
+/// ## 两把锁，各司其职
 ///
 /// 原来是「锁内改、克隆一份、放锁、锁外写」。菜单只在主线程点，这看着没事——
 /// 直到模型下载线程也开始改配置（装完泰语要提交 `asr_lang`）。那时两个写者
@@ -166,14 +169,23 @@ pub fn get() -> Config {
 /// 主线程:              改保留期, 克隆 B, 放锁 ──► 写 B（新）
 /// ```
 ///
-/// 落盘顺序反过来的话，用户刚改的保留期就被旧快照盖掉了。IO 在锁内虽然
-/// 让 `get()` 多等几毫秒（配置只有几百字节），但换来「改动和落盘是一个
-/// 原子步骤」，值。
+/// 落盘顺序反过来，用户刚改的保留期就被旧快照盖掉了。
+///
+/// 但把落盘直接塞进 `CURRENT` 的写锁里也不行：**磁盘慢的时候，
+/// 所有 `get()` 都跟着卡**——包括 AppKit 那个 0.5s 定时器和菜单构建，
+/// 表现就是界面冻住。
+///
+/// 所以用两把：`SAVE` 只序列化写者（保证落盘顺序和改动顺序一致），
+/// `CURRENT` 的写锁只护住内存里那几纳秒的改动。读者永远不会等磁盘。
 pub fn update(f: impl FnOnce(&mut Config)) {
-    let mut guard = CURRENT.write().unwrap();
-    let cfg = guard.get_or_insert_with(Config::default);
-    f(cfg);
-    let snapshot = cfg.clone();
+    // 先拿 SAVE，全程持有到落盘结束——写者之间因此是严格串行的。
+    let _writer = SAVE.lock().unwrap_or_else(|e| e.into_inner());
+    let snapshot = {
+        let mut guard = CURRENT.write().unwrap();
+        let cfg = guard.get_or_insert_with(Config::default);
+        f(cfg);
+        cfg.clone()
+    }; // CURRENT 的写锁在这里就放了，读者不必等下面的磁盘 IO
     if let Err(e) = save(&snapshot) {
         log::error!("保存配置失败: {e:#}");
     }

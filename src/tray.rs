@@ -56,14 +56,25 @@ static DEVICE_SNAPSHOT: Mutex<Vec<String>> = Mutex::new(Vec::new());
 ///
 /// 下载要好几分钟，用户完全可能中途改主意点回 Auto。没有这个标志的话，
 /// 下载线程完成时会无条件把识别语言写成泰语，**把用户后来的选择覆盖掉**。
-/// 点 Auto 就清掉它，点泰语（未安装）就置上。
-static WANT_THAI: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-
-/// 泰语模型装好之后调用（由下载器在清单落地后回调）。
 ///
-/// **只在用户此刻仍然想要泰语时才切**——见 `WANT_THAI`。
+/// ⚠️ **必须是 Mutex，不能是 AtomicBool。** 原子量只保证单次读写有序，
+/// 保证不了「读意图 + 改配置」这两步之间没人插队：
+///
+/// ```text
+/// 下载线程: 读到 want=true ──────────────────► 写配置 Thai（晚了一步）
+/// 主线程:            用户点 Auto, want=false, 写配置 Auto
+/// ```
+///
+/// 结果是用户明确选的 Auto 被推翻。把「判断 + 落配置」整段放进同一把锁，
+/// 两条路径（`on_thai_installed` 和 Auto 菜单项）都持它，才真的互斥。
+static THAI_INTENT: Mutex<bool> = Mutex::new(false);
+
+/// 泰语模型装好之后调用（由下载器在安装记录落地后回调）。
+///
+/// **只在用户此刻仍然想要泰语时才切**——见 `THAI_INTENT`。
 pub fn on_thai_installed() {
-    if WANT_THAI.load(Ordering::SeqCst) {
+    let intent = THAI_INTENT.lock().unwrap();
+    if *intent {
         config::update(|c| c.asr_lang = AsrLang::Thai);
         log::info!("泰语模型已安装，识别语言切到泰语（下次录音生效）");
     } else {
@@ -436,10 +447,12 @@ fn handle(tag: isize, mtm: MainThreadMarker) {
             log::info!("界面语言改为 {}（下次展开菜单生效）", want.endonym());
         }
         TAG_ASR_LANG_BASE => {
-            // 取消掉「下完自动切泰语」的意图。用户明确选了 Auto，
-            // 几分钟后下载完成不该把这个选择推翻。
-            WANT_THAI.store(false, Ordering::SeqCst);
+            // 取消意图和落配置必须在**同一把锁**里，否则下载线程可能
+            // 已经读到了 true、正卡在两步之间，随后把 Thai 写回去。
+            let mut intent = THAI_INTENT.lock().unwrap();
+            *intent = false;
             config::update(|c| c.asr_lang = AsrLang::Auto);
+            drop(intent);
             log::info!("识别语言改为自动（中/英/日/韩/粤，下次录音生效）");
         }
         t if t == TAG_ASR_LANG_BASE + 1 => {
@@ -451,7 +464,7 @@ fn handle(tag: isize, mtm: MainThreadMarker) {
                 download::State::Downloading(_) | download::State::Verifying => {
                     // 再点一次泰语 = 重新表达「下完就切」的意图
                     // （用户可能中途点过 Auto 又反悔）
-                    WANT_THAI.store(true, Ordering::SeqCst);
+                    *THAI_INTENT.lock().unwrap() = true;
                     log::info!("泰语模型正在下载/验证中，完成后会自动切过去");
                 }
                 // 没下过、或者上次失败了 —— 两种都是「点一下开始下」。
@@ -462,7 +475,7 @@ fn handle(tag: isize, mtm: MainThreadMarker) {
                 // 配置在下载完成**并通过加载冒烟之后**才提交，
                 // 见 `asr::finish_thai_install`。
                 _ => {
-                    WANT_THAI.store(true, Ordering::SeqCst);
+                    *THAI_INTENT.lock().unwrap() = true;
                     log::info!("开始下载泰语模型（574 MB）");
                     download::start(
                         &download::THAI,

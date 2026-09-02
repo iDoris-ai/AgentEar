@@ -32,6 +32,26 @@ pub fn set_vendor(p: PathBuf) {
     VENDOR.set(p).ok();
 }
 
+/// 泰语引擎的身份指纹：`whisper-cli` 内容的 sha256 前 16 位。
+///
+/// 用途是把「模型验过了」这件事**绑到验它的那个引擎上**。模型放在数据目录里、
+/// 跨升级保留；引擎随 .app 走、升级即替换。不绑的话，升级换了引擎之后
+/// 上一次的加载冒烟就名不副实了——新引擎可能根本读不了这个量化格式，
+/// 而安装记录还说「已验证」。
+///
+/// 引擎不在（老版本升上来、bundle 残缺）时返回 `None`，
+/// 上层据此把泰语判为不可用。
+///
+/// 只在启动时算一次，2.5 MB 的 sha 几毫秒。
+pub fn engine_fingerprint() -> Option<String> {
+    use sha2::{Digest, Sha256};
+    let bin = VENDOR.get()?.join("bin/whisper-cli");
+    let bytes = std::fs::read(&bin).ok()?;
+    let mut h = Sha256::new();
+    h.update(&bytes);
+    Some(format!("{:x}", h.finalize())[..16].to_string())
+}
+
 /// 单段送入 ASR 的时长上限。
 ///
 /// M0 实测 RSS 随音频长度线性增长约 0.52 MB/s，约 54 分钟破 2 GiB。
