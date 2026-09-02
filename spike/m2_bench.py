@@ -40,15 +40,51 @@ LABELS = [
     "reference", "journal", "command", "unknown",
 ]
 
+# 一级标签的定义与判别问题。**这是 M0 那 6/8 缺的东西**——
+# 当时的提示词只有一行「归入其中一类，只输出类名」，没有任何定义，
+# 模型只能按标签名的字面意思猜。完整论证见 docs/agent/label-taxonomy.md。
+LABEL_RULES = """\
+idea：一个还没决定要不要做的想法。判别：他承诺要做了吗？没有 → idea
+task：一件确定要做的事，有交付物。判别：要我记下来以后做吗？是 → task
+command：要系统现在执行的指令。判别：他在等系统立刻给反应吗？是 → command
+note：一条知识、事实、结论。判别：一年后单独拿出来看还成立吗？成立 → note
+journal：当天发生了什么、当时的状态。判别：离开「今天」这个语境还有意义吗？没有 → journal
+question：一个待解答的疑问。判别：这句话的目的是求一个答案吗？是 → question
+  ⚠️ 口语里疑问句**常常没有问号**（「泰语模型能不能在 Intel Mac 上跑」
+  「现在几点了」都是问句）。不要靠标点判断。
+reference：指向外部资源的指针。判别：主体是链接或出处吗？是 → reference
+unknown：无法归类或内容无意义。以上都不像就选它，宁可 unknown 不要瞎猜
+  ⚠️ 语气词、口头禅、附和（「嗯这个那个」「啊对对对」）一律 unknown，
+  不要因为它可能暗示某种态度就归到 idea
+
+两组最容易混的：
+- note vs journal：看它离不离得开「今天」。「冷启动 0.2 秒」是事实(note)；
+  「今天开会讨论了传输协议」离开时间就没信息量(journal)
+- command vs task：看他等不等系统立刻反应。「帮我查日程」在等回答(command)；
+  「记得给术语表加词」是让系统记下来(task)
+"""
+
+# 18 条，每类至少 2 条。**含 M0 判错的两条原样保留**，以及若干贴着边界的。
+# `Q1` 标记的那条期望值待 jason 确认，见 label-taxonomy.md §2.1。
 TAG_CASES = [
     ("我觉得可以给录音笔加个 ESP32 自动上传", "idea"),
+    ("要是能用语音直接建任务就好了", "idea"),
+    ("这个方案要不要做，我还没想好", "idea"),
     ("明天把 M2 的基准测试跑完", "task"),
-    ("今天开会讨论了接入层的传输协议", "note"),
-    ("为什么 SenseVoice 的内存比 Nano 低这么多？", "question"),
-    ("Ornith 那篇博客在 blog.mushroom.cv", "reference"),
+    ("记得给术语表加上 Kubernetes", "task"),
+    ("帮我查一下明天的日程", "command"),        # M0 判错的那条
+    ("把刚才那段录音删掉", "command"),
+    ("现在几点了", "question"),   # 原本归 command,是我应用定义时错了:它在求一个答案
+    ("SenseVoice 的冷启动只要 0.2 秒", "note"),
+    ("whisper.cpp 的 Metal 首次运行要多花几秒编译 shader", "note"),
+    ("今天开会讨论了接入层的传输协议", "journal"),  # M0 判错的那条，期望值待确认(Q1)
     ("今天调了一天按键事件，有点累但总算通了", "journal"),
-    ("帮我查一下明天的日程", "command"),
+    ("为什么 SenseVoice 的内存比 Nano 低这么多？", "question"),
+    ("泰语模型能不能在 Intel Mac 上跑", "question"),
+    ("Ornith 那篇博客在 blog.mushroom.cv", "reference"),
+    ("ADR-0004 里记了泰语选型的全部局限", "reference"),
     ("嗯这个那个", "unknown"),
+    ("啊对对对", "unknown"),
 ]
 
 GLOSSARY = [
@@ -121,17 +157,28 @@ def bench_tags(url):
     print("\n=== 2. 标签分类 ===")
     labels = " / ".join(LABELS)
     hit = 0
+    got_all = []
     for text, want in TAG_CASES:
         prompt = (
-            f"把下面这句话归入其中一类：{labels}\n"
+            f"把下面这句话归入其中一类：{labels}\n\n"
+            f"{LABEL_RULES}\n"
             f"只输出类名，不要解释。\n\n{text}"
         )
         out, _, _ = chat(url, [{"role": "user", "content": prompt}], max_tokens=16)
         got = re.sub(r"[^a-z]", "", last_line(out).lower())
+        got_all.append(got)
         ok = got == want
         hit += ok
         print(f"  {'✅' if ok else '❌'} {text[:26]:28s} 期望 {want:10s} 得到 {got}")
     print(f"  命中 {hit}/{len(TAG_CASES)} = {hit/len(TAG_CASES)*100:.0f}%")
+    # 按类汇总:总分掩盖了「哪一类不行」,而修法完全不同——
+    # 某一类全错通常是定义问题,零散错才是模型能力问题
+    per = {}
+    for (text, want), got in zip(TAG_CASES, got_all):
+        d = per.setdefault(want, [0, 0])
+        d[1] += 1
+        d[0] += (got == want)
+    print("  按类：" + "  ".join(f"{k} {v[0]}/{v[1]}" for k, v in sorted(per.items())))
     return hit / len(TAG_CASES)
 
 
