@@ -31,7 +31,7 @@
   详见 PR 描述；`#[ignore]` 集成测试 `real_road_and_id_survive` 是关键——
   没有它前三版都会带着「已修复」的标签合并。
 
-### T2.1.2 长文回归：ro 必须还原成 raw 而不是 repo  `READY`
+### T2.1.2 长文回归：ro 必须还原成 raw 而不是 repo  `PR_OPEN`
 - **优先级**：high
 - **目标**：把 `docs/benchmarks-m2.md` §8.1 那次真实失败钉成回归测试，防止复发。
 - **开发范围**：用 `spike/audio/sample02.wav` 的转写文本做长文用例，断言纠错后
@@ -41,7 +41,10 @@
 - **依赖**：T2.1.1
 - **交付物**：`src/correct.rs` 的长文回归测试；`docs/benchmarks-m2.md` §8.1 补上「已修复」的实测结果。
 - **验收命令**：`cargo test correct` 全绿；`./target/release/agentear --transcribe spike/audio/sample02.wav` 的输出里出现 `raw 的目录`
-- **涉及文件**：`src/correct.rs`、`docs/benchmarks-m2.md`
+- **涉及文件**：`src/correct.rs`、`docs/benchmarks-m2.md`、`tests/fixtures/sample02-asr-raw.txt`
+- **证据**：fixture 是一次真实转写的快照（不重跑 ASR，否则 ASR 的随机性会以
+  和纠错无关的方式让测试失败）。判据里踩过一个坑：`!contains("repo")` 会被
+  `report` 误触发。
 
 ### T2.1.3 术语表可由用户扩展  `READY`
 - **优先级**：mid
@@ -124,7 +127,7 @@
 
 ## F3.1 — TTS 方言可行性摸底
 
-### T3.1.1 候选调研：闽南语与粤语的本地 TTS  `PR_OPEN`
+### T3.1.1 候选调研：闽南语与粤语的本地 TTS  `DONE`
 - **优先级**：high
 - **目标**：回答「有没有」，不是「哪个好」。
 - **开发范围**：调研本地可跑的 TTS 方案，每个候选记录：支持哪些方言、

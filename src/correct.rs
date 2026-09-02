@@ -379,4 +379,65 @@ mod tests {
             );
         }
     }
+
+    /// **长文回归：把 `benchmarks-m2.md` §8.1 那次真实失败钉死。**
+    ///
+    /// 那次的症状：`ro的目录` 在孤立句里纠对（raw），放进 700 字的真实录音
+    /// 转写里就变成了 `repo`——而「先有一个 repo 的目录」读起来毫无破绽，
+    /// 不对着原音频根本发现不了。
+    ///
+    /// ## 为什么用转写文本当输入，不重跑 ASR
+    ///
+    /// 测的是**纠错层**。重跑 ASR 会把 SenseVoice 的随机性混进来：
+    /// 哪天 ASR 的输出变了一个字，这条测试就会以一种和纠错无关的方式失败，
+    /// 而排查的人得先花时间才能发现「不是纠错坏了」。
+    /// fixture 是一次真实转写的快照，内容固定。
+    ///
+    /// **要真调边车，所以标 ignore**：`cargo test --release -- --ignored`。
+    #[test]
+    #[ignore = "需要 LLM 边车在跑：scripts/serve-llm.sh"]
+    fn longform_regression_ro_becomes_raw_not_repo() {
+        let input = include_str!("../tests/fixtures/sample02-asr-raw.txt");
+        // fixture 得真的含有那个触发条件，否则这条测试是空转
+        assert!(input.contains("ro的目录"), "fixture 里应该有触发这次回归的原始错误");
+
+        let terms = crate::terms::Terms::default();
+        let out = Corrector::with_terms(DEFAULT_URL, &terms)
+            .correct(input)
+            .expect("边车在跑时应该返回结果");
+
+        // —— 主靶：这次回归的核心 ——
+        assert!(
+            out.contains("raw 的目录") || out.contains("raw的目录"),
+            "`ro的目录` 应该还原成 raw：\n{out}"
+        );
+        // ⚠️ 判据不能写成 `!out.contains("repo")`——**`report` 里就含 `repo`**，
+        // 而这段录音里恰好有「给你写个 report」，会一直误报。
+        // 要匹配的是「repo 后面跟着的/目录」这个具体形态。
+        assert!(
+            !out.contains("repo 的") && !out.contains("repo的"),
+            "**这正是 §8.1 那次失败**：长上下文里被纠成了 repo：\n{out}"
+        );
+
+        // —— 其余已知正确的纠正不许退化 ——
+        // 每一条都是真实录音里实际出现过的错误形式，不是编的
+        for (want, why) in [
+            ("MacBook", "`我的妈 book`"),
+            ("knowledge base", "`notice base`"),
+            ("24 小时", "`24R`"),
+            ("Mac mini", "`mac mini` 大小写"),
+            ("WiFi", "`wifi` 大小写"),
+        ] {
+            assert!(out.contains(want), "{why} 应该纠成 {want}，退化了：\n{out}");
+        }
+
+        // —— 不该被动的东西 ——
+        // 长度别差太多：纠错只该替换术语，不该润色或删减。
+        // 给 20% 余量（大小写规范化和空格会让长度略变）。
+        let (a, b) = (input.chars().count(), out.chars().count());
+        assert!(
+            b as f64 > a as f64 * 0.8 && (b as f64) < a as f64 * 1.2,
+            "长度变化过大（{a} → {b}），模型可能在润色或删减而不只是替换术语"
+        );
+    }
 }
