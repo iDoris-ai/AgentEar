@@ -47,10 +47,46 @@ pub struct Terms {
     pub terms: Vec<Term>,
 }
 
+/// 内置术语表的版本。**改默认表内容时必须 +1**，否则老用户拿不到修正。
+///
+/// 这不是形式主义：T2.1.1 里删掉了几个危险 alias（`肉`/`raw的`/`road目录`），
+/// 而已经有 `terms.json` 的用户（包括开发机自己）**一个都没拿到**——
+/// `write_default` 刻意不覆盖以保护用户编辑。结果是纠错在那台机器上
+/// 整体失效，排查花了不少时间才定位到是老文件。
+const DEFAULT_VERSION: u32 = 2;
+
 impl Default for Terms {
     fn default() -> Self {
-        Self { version: 1, terms: default_terms() }
+        Self { version: DEFAULT_VERSION, terms: default_terms() }
     }
+}
+
+/// 把老版本的表升级到当前内置版本，**保留用户自己加的词**。
+///
+/// 规则很简单：
+/// - `canonical` 在内置表里的 → 用**内置的新版本**（修正才能传播）
+/// - `canonical` 不在内置表里的 → **原样保留**（那是用户自己加的）
+///
+/// 所以用户不会丢东西，而我们对内置条目的修正（删掉危险 alias、
+/// 补上空格变体）能真正到达每一台机器。
+fn migrate(old: Terms) -> Terms {
+    let builtin = default_terms();
+    let builtin_names: std::collections::HashSet<&str> =
+        builtin.iter().map(|t| t.canonical.as_str()).collect();
+
+    let mut merged = builtin.clone();
+    let mut kept = 0usize;
+    for t in old.terms {
+        if !builtin_names.contains(t.canonical.as_str()) {
+            kept += 1;
+            merged.push(t);
+        }
+    }
+    log::info!(
+        "术语表从 v{} 升到 v{DEFAULT_VERSION}：内置条目已更新，保留了你自己加的 {kept} 条",
+        old.version
+    );
+    Terms { version: DEFAULT_VERSION, terms: merged }
 }
 
 /// 随包的默认表。
@@ -163,6 +199,24 @@ fn sanitize(mut t: Terms) -> Terms {
     for term in &mut t.terms {
         term.aliases.retain(|a| !bad(a));
     }
+    // 同一个 alias 指向两个不同的 canonical 时，模型收到互相矛盾的规则。
+    // 保留先出现的那条——内置条目排在用户条目前面（见 migrate），
+    // 所以冲突时内置的赢，这也符合「内置是基线、用户是补充」的直觉。
+    let mut seen: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    for term in &mut t.terms {
+        let canonical = term.canonical.clone();
+        term.aliases.retain(|a| match seen.get(a) {
+            Some(owner) if owner != &canonical => {
+                log::warn!("术语表里 {a:?} 同时指向 {owner:?} 和 {canonical:?}，忽略后者");
+                false
+            }
+            _ => {
+                seen.insert(a.clone(), canonical.clone());
+                true
+            }
+        });
+    }
+
     if t.terms.len() > MAX_TERMS {
         log::warn!("术语表超过 {MAX_TERMS} 条，只取前 {MAX_TERMS} 条");
         t.terms.truncate(MAX_TERMS);
@@ -229,6 +283,18 @@ pub fn load(data_root: &Path) -> Terms {
     match std::fs::read_to_string(&path) {
         Ok(s) => match serde_json::from_str::<Terms>(&s) {
             Ok(t) => {
+                // 版本不匹配就迁移：内置条目换成新版、用户加的原样留下。
+                // **不迁移的话，我们对默认表的每一次修正都到不了老用户手上。**
+                let t = if t.version != DEFAULT_VERSION {
+                    let migrated = migrate(t);
+                    // 写回去，下次就不用再迁一遍。写失败不影响本次使用。
+                    if let Err(e) = overwrite(&path, &migrated) {
+                        log::warn!("迁移后的术语表写回失败（本次仍用迁移结果）: {e:#}");
+                    }
+                    migrated
+                } else {
+                    t
+                };
                 let clean = sanitize(t);
                 *LAST_GOOD.lock().unwrap_or_else(|e| e.into_inner()) = Some(clean.clone());
                 clean
@@ -291,6 +357,21 @@ fn reset_last_good() -> std::sync::MutexGuard<'static, ()> {
 /// **绝不覆盖已存在的文件**——用户加过的词不能被升级抹掉。
 /// 用 `create_new` 让文件系统来保证这一点，而不是先 `exists()` 再写
 /// （那中间有窗口，两个实例同时启动会互相覆盖）。
+/// 覆盖写（迁移后用）。和 `write_default` 的区别：**这个会覆盖**，
+/// 因为迁移的结果已经包含了用户原有的条目，不存在丢失。
+fn overwrite(path: &Path, terms: &Terms) -> Result<()> {
+    use std::io::Write;
+    let json = serde_json::to_string_pretty(terms)?;
+    let tmp = path.with_extension(format!("json.tmp.{}", std::process::id()));
+    {
+        let mut f = std::fs::File::create(&tmp)?;
+        f.write_all(json.as_bytes())?;
+        f.sync_all()?;
+    }
+    std::fs::rename(&tmp, path)?;
+    Ok(())
+}
+
 fn write_default(path: &Path, terms: &Terms) -> Result<()> {
     use std::io::Write;
     let json = serde_json::to_string_pretty(terms)?;
@@ -403,6 +484,58 @@ mod tests {
         d
     }
 
+    /// **老版本的表要能升级，且不丢用户自己加的词。**
+    ///
+    /// FU-8：T2.1.1 里删掉了几个危险 alias，而已经有 terms.json 的用户
+    /// （包括开发机自己）一个都没拿到——`write_default` 刻意不覆盖。
+    /// 结果纠错在那台机器上整体失效，查了半天才定位到是老文件。
+    #[test]
+    fn old_version_migrates_keeping_user_additions() {
+        let _g = reset_last_good();
+        let d = tmp();
+        let p = path_in(&d);
+
+        // v1 的表：内置条目带着已被删掉的危险 alias，外加一条用户自己的词
+        let old = r#"{"version":1,"terms":[
+            {"canonical":"raw","aliases":["road","肉","raw的"]},
+            {"canonical":"我自己的项目名","aliases":["wo zi ji"]}
+        ]}"#;
+        std::fs::write(&p, old).unwrap();
+
+        let t = load(&d);
+        assert_eq!(t.version, DEFAULT_VERSION, "应该升到当前版本");
+
+        let raw = t.terms.iter().find(|x| x.canonical == "raw").expect("内置条目还在");
+        assert!(!raw.aliases.iter().any(|a| a == "肉"), "危险 alias 应该被内置版本换掉");
+        assert!(raw.aliases.iter().any(|a| a == "road"), "有效 alias 仍在");
+
+        assert!(
+            t.terms.iter().any(|x| x.canonical == "我自己的项目名"),
+            "**用户自己加的词一个都不能丢**"
+        );
+
+        // 迁移结果要写回文件，下次不用再迁
+        let on_disk: Terms = serde_json::from_str(&std::fs::read_to_string(&p).unwrap()).unwrap();
+        assert_eq!(on_disk.version, DEFAULT_VERSION);
+
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    /// 同一个 alias 指向两个 canonical 时，模型会收到互相矛盾的规则。
+    #[test]
+    fn conflicting_aliases_are_dropped() {
+        let t = Terms {
+            version: DEFAULT_VERSION,
+            terms: vec![
+                Term { canonical: "第一个".into(), aliases: vec!["冲突".into(), "好的".into()] },
+                Term { canonical: "第二个".into(), aliases: vec!["冲突".into()] },
+            ],
+        };
+        let c = sanitize(t);
+        assert_eq!(c.terms[0].aliases, vec!["冲突", "好的"], "先出现的保留");
+        assert!(c.terms[1].aliases.is_empty(), "后出现的冲突 alias 被丢掉");
+    }
+
     /// 首次启动写入默认表。
     #[test]
     fn first_run_writes_default_file() {
@@ -427,7 +560,11 @@ mod tests {
         let _g = reset_last_good();
         let d = tmp();
         let p = path_in(&d);
-        let mine = r#"{"version":1,"terms":[{"canonical":"我自己加的词","aliases":["xyz"]}]}"#;
+        // 用当前版本，避免触发迁移——这条测的是「不覆盖」，不是迁移
+        let mine = format!(
+            r#"{{"version":{DEFAULT_VERSION},"terms":[{{"canonical":"我自己加的词","aliases":["xyz"]}}]}}"#
+        );
+        let mine = mine.as_str();
         std::fs::write(&p, mine).unwrap();
 
         let t = load(&d);
@@ -451,7 +588,10 @@ mod tests {
         let p = path_in(&d);
 
         // 先成功加载一次用户自己的表
-        let mine = r#"{"version":1,"terms":[{"canonical":"我加的词","aliases":["abc"]}]}"#;
+        let mine = format!(
+            r#"{{"version":{DEFAULT_VERSION},"terms":[{{"canonical":"我加的词","aliases":["abc"]}}]}}"#
+        );
+        let mine = mine.as_str();
         std::fs::write(&p, mine).unwrap();
         let first = load(&d);
         assert_eq!(first.terms.len(), 1);
@@ -468,7 +608,11 @@ mod tests {
         assert_eq!(during_edit.terms[0].canonical, "我加的词");
 
         // 编辑完成，新内容生效
-        std::fs::write(&p, r#"{"version":1,"terms":[{"canonical":"新词","aliases":[]}]}"#).unwrap();
+        std::fs::write(
+            &p,
+            format!(r#"{{"version":{DEFAULT_VERSION},"terms":[{{"canonical":"新词","aliases":[]}}]}}"#),
+        )
+        .unwrap();
         assert_eq!(load(&d).terms[0].canonical, "新词", "改完下次录音就该生效");
 
         std::fs::remove_dir_all(&d).ok();
@@ -486,7 +630,10 @@ mod tests {
         let d = tmp();
         let p = path_in(&d);
 
-        let mine = r#"{"version":1,"terms":[{"canonical":"我加的词","aliases":[]}]}"#;
+        let mine = format!(
+            r#"{{"version":{DEFAULT_VERSION},"terms":[{{"canonical":"我加的词","aliases":[]}}]}}"#
+        );
+        let mine = mine.as_str();
         std::fs::write(&p, mine).unwrap();
         assert_eq!(load(&d).terms[0].canonical, "我加的词");
 
@@ -510,7 +657,11 @@ mod tests {
         let d = tmp();
         let p = path_in(&d);
         // 先建立一个 last-good
-        std::fs::write(&p, r#"{"version":1,"terms":[{"canonical":"好词","aliases":[]}]}"#).unwrap();
+        std::fs::write(
+            &p,
+            format!(r#"{{"version":{DEFAULT_VERSION},"terms":[{{"canonical":"好词","aliases":[]}}]}}"#),
+        )
+        .unwrap();
         assert_eq!(load(&d).terms[0].canonical, "好词");
 
         // 误编辑成超大文件
