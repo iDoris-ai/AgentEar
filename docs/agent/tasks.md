@@ -1,0 +1,156 @@
+# AgentEar 任务台账 — Task
+
+> 前置：[`roadmap.md`](roadmap.md)（M→F）·[`architecture.md`](architecture.md)（边界）·[`spec.md`](spec.md)（数据模型）
+> 每个 Task 自包含，可独立开发与验收。**验收标准必须可机器验证**。
+> 状态：BACKLOG · READY · IN_PROGRESS · BLOCKED · PR_OPEN · CHANGES_REQUESTED · APPROVED · DONE
+
+**本仓库的强制规矩（每个 task 都适用）**：
+- 不许直推 main。单主干仓库，PR 直接开向 main，合并要带 `--allow-trunk`。
+- 提 PR 前跑**一轮** codex 自我挑战并修完。**一轮即可，不要连刷多轮**——
+  jason 2026-09-02 明确要求过。
+- 改了 `scripts/*.sh` 必须跑 `scripts/lint-shell.sh`（bash 3.2 的全角字符坑）。
+- LLM 边车要在跑（`scripts/serve-llm.sh`），否则 F2.1/F2.2 的验收命令必失败。
+
+---
+
+## F2.1 — 项目术语表
+
+### T2.1.1 术语表数据结构与默认表  `READY`
+- **优先级**：high
+- **目标**：让纠错时有一份本项目固定词汇的清单可用，而不是每次从上下文猜。
+- **开发范围**：按 spec.md §1 实现 `~/.agentear/terms.json` 的读写：默认表内置、
+  首次启动写入、已存在不覆盖、解析失败退回默认表并记日志。把术语表拼进
+  `correct.rs` 的提示词。
+- **明确不做**：不做逐字符替换（会误伤用户真的在说 road 的情况）；不做菜单编辑界面。
+- **依赖**：无
+- **交付物**：`src/terms.rs`；`correct.rs` 注入术语表；默认表覆盖 M0 已知的全部错例。
+- **验收命令**：`cargo test terms` 全绿，且包含「文件损坏退回默认表」「已存在不覆盖」两条用例
+- **涉及文件**：`src/terms.rs`、`src/correct.rs`、`src/main.rs`
+- **风险/回滚**：术语表进提示词会增加 token 数、拉长纠错耗时。若实测超过 15 秒需在 PR 里说明并给出取舍。
+
+### T2.1.2 长文回归：ro 必须还原成 raw 而不是 repo  `READY`
+- **优先级**：high
+- **目标**：把 `docs/benchmarks-m2.md` §8.1 那次真实失败钉成回归测试，防止复发。
+- **开发范围**：用 `spike/audio/sample02.wav` 的转写文本做长文用例，断言纠错后
+  `raw` 出现且 `repo` 不出现；同时断言其余已知正确的纠正没有退化
+  （MacBook / knowledge base / 24 小时 / Mac mini / WiFi）。
+- **明确不做**：不重新跑 ASR（用已有转写文本当输入，测的是纠错层不是 ASR）。
+- **依赖**：T2.1.1
+- **交付物**：`src/correct.rs` 的长文回归测试；`docs/benchmarks-m2.md` §8.1 补上「已修复」的实测结果。
+- **验收命令**：`cargo test correct` 全绿；`./target/release/agentear --transcribe spike/audio/sample02.wav` 的输出里出现 `raw 的目录`
+- **涉及文件**：`src/correct.rs`、`docs/benchmarks-m2.md`
+
+### T2.1.3 术语表可由用户扩展  `READY`
+- **优先级**：mid
+- **目标**：jason 能自己加词，不用改代码不用重新编译。
+- **开发范围**：菜单加一项「打开术语表」（用 `open` 调系统编辑器）；
+  每次纠错时读文件（不缓存到进程生命周期，改完下次录音即生效）；
+  文件读失败时退回上一次成功加载的表。i18n 三语文案。
+- **明确不做**：不做图形化编辑器；不做热重载监听（每次读文件足够，几 KB）。
+- **依赖**：T2.1.1
+- **交付物**：菜单项 + 三语文案 + 读取策略
+- **验收命令**：`cargo test i18n` 全绿（新 Key 的三语覆盖由现有测试强制）
+- **涉及文件**：`src/tray.rs`、`src/i18n.rs`、`src/terms.rs`
+
+---
+
+## F2.2 — 标签识别与路由
+
+### T2.2.1 重新定义 8 类标签边界并建评测集  `READY`
+- **优先级**：high
+- **目标**：把 M0 基准判错的两条从「模型不行」还原成「定义不清」，给出可判别的边界。
+- **开发范围**：按 spec.md §2 的判别依据，为 8 个类各写 2 条以上正例；
+  把 M0 那两条判错用例（开会讨论 / 帮我查日程）连同判定理由写进评测集；
+  扩充 `spike/m2_bench.py` 的标签用例到至少 16 条。**这一步不写产品代码。**
+- **明确不做**：不改 `src/`；不做 few-shot 注入（那是 T2.2.2）。
+- **依赖**：无（可与 F2.1 并行）
+- **交付物**：`docs/agent/label-taxonomy.md`（定义 + 判别依据 + 全部用例）；扩充后的评测脚本
+- **验收命令**：`~/.agentear/llm/venv/bin/python spike/m2_bench.py --url http://127.0.0.1:8793` 能跑完并给出扩充后的分数
+- **涉及文件**：`docs/agent/label-taxonomy.md`、`spike/m2_bench.py`
+- **风险**：Q1（开会讨论该判 note 还是 journal）是产品决策。按 spec.md 先做，**在文档里标为待 jason 确认，不当定论**。
+
+### T2.2.2 标签识别实现  `BACKLOG`
+- **优先级**：high
+- **目标**：转写之后拿到一个一级标签，失败时降级为 unknown 而不是中断。
+- **开发范围**：`src/label.rs`：调边车、few-shot 用 T2.2.1 的用例、只取最后一行非空
+  （同 correct.rs 的判据）、解析成封闭枚举、非法值落 unknown。
+- **明确不做**：不做二级标签抽取；不做路由落盘（T2.2.4）。
+- **依赖**：T2.2.1
+- **交付物**：`src/label.rs` + 单元测试（含「模型返回垃圾 → unknown」「边车不可达 → unknown」）
+- **验收命令**：`cargo test label` 全绿
+- **涉及文件**：`src/label.rs`、`src/main.rs`
+
+### T2.2.3 显式标记优先于模型推断  `BACKLOG`
+- **优先级**：high
+- **目标**：用户说「这是一个 idea」就必须按 idea 走，模型推断不得覆盖。这是架构边界 B5。
+- **开发范围**：中英文显式标记的识别规则（可被单元测试覆盖，**不靠模型判断**）；
+  识别到就直接定标签并标记 `label_source=explicit`，跳过模型调用。
+- **明确不做**：不做模糊匹配（「我觉得这算个想法吧」不算显式）。
+- **依赖**：T2.2.2
+- **交付物**：显式标记解析 + 测试（含中英文各 3 种表述、以及「不该被误判为显式」的反例）
+- **验收命令**：`cargo test explicit` 全绿
+- **涉及文件**：`src/label.rs`
+
+### T2.2.4 routes 落盘  `BACKLOG`
+- **优先级**：high
+- **目标**：每次转写产出一条 `routes/` 记录，只增不删，可重算。
+- **开发范围**：按 spec.md §3 的 JSON 结构落盘到 `routes/yyyy-mm/`；
+  写入走「先写临时文件再 rename」（同 store.rs 的既有做法）；
+  `delivery.state` 初始为 pending。
+- **明确不做**：不做实际投递（ADR-0003 的适配器，不在本轮）；不做重试队列。
+- **依赖**：T2.2.2
+- **交付物**：`src/store.rs` 的 routes 写入 + 测试（含「标签识别失败仍落盘且 label=unknown」）
+- **验收命令**：`cargo test routes` 全绿
+- **涉及文件**：`src/store.rs`、`src/main.rs`
+
+### T2.2.5 标签基准回归到至少 7/8  `BACKLOG`
+- **优先级**：mid
+- **目标**：证明重新定义边界 + few-shot 确实解决了 M0 那 6/8。
+- **开发范围**：在 T2.2.1 的扩充评测集上跑分，记录结果到 `docs/benchmarks-m2.md`；
+  **达不到 7/8 就分析原因**：是定义仍不清（回 T2.2.1）还是模型能力不足（记为待决问题）。
+- **明确不做**：不为了刷分而把用例改简单。
+- **依赖**：T2.2.2、T2.2.3
+- **交付物**：`docs/benchmarks-m2.md` 新增标签回归一节，含逐条结果与失败分析
+- **验收命令**：评测脚本跑出 ≥7/8；未达标时 progress.md 里有明确的待决问题记录
+- **涉及文件**：`docs/benchmarks-m2.md`、`spike/m2_bench.py`
+
+---
+
+## F3.1 — TTS 方言可行性摸底
+
+### T3.1.1 候选调研：闽南语与粤语的本地 TTS  `READY`
+- **优先级**：high
+- **目标**：回答「有没有」，不是「哪个好」。
+- **开发范围**：调研本地可跑的 TTS 方案，每个候选记录：支持哪些方言、
+  能不能纯本地跑（不依赖云）、运行时形态（是否又要背一个 Python 边车）、
+  模型体积、许可与再分发义务、有没有公开的质量证据。
+  **至少覆盖普通话、粤语、闽南语三档，泰语与英语一并记录。**
+- **明确不做**：不实际下载模型（那是 T3.1.2）；不做质量主观评价。
+- **依赖**：无（可与 M2 并行，一个改代码一个出文档）
+- **交付物**：`docs/tts-survey.md`，每个候选一行，三栏不许留空：本地可跑 / 许可 / 证据来源
+- **验收命令**：`test -s docs/tts-survey.md && grep -c '闽南\|台语\|Hokkien' docs/tts-survey.md`（至少命中 1 条）
+- **涉及文件**：`docs/tts-survey.md`
+
+### T3.1.2 实测最有希望的候选  `BACKLOG`
+- **优先级**：mid
+- **目标**：把「据说支持」变成「实际跑通/跑不通」。
+- **开发范围**：从 T3.1.1 选 1–2 个最有希望的，实际下载并合成一句测试语音；
+  记录冷启动、RTF、内存、产物是否可听。**跑不通也是结论**，照实记。
+- **明确不做**：不做多候选横比（那是选型，等 jason 拍板方向之后）。
+- **依赖**：T3.1.1
+- **交付物**：`docs/tts-survey.md` 补上实测数据；音频样本放 `spike/audio/tts/`（不入库）
+- **验收命令**：`docs/tts-survey.md` 里出现「实测」小节且含具体数字
+- **涉及文件**：`docs/tts-survey.md`
+
+### T3.1.3 出 ADR-0005 草稿  `BACKLOG`
+- **优先级**：mid
+- **目标**：给 jason 一份能据以拍板的材料，**不替他拍板**。
+- **开发范围**：按现有 ADR 格式写 `docs/decisions/0005-tts-selection.md`，
+  状态标「草稿，待拍板」；写清候选、证据、局限、以及**如果闽南语确实没有可用方案，
+  M3 的三条可能走向**（只做普通话 / 推迟 M3 / 其他），每条列出代价。
+- **明确不做**：**不选定方案**。这是产品决策，属于无人值守纪律里「不猜产品决策」那一条。
+- **依赖**：T3.1.2
+- **交付物**：`docs/decisions/0005-tts-selection.md`（草稿状态）；`docs/milestones.md` 的 M3 一节引用它
+- **验收命令**：`grep -q '草稿' docs/decisions/0005-tts-selection.md`
+- **涉及文件**：`docs/decisions/0005-tts-selection.md`、`docs/milestones.md`
+- **风险**：这个 task 完成后会产生一个 BLOCKED 项（Q2：M3 怎么走），带着问题清单停下来问，符合无人值守纪律。
