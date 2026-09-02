@@ -38,7 +38,7 @@ BUILD="${TMPDIR:-/tmp}/agentear-whisper-static"
 
 die() { echo "!! $*" >&2; exit 1; }
 
-[ -f "$WCPP/CMakeLists.txt" ] || die "找不到 whisper.cpp：$WCPP（设 WHISPER_CPP）"
+[ -f "$WCPP/CMakeLists.txt" ] || die "找不到 whisper.cpp：${WCPP}（设 WHISPER_CPP）"
 command -v cmake >/dev/null || die "缺少 cmake"
 
 echo "==> whisper.cpp commit $(cd "$WCPP" && git rev-parse --short HEAD)"
@@ -47,7 +47,7 @@ echo "==> whisper.cpp commit $(cd "$WCPP" && git rev-parse --short HEAD)"
 EXPECT_COMMIT="7de8dd78"
 GOT_COMMIT="$(cd "$WCPP" && git rev-parse --short=8 HEAD)"
 [ "$GOT_COMMIT" = "$EXPECT_COMMIT" ] || \
-  echo "!! 警告：当前是 $GOT_COMMIT，ADR-0004 的数据测的是 $EXPECT_COMMIT" >&2
+  echo "!! 警告：当前是 ${GOT_COMMIT}，ADR-0004 的数据测的是 $EXPECT_COMMIT" >&2
 
 cmake -S "$WCPP" -B "$BUILD" \
   -DCMAKE_BUILD_TYPE=Release \

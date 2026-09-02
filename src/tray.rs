@@ -94,6 +94,7 @@ const TAG_TRIGGER_BASE: isize = 100;
 const TAG_RETENTION_BASE: isize = 200;
 const TAG_UI_LANG_BASE: isize = 300;
 const TAG_ASR_LANG_BASE: isize = 400;
+const TAG_CORRECT_TERMS: isize = 5;
 /// `+0` 是「系统默认」，`+1..` 对应 `DEVICE_SNAPSHOT` 的下标。
 const TAG_DEVICE_BASE: isize = 1000;
 
@@ -360,6 +361,26 @@ fn populate(menu: &NSMenu, mtm: MainThreadMarker, target: &MenuTarget) {
         cfg.auto_paste,
     ));
 
+    // —— 术语纠错 ——
+    //
+    // 边车没起时**照样可点**，只是文案改成「服务未启动」。
+    // 置灰的话用户没法预先打开它（先勾上、再去起服务是合理顺序），
+    // 而且置灰不解释原因比什么都不做更让人困惑。
+    menu.addItem(&item(
+        mtm,
+        target,
+        i18n::t(
+            lang,
+            if crate::correct::service_reachable() {
+                Key::CorrectTerms
+            } else {
+                Key::CorrectTermsOffline
+            },
+        ),
+        TAG_CORRECT_TERMS,
+        cfg.correct_terms,
+    ));
+
     // —— 保留期 ——
     let ret_item = item(mtm, target, i18n::t(lang, Key::RetentionSection), -1, false);
     ret_item.setEnabled(true);
@@ -409,6 +430,14 @@ fn handle(tag: isize, mtm: MainThreadMarker) {
             config::update(|c| c.auto_paste = on);
             crate::paste::set_enabled(on && crate::hotkey::is_accessibility_trusted());
             log::info!("自动上屏：{}", if on { "开" } else { "关" });
+        }
+        TAG_CORRECT_TERMS => {
+            let on = !config::get().correct_terms;
+            config::update(|c| c.correct_terms = on);
+            log::info!("技术术语纠错：{}", if on { "开（下次录音生效）" } else { "关" });
+            if on && !crate::correct::service_reachable() {
+                log::warn!("  ⚠️ 纠错服务没在跑，先跑 scripts/serve-llm.sh，否则每次录音会白等一次超时");
+            }
         }
         TAG_OPEN_DATA => open_path(DATA_ROOT.get().cloned()),
         TAG_OPEN_LOG => open_path(DATA_ROOT.get().map(|r| r.join("agentear.log"))),

@@ -9,6 +9,7 @@ mod asr;
 mod download;
 mod audio;
 mod config;
+mod correct;
 mod hotkey;
 mod i18n;
 mod paste;
@@ -105,6 +106,23 @@ fn main() -> Result<()> {
         };
         let t0 = Instant::now();
         let t = asr.transcribe(std::path::Path::new(&args[2]), lang)?;
+        // 离线转写也走一遍纠错，否则「开了纠错但效果不对」这类问题
+        // 只能靠反复录音来复现。配置关着就跳过，行为和守护进程一致。
+        if cfg.correct_terms && !t.text.is_empty() {
+            let url = cfg.llm_url.as_deref().unwrap_or(correct::DEFAULT_URL);
+            if let Some(fixed) = correct::Corrector::new(url).correct(&t.text) {
+                if fixed != t.text {
+                    println!("{fixed}");
+                    eprintln!("（纠错前：{}）", t.text);
+                    eprintln!(
+                        "（语种 {}，耗时 {:.2}s）",
+                        t.lang.as_deref().unwrap_or("?"),
+                        t0.elapsed().as_secs_f32()
+                    );
+                    return Ok(());
+                }
+            }
+        }
         println!("{}", t.text);
         eprintln!(
             "（语种 {}，耗时 {:.2}s）",
@@ -388,13 +406,45 @@ fn finish(state: State, store: &store::Store, asr: &asr::Asr) -> Result<State> {
                 t_asr.elapsed().as_secs_f32(),
                 t.lang.as_deref().unwrap_or("?")
             );
-            let text = paste::sanitize(&t.text);
+            let raw_text = paste::sanitize(&t.text);
+
+            // 术语纠错。**默认关**，开了也只是尽力而为：
+            // 边车没起、超时、返回垃圾，一律退回原文继续上屏——
+            // 用户宁可拿到一句有错别字的话，也不想按完键什么都没有。
+            let cfg = config::get();
+            let (text, corrected) = if cfg.correct_terms {
+                let t_fix = Instant::now();
+                let url = cfg.llm_url.as_deref().unwrap_or(correct::DEFAULT_URL);
+                match correct::Corrector::new(url).correct(&raw_text) {
+                    Some(fixed) if fixed != raw_text => {
+                        log::info!("术语纠错 {:.1}s: {raw_text:?} → {fixed:?}",
+                                   t_fix.elapsed().as_secs_f32());
+                        (paste::sanitize(&fixed), true)
+                    }
+                    // 模型认为不用改，或者纠错不可用。两种都走原文，
+                    // 区别只在日志——对用户是同一件事。
+                    Some(_) => (raw_text.clone(), false),
+                    None => (raw_text.clone(), false),
+                }
+            } else {
+                (raw_text.clone(), false)
+            };
+
             println!("\n{text}\n");
             // 派生数据落盘。失败只记日志——raw 还在，随时可以重算，
             // 不值得为它中断上屏
             match store.write_transcript(&committed.content_hash, &text) {
                 Ok(p) => log::debug!("转写已存 {}", p.display()),
                 Err(e) => log::error!("写转写文件失败（不影响剪贴板与上屏）: {e:#}"),
+            }
+            // 纠错是**有损**的：模型可能改错、可能过度改写。真改了就把
+            // 改之前的也留一份，否则出问题时分不清是 ASR 错了还是 LLM 改坏了。
+            // 没改就不写——每次录音多一个内容相同的文件纯属噪音。
+            if corrected {
+                match store.write_raw_transcript(&committed.content_hash, &raw_text) {
+                    Ok(p) => log::debug!("纠错前的原始转写已存 {}", p.display()),
+                    Err(e) => log::error!("写原始转写失败: {e:#}"),
+                }
             }
             // 先进剪贴板再谈上屏。上屏失败还能手动 ⌘V，顺序反过来就没有退路了。
             match copy_to_clipboard(&text) {
@@ -552,6 +602,24 @@ fn diagnose(vendor: &std::path::Path) -> Result<()> {
         None => println!("  ⚪ 模型: 数据目录未初始化"),
     }
     println!("  当前识别语言: {:?}", config::get().asr_lang);
+
+    // 术语纠错也是**可选**链路：没起服务不是故障。
+    let cfg = config::get();
+    let url = cfg.llm_url.clone().unwrap_or_else(|| correct::DEFAULT_URL.into());
+    println!("\n技术术语纠错（可选，需要 LLM 边车）:");
+    println!("  开关: {}", if cfg.correct_terms { "✅ 开" } else { "⚪ 关" });
+    let reachable = correct::Corrector::new(&url).probe();
+    match &reachable {
+        Ok(()) => println!("  ✅ 服务: {url}"),
+        Err(e) => {
+            println!("  ⚪ 服务: {url} —— {e}");
+            println!("     启动：scripts/serve-llm.sh（首次需先跑 scripts/setup-llm.sh）");
+        }
+    }
+    if cfg.correct_terms && reachable.is_err() {
+        // 这个组合每次录音都会白等一次超时，值得单独喊一嗓子
+        println!("  ⚠️ 开关是开的但服务没起——每次录音会多等一次超时后才上屏");
+    }
 
     println!("\n数据目录: {}", data_root()?.display());
     Ok(())

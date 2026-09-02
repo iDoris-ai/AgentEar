@@ -168,7 +168,7 @@ for bin in "$APP/Contents/Resources/vendor/bin/"*; do
   BIN_ARCH="$(lipo -archs "$bin" 2>/dev/null || echo '?')"
   echo "    $(basename "$bin"): $BIN_ARCH"
   if [ "$BIN_ARCH" != "$APP_ARCH" ]; then
-    echo "!! $(basename "$bin") 架构是 $BIN_ARCH，与 app 的 $APP_ARCH 不一致，子进程会起不来" >&2
+    echo "!! $(basename "$bin") 架构是 ${BIN_ARCH}，与 app 的 $APP_ARCH 不一致，子进程会起不来" >&2
     exit 1
   fi
 done

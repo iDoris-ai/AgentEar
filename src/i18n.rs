@@ -67,6 +67,9 @@ pub enum Key {
     /// 菜单里挨着放，文案必须让人一眼分清哪个管显示、哪个管识别。
     AsrLangSection,
     AsrLangAuto,
+    /// 术语纠错开关。文案要说清**代价**——它让上屏从 0.3 秒变成 1–3 秒。
+    CorrectTerms,
+    CorrectTermsOffline,
     OpenDataDir,
     ViewLog,
     Quit,
@@ -128,6 +131,23 @@ pub fn t(lang: Lang, key: Key) -> &'static str {
             "Auto (ZH / EN / JA / KO / Cantonese)",
             "自动（中 / 英 / 日 / 韩 / 粤）",
             "อัตโนมัติ (จีน / อังกฤษ / ญี่ปุ่น / เกาหลี / กวางตุ้ง)",
+        ),
+        // 括号里那句是重点：用户得知道开了它要多等几秒，
+        // 否则会以为程序卡了。
+        // 不写死秒数：实测短句 1–3 秒，但两分半的录音要 10 秒
+        // （耗时随字数走，见 benchmarks-m2.md §8.2）。写「1–3 秒」
+        // 会让长录音的用户以为程序卡了。
+        K::CorrectTerms => pick(
+            lang,
+            "Fix technical terms (slower)",
+            "技术术语纠错（会变慢）",
+            "แก้คำศัพท์เทคนิค (ช้าลง)",
+        ),
+        K::CorrectTermsOffline => pick(
+            lang,
+            "Fix technical terms (service not running)",
+            "技术术语纠错（服务未启动）",
+            "แก้คำศัพท์เทคนิค (บริการยังไม่ทำงาน)",
         ),
         K::OpenDataDir => pick(lang, "Open Data Folder", "打开数据目录", "เปิดโฟลเดอร์ข้อมูล"),
         K::ViewLog => pick(lang, "View Log", "查看日志", "ดูบันทึก"),
@@ -216,7 +236,7 @@ fn fail_reason(lang: Lang, f: crate::download::Fail) -> &'static str {
 mod tests {
     use super::*;
 
-    const ALL_KEYS: [Key; 20] = [
+    const ALL_KEYS: [Key; 22] = [
         Key::StartRecording,
         Key::Transcribing,
         Key::TitleTranscribing,
@@ -234,6 +254,8 @@ mod tests {
         Key::LanguageSection,
         Key::AsrLangSection,
         Key::AsrLangAuto,
+        Key::CorrectTerms,
+        Key::CorrectTermsOffline,
         Key::OpenDataDir,
         Key::ViewLog,
         Key::Quit,

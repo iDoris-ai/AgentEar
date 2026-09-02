@@ -92,6 +92,21 @@ pub struct Config {
     /// 英语用户，界面要英文，识别要泰语。
     #[serde(deserialize_with = "lenient")]
     pub asr_lang: AsrLang,
+    /// 转写后是否送本地 LLM 纠正技术术语。
+    ///
+    /// **默认关。** 它需要一个额外的边车进程（`scripts/serve-llm.sh`），
+    /// 边车没起的时候开着它只会每次录音都白等一次超时。
+    /// 而且代价是实打实的：转写本身 0.26s，加上纠错，短句要 1–3 秒、
+    /// 两分半的录音实测 **10.3 秒**（耗时随字数走，`benchmarks-m2.md` §8.2）。
+    /// 值不值得由用户自己定。
+    #[serde(deserialize_with = "lenient")]
+    pub correct_terms: bool,
+    /// 纠错边车的地址。留空 = 用 `correct::DEFAULT_URL`。
+    ///
+    /// 之所以可配：8793 也可能被占（8791 就是这么丢的），
+    /// 而换端口不该要求用户重新编译。
+    #[serde(deserialize_with = "lenient")]
+    pub llm_url: Option<String>,
 }
 
 // 这两个字段的「默认」不是 `Default::default()`，坏值要退回文档里写的默认，
@@ -115,6 +130,8 @@ impl Default for Config {
             retention_days: default_retention_days(),
             ui_lang: Lang::default(),
             asr_lang: AsrLang::default(),
+            correct_terms: false,
+            llm_url: None,
         }
     }
 }
@@ -237,6 +254,7 @@ mod tests {
         assert_eq!(c.retention_days, 30);
         assert_eq!(c.ui_lang, Lang::En, "没有 ui_lang 字段时应取默认英文");
         assert_eq!(c.asr_lang, AsrLang::Auto, "没有 asr_lang 字段时应取默认 Auto");
+        assert!(!c.correct_terms, "术语纠错默认关——它要一个额外的边车进程");
     }
 
     #[test]

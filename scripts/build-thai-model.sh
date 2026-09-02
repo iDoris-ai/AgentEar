@@ -89,7 +89,7 @@ done
 [ -n "$HF_REV" ] || die "拿不到 $HF_REPO 的 revision（试过 ${ENDPOINTS[*]}）"
 case "$HF_REV" in
   "$HF_REV_PREFIX"*) echo "    revision $HF_REV ✅" ;;
-  *) die "HF HEAD 是 $HF_REV，与入库记录的 ${HF_REV_PREFIX}… 不符。
+  *) die "HF HEAD 是 ${HF_REV}，与入库记录的 ${HF_REV_PREFIX}… 不符。
 !! 上游更新了模型。要么钉住旧 revision，要么重跑 ADR-0004 §3/§4 的评测。" ;;
 esac
 
