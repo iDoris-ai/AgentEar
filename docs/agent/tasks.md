@@ -187,7 +187,7 @@
 这几条原本在 `followups.md` 里，但规模已经超出「批量小修」——
 按 pilot 的规矩提升为正式 task，单独走流程。
 
-### T2.3.1 把 HTTP 调用抽象成可注入 transport  `READY`
+### T2.3.1 把 HTTP 调用抽象成可注入 transport  `PR_OPEN`
 - **优先级**：high
 - **目标**：让 `correct` / `label` 的错误分支能被**确定性测试**覆盖。
 - **背景**：FU-4 + FU-11（codex 两次提到）。现在「垃圾 JSON / 缺字段 /

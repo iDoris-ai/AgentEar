@@ -21,9 +21,8 @@
 //! 「分类失败要有明确去处，而不是硬塞进某个标签」），
 //! 不是把错误伪装成结果。
 
-use anyhow::{bail, Context, Result};
+use anyhow::{bail, Result};
 use serde::{Deserialize, Serialize};
-use std::process::{Command, Stdio};
 
 /// 一级标签。**封闭集合**，不可扩展——二级标签才是开放的（ADR-0002 §3.2）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -313,11 +312,25 @@ pub fn detect_explicit(text: &str) -> Option<Label> {
 
 pub struct Classifier {
     url: String,
+    transport: Box<dyn crate::sidecar::Transport>,
+    /// 跳过边车身份探测。**只在测试里置 true**——注入假传输层时
+    /// 没有真实的 `/v1/models` 可探，而探测失败会让分类直接落 unknown，
+    /// 于是所有测试都测不到真正的分支。
+    skip_probe: bool,
 }
 
 impl Classifier {
     pub fn new(url: impl Into<String>) -> Self {
-        Self { url: url.into() }
+        Self {
+            url: url.into(),
+            transport: Box::new(crate::sidecar::Curl),
+            skip_probe: false,
+        }
+    }
+
+    #[cfg(test)]
+    fn with_transport(url: impl Into<String>, t: Box<dyn crate::sidecar::Transport>) -> Self {
+        Self { url: url.into(), transport: t, skip_probe: true }
     }
 
     /// 给一段文字分类。**不返回 Result**——见模块文档：
@@ -351,7 +364,7 @@ impl Classifier {
         //
         // 复用 correct 的探测：它带 3 秒缓存，而分类和纠错连的是同一个边车，
         // 各做一份只会让缓存失效得更频繁。
-        if !crate::correct::service_reachable() {
+        if !self.skip_probe && !crate::correct::service_reachable() {
             bail!("边车不可达或对端不是 mlx-dspark");
         }
         let names: Vec<&str> = Label::ALL.iter().map(|l| l.as_str()).collect();
@@ -369,21 +382,8 @@ impl Classifier {
         })
         .to_string();
 
-        let out = curl_post(&self.url, &body)?;
-        let v: serde_json::Value = serde_json::from_str(&out)
-            .with_context(|| format!("解析响应失败: {}", out.chars().take(200).collect::<String>()))?;
-
-        // 和 correct.rs 一样检查结束原因。这里截断的后果不同但一样坏：
-        // `max_tokens=16` 被打满通常意味着模型在解释而不是给类名，
-        // 那种输出解析出来多半是 unknown，但也可能碰巧命中一个类名。
-        let finish = v["choices"][0]["finish_reason"].as_str().unwrap_or("");
-        if finish != "stop" {
-            bail!("响应未正常结束（finish_reason={finish:?}）");
-        }
-
-        let content = v["choices"][0]["message"]["content"]
-            .as_str()
-            .context("响应里没有 content")?;
+        let out = self.transport.post_json(&self.url, &body, TIMEOUT_SECS)?;
+        let content = crate::sidecar::extract_content(&out)?;
 
         // 只取最后一行非空——和 correct.rs 同一个判据。
         // Ornith 会先吐推理过程，服务端 --no-thinking 关了它，这里是第二道。
@@ -395,54 +395,6 @@ impl Classifier {
             .trim();
         Ok(Label::parse(line))
     }
-}
-
-fn curl_post(url: &str, body: &str) -> Result<String> {
-    use std::io::Write;
-    let mut child = Command::new("/usr/bin/curl")
-        // `-f`：4xx/5xx 直接以非零退出，而不是把错误页当正文交给我们。
-        // 少了它，一个 HTTP 500 只要响应体形状恰好合法（比如错误信息里
-        // 带着 choices 结构）就会被当成分类结果——那种降级失败是静默的。
-        .arg("-fsS")
-        .arg("--max-time")
-        .arg(TIMEOUT_SECS.to_string())
-        .arg("-X")
-        .arg("POST")
-        .arg("-H")
-        .arg("Content-Type: application/json")
-        .arg("--data-binary")
-        .arg("@-")
-        .arg(format!("{url}/v1/chat/completions"))
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .context("启动 curl 失败")?;
-    // 写请求体失败时**也要把子进程收掉**。直接 `?` 返回的话 `Child` 被
-    // drop 而没有 wait，留下僵尸进程——守护进程一开就是几周，
-    // 每次录音漏一个，积少成多。
-    let write_result = (|| -> Result<()> {
-        child
-            .stdin
-            .take()
-            .context("拿不到 curl 的 stdin")?
-            .write_all(body.as_bytes())
-            .context("写请求体失败")
-    })();
-    if let Err(e) = write_result {
-        let _ = child.kill();
-        let _ = child.wait();
-        return Err(e);
-    }
-    let out = child.wait_with_output().context("等待 curl 失败")?;
-    if !out.status.success() {
-        bail!(
-            "curl 退出码 {:?}: {}",
-            out.status.code(),
-            String::from_utf8_lossy(&out.stderr).trim()
-        );
-    }
-    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
 #[cfg(test)]
@@ -551,6 +503,75 @@ mod tests {
     #[test]
     fn default_is_unknown() {
         assert_eq!(Label::default(), Label::Unknown);
+    }
+
+    // —— 用假传输层覆盖错误分支（T2.3.1）——
+
+    use crate::sidecar::test_support::Fake;
+
+    /// 传输层失败 → unknown，不 panic 不外抛。
+    #[test]
+    fn transport_failure_yields_unknown() {
+        let c = Classifier::with_transport(
+            "http://fake",
+            Box::new(Fake::sequence(vec![Err("HTTP 500".into())])),
+        );
+        assert_eq!(c.classify("随便一句话").label, Label::Unknown);
+    }
+
+    /// 垃圾 JSON / 缺字段 / 空 content → unknown。
+    #[test]
+    fn malformed_responses_yield_unknown() {
+        for raw in [
+            "这不是 JSON",
+            "{}",
+            r#"{"choices":[{"finish_reason":"stop","message":{"content":""}}]}"#,
+        ] {
+            let c = Classifier::with_transport("http://fake", Box::new(Fake::always(raw)));
+            assert_eq!(c.classify("随便一句话").label, Label::Unknown, "raw={raw}");
+        }
+    }
+
+    /// **截断的响应 → unknown。**
+    ///
+    /// `max_tokens=16` 被打满通常意味着模型在解释而不是给类名，
+    /// 那种输出**可能碰巧含一个合法类名**——不检查 finish_reason 就会采信它。
+    #[test]
+    fn truncated_response_yields_unknown_even_if_it_contains_a_label() {
+        let raw = serde_json::json!({
+            "choices": [{ "finish_reason": "length", "message": { "content": "task" } }]
+        })
+        .to_string();
+        let c = Classifier::with_transport("http://fake", Box::new(Fake::always(&raw)));
+        assert_eq!(
+            c.classify("明天把基准跑完").label,
+            Label::Unknown,
+            "被截断的响应即使内容恰好是合法类名也不能采信"
+        );
+    }
+
+    /// 正常响应按类名解析。
+    #[test]
+    fn normal_response_parses_the_label() {
+        let c = Classifier::with_transport(
+            "http://fake",
+            Box::new(Fake::always(&Fake::ok_body("task"))),
+        );
+        let r = c.classify("明天把基准跑完");
+        assert_eq!(r.label, Label::Task);
+        assert_eq!(r.source, Source::Model);
+    }
+
+    /// **显式标记不发请求**——连传输层都不该被调用。
+    #[test]
+    fn explicit_marker_never_touches_the_transport() {
+        let fake = Fake::always(&Fake::ok_body("note"));
+        // 用 Arc 共享以便事后查调用次数
+        let c = Classifier::with_transport("http://fake", Box::new(Fake::always(&Fake::ok_body("note"))));
+        let r = c.classify("这是一个 idea，给录音笔加 WiFi");
+        assert_eq!(r.label, Label::Idea, "显式标记应该直接采信");
+        assert_eq!(r.source, Source::Explicit);
+        assert_eq!(fake.call_count(), 0, "显式标记时不该发任何请求");
     }
 
     /// 真调边车，跑 label-taxonomy.md 的全部 18 条用例。

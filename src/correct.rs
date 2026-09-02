@@ -28,7 +28,6 @@
 //! 单次推理本身要 1–3 秒，起个进程那几毫秒可以忽略。
 
 use anyhow::{bail, Context, Result};
-use std::io::Write;
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
@@ -126,6 +125,9 @@ pub fn service_reachable() -> bool {
 
 pub struct Corrector {
     url: String,
+    /// 传输层。生产是 curl，测试塞假的——
+    /// 见 `sidecar` 模块文档：那些静默出错的分支只有这样才测得到。
+    transport: Box<dyn crate::sidecar::Transport>,
     /// 渲染好的术语清单。
     ///
     /// **每次纠错前重新加载**（见 `main` 的调用点），不缓存到进程生命周期——
@@ -136,12 +138,30 @@ pub struct Corrector {
 
 impl Corrector {
     pub fn new(url: impl Into<String>) -> Self {
-        Self { url: url.into(), terms_block: String::new() }
+        Self {
+            url: url.into(),
+            transport: Box::new(crate::sidecar::Curl),
+            terms_block: String::new(),
+        }
     }
 
     /// 带术语表构造。没有术语表时（探测、测试）用 `new`。
     pub fn with_terms(url: impl Into<String>, terms: &crate::terms::Terms) -> Self {
-        Self { url: url.into(), terms_block: terms.to_prompt_block() }
+        Self {
+            url: url.into(),
+            transport: Box::new(crate::sidecar::Curl),
+            terms_block: terms.to_prompt_block(),
+        }
+    }
+
+    /// 注入传输层。**只在测试里用**——生产永远是 curl。
+    #[cfg(test)]
+    fn with_transport(
+        url: impl Into<String>,
+        terms: &crate::terms::Terms,
+        t: Box<dyn crate::sidecar::Transport>,
+    ) -> Self {
+        Self { url: url.into(), transport: t, terms_block: terms.to_prompt_block() }
     }
 
     /// 确认对端**确实是我们的模型服务**。
@@ -155,7 +175,7 @@ impl Corrector {
     ///
     /// 判据取 mlx-dspark 的两个特征字段，不是随便找个 200 就算数。
     pub fn probe(&self) -> Result<()> {
-        let out = curl(&[&format!("{}/v1/models", self.url)], None)?;
+        let out = curl_get(&format!("{}/v1/models", self.url))?;
         // 不做 JSON 解析：只要这两个标记同时出现就足够区分「是不是我们的服务」，
         // 而多引一层结构定义反而会因为上游改字段而脆。
         if !out.contains("mlx-dspark") {
@@ -312,34 +332,15 @@ impl Corrector {
         })
         .to_string();
 
-        let out = curl(
-            &[
-                "-X", "POST",
-                "-H", "Content-Type: application/json",
-                "--data-binary", "@-",
-                &format!("{}/v1/chat/completions", self.url),
-            ],
-            Some(&body),
-        )?;
-
-        let v: serde_json::Value = serde_json::from_str(&out)
-            .with_context(|| format!("解析响应失败: {}", out.chars().take(200).collect::<String>()))?;
-        // **必须检查结束原因。** `finish_reason: "length"` 表示输出被
-        // max_tokens 截断了——`content` 里是**半句话**，而它一样非空。
-        // 不检查的话，半句话会被当成纠错成功，自动上屏并写进 transcript，
-        // 覆盖掉本来完整的原文。宁可不纠错，也不能上屏半句。
-        let finish = v["choices"][0]["finish_reason"].as_str().unwrap_or("");
-        if finish != "stop" {
-            bail!("响应未正常结束（finish_reason={finish:?}），按原文处理");
-        }
-        let content = v["choices"][0]["message"]["content"]
-            .as_str()
-            .context("响应里没有 choices[0].message.content")?;
+        let out = self
+            .transport
+            .post_json(&self.url, &body, TIMEOUT.as_secs())?;
+        let content = crate::sidecar::extract_content(&out)?;
 
         let fixed = if single_line_only {
-            tidy(content)
+            tidy(&content)
         } else {
-            tidy_keep_lines(content)
+            tidy_keep_lines(&content)
         };
         if fixed.is_empty() {
             bail!("模型返回空");
@@ -458,31 +459,20 @@ fn tidy(s: &str) -> String {
 }
 
 /// 跑一次 curl，返回 stdout。
-fn curl(args: &[&str], stdin_body: Option<&str>) -> Result<String> {
-    let mut cmd = Command::new("/usr/bin/curl");
-    cmd.arg("-sS")
+/// 一次 GET。**只给 `probe` 用**——POST 走 `sidecar::Transport`。
+///
+/// 身份探测没有走 transport 抽象：它不参与那些需要确定性测试的失败分支，
+/// 而多抽一层 GET 只为一个调用点不划算。
+fn curl_get(url: &str) -> Result<String> {
+    let out = Command::new("/usr/bin/curl")
+        .arg("-fsS")
         .arg("--max-time")
         .arg(TIMEOUT.as_secs().to_string())
-        .args(args)
+        .arg(url)
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    if stdin_body.is_some() {
-        cmd.stdin(Stdio::piped());
-    }
-
-    let mut child = cmd.spawn().context("启动 curl 失败")?;
-    if let Some(b) = stdin_body {
-        // 请求体走 stdin（`--data-binary @-`），不进命令行参数：
-        // 转写内容可能很长，也可能包含引号和换行，塞进 argv 既有长度上限
-        // 又容易被 shell 语义咬到。
-        child
-            .stdin
-            .take()
-            .context("拿不到 curl 的 stdin")?
-            .write_all(b.as_bytes())
-            .context("写请求体失败")?;
-    }
-    let out = child.wait_with_output().context("等待 curl 失败")?;
+        .stderr(Stdio::piped())
+        .output()
+        .context("启动 curl 失败")?;
     if !out.status.success() {
         bail!(
             "curl 退出码 {:?}: {}",
@@ -733,6 +723,134 @@ mod tests {
         assert!(
             b as f64 > a as f64 * 0.8 && (b as f64) < a as f64 * 1.2,
             "长度变化过大（{a} → {b}），模型可能在润色或删减而不只是替换术语"
+        );
+    }
+
+    // —— 以下测试在抽出 `sidecar::Transport` 之前**根本写不出来** ——
+    //
+    // 它们覆盖的全是「静默出错」型分支：不崩，只把错的东西粘进用户的窗口。
+    // 靠真实边车测不到，因为你没法让它按需返回垃圾。
+
+    use crate::sidecar::test_support::Fake;
+
+    fn corrector_with(t: Fake) -> Corrector {
+        Corrector::with_transport("http://fake", &crate::terms::Terms::default(), Box::new(t))
+    }
+
+    /// 传输层失败（HTTP 500、连不上）→ `None`，用原文。
+    #[test]
+    fn transport_failure_yields_none() {
+        let c = corrector_with(Fake::sequence(vec![Err("HTTP 500".into())]));
+        assert_eq!(c.correct("把内容存到 ro 的目录"), None);
+    }
+
+    /// 响应是垃圾 JSON → `None`。
+    #[test]
+    fn garbage_response_yields_none() {
+        let c = corrector_with(Fake::always("这不是 JSON"));
+        assert_eq!(c.correct("把内容存到 ro 的目录"), None);
+    }
+
+    /// **被截断的输出 → `None`。**
+    ///
+    /// `finish_reason: "length"` 时 content 是半句话而且非空，
+    /// 不检查就会把半句话当成功结果自动上屏、覆盖掉完整的原文。
+    #[test]
+    fn truncated_output_yields_none_not_half_a_sentence() {
+        let raw = serde_json::json!({
+            "choices": [{ "finish_reason": "length", "message": { "content": "把内容存到 raw 的目" } }]
+        })
+        .to_string();
+        let c = corrector_with(Fake::always(&raw));
+        assert_eq!(c.correct("把内容存到 ro 的目录里面"), None);
+    }
+
+    /// 正常响应 → 用模型的结果。
+    #[test]
+    fn normal_response_is_used() {
+        let c = corrector_with(Fake::always(&Fake::ok_body("把内容存到 raw 的目录")));
+        assert_eq!(c.correct("把内容存到 ro 的目录").as_deref(), Some("把内容存到 raw 的目录"));
+    }
+
+    /// **长文分批：全部成功时，拼回来的内容和批数要对得上。**
+    #[test]
+    fn batched_success_concatenates_every_batch() {
+        let long = "第一段内容在这里。".repeat(30); // 超过 SPLIT_THRESHOLD
+        let batches = split_into_batches(&long, Corrector::BATCH_CHARS).len();
+        assert!(batches > 1, "这条测试需要真的分批");
+
+        // 每批都原样回显
+        let c = corrector_with(Fake::sequence(
+            (0..batches).map(|i| Ok(Fake::ok_body(&format!("[{i}]")))).collect(),
+        ));
+        let out = c.correct(&long).expect("全部成功应该有结果");
+        for i in 0..batches {
+            assert!(out.contains(&format!("[{i}]")), "第 {i} 批的结果丢了");
+        }
+    }
+
+    /// **中间某一批失败 → 整体回退原文，不返回混合结果。**
+    ///
+    /// 这是 codex 那轮的 High 3：部分成功的文本读起来完全正常，
+    /// 用户没有任何线索知道该怀疑哪一段。「要么全纠、要么不动」才是可预测的。
+    #[test]
+    fn one_failed_batch_falls_back_to_the_whole_original() {
+        let long = "第一段内容在这里。".repeat(30);
+        let batches = split_into_batches(&long, Corrector::BATCH_CHARS).len();
+        assert!(batches >= 3, "需要至少三批才能测「中间那批」");
+
+        // 第一批成功，第二批连失败两次（原始 + 重试），后面不该再被调用
+        let mut seq: Vec<Result<String, String>> = vec![Ok(Fake::ok_body("[0]"))];
+        seq.push(Err("timeout".into()));
+        seq.push(Err("timeout again".into()));
+        seq.extend((0..batches).map(|_| Ok(Fake::ok_body("不该用到"))));
+
+        let c = corrector_with(Fake::sequence(seq));
+        assert_eq!(c.correct(&long), None, "一批失败就该整体回退");
+    }
+
+    /// 失败批会**重试一次**——本地边车的失败多半是瞬时的。
+    #[test]
+    fn a_failed_batch_is_retried_once() {
+        let long = "第一段内容在这里。".repeat(30);
+        let batches = split_into_batches(&long, Corrector::BATCH_CHARS).len();
+
+        // 第一批：先失败一次，重试成功；其余全成功
+        let mut seq: Vec<Result<String, String>> =
+            vec![Err("瞬时失败".into()), Ok(Fake::ok_body("[retried]"))];
+        seq.extend((1..batches).map(|i| Ok(Fake::ok_body(&format!("[{i}]")))));
+
+        let c = corrector_with(Fake::sequence(seq));
+        let out = c.correct(&long).expect("重试成功后应该有结果");
+        assert!(out.contains("[retried]"), "重试的结果没被用上");
+    }
+
+    /// **批边界的空白必须原样保住。**
+    ///
+    /// 模型输出总要 trim（它爱加前后空行），而批边界可能正落在一个空格上。
+    /// 英文在 `". "` 处切分时，trim 掉就拼成 `sentence.Next`。
+    #[test]
+    fn whitespace_at_batch_boundaries_survives() {
+        // 造一段会在 ". " 处切开的英文
+        let long = "This is one sentence. ".repeat(40);
+        let batches = split_into_batches(&long, Corrector::BATCH_CHARS);
+        assert!(batches.len() > 1);
+        assert!(
+            batches.iter().any(|b| b.ends_with(' ')),
+            "这条测试需要有批次以空格结尾，否则测不到边界"
+        );
+
+        // 每批回显自己的正文（trim 过的）——模拟模型的真实行为
+        let bodies: Vec<Result<String, String>> = batches
+            .iter()
+            .map(|b| Ok(Fake::ok_body(b.trim())))
+            .collect();
+        let c = corrector_with(Fake::sequence(bodies));
+        let out = c.correct(&long).expect("应该成功");
+
+        assert!(
+            !out.contains("sentence.This"),
+            "批边界的空格被吃掉了，拼成了 `sentence.This`：\n{out}"
         );
     }
 }

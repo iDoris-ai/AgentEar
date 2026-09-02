@@ -15,6 +15,7 @@ mod i18n;
 mod label;
 mod paste;
 mod route;
+mod sidecar;
 mod store;
 mod terms;
 mod tray;
