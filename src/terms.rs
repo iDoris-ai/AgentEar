@@ -26,6 +26,7 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Term {
@@ -172,37 +173,117 @@ fn sanitize(mut t: Terms) -> Terms {
     t
 }
 
+/// 上一次**成功加载并清洗过**的术语表。
+///
+/// ## 为什么需要它
+///
+/// 用户编辑术语表时，很多编辑器是「截断原文件 → 写入新内容」两步走。
+/// 那两步之间文件是空的或半截的。如果这时候正好有一次录音要纠错，
+/// `load` 会解析失败、退回**内置默认表**——用户自己加的词在那一刻全部失效，
+/// 而他完全不知道发生了什么（下一次就又好了）。
+///
+/// 退回**上一次成功的表**才是对的：它是用户最近一次有效的意图。
+/// 只有从来没成功加载过（首次启动且文件就是坏的）才用内置默认表。
+///
+/// codex 在 T2.1.1 的评审里确认了这个缺口（Medium 5），当时归给这个 task。
+static LAST_GOOD: Mutex<Option<Terms>> = Mutex::new(None);
+
 /// 加载术语表。
 ///
-/// 三条容错，都和 `config.rs` 的策略一致——**术语表坏了不能让守护进程
-/// 起不来，更不能让纠错整个失效**：
+/// 容错策略——**术语表坏了不能让守护进程起不来，更不能让纠错整个失效**：
 ///
-/// - 文件不存在 → 写入默认表并返回它（首次启动）
-/// - 解析失败 → 返回默认表并记日志，**不覆盖用户的文件**
-///   （他可能只是写错了一个逗号，覆盖等于把他的编辑成果删了）
-/// - 写入失败 → 仍然返回默认表，只记日志
+/// | 情况 | 返回 |
+/// |---|---|
+/// | 读到且解析成功 | 该表，并更新 last-good |
+/// | 解析失败（编辑到一半） | **last-good**，没有才用内置默认表 |
+/// | 文件不存在**且有 last-good** | **last-good**（文件被临时移走了，不是首次启动） |
+/// | 文件不存在且无 last-good | 写入并返回内置默认表（真·首次启动） |
+///
+/// **`NotFound` 不等于首次启动**，这是 codex 抓到的一条：编辑器和同步工具
+/// 都会短暂移走文件，那一瞬把 last-good 覆盖成默认表，用户自己加的词
+/// 就在那次录音里静默失效了。
+///
+/// 解析失败时**不覆盖用户的文件**（他可能只是写错了一个逗号）。
+///
+/// 全程持 `LOAD_LOCK`：读取、解析、发布必须是一个整体，否则一个读得慢的
+/// 旧内容会在新内容发布之后倒灌回缓存（codex Medium 2）。
 pub fn load(data_root: &Path) -> Terms {
+    static LOAD_LOCK: Mutex<()> = Mutex::new(());
+    let _serial = LOAD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let path = path_in(data_root);
+
+    // 读之前先看大小。术语表正常几 KB；误编辑成几百 MB（粘错了东西、
+    // 被别的工具写崩）时，`read_to_string` 会把它整个吃进内存，
+    // 而这个函数**在主线程也会被调用**（菜单点击）——那就是界面冻结。
+    const MAX_FILE: u64 = 1 << 20; // 1 MiB，比 MAX_TERMS × MAX_TERM_LEN 宽裕得多
+    if let Ok(m) = std::fs::symlink_metadata(&path) {
+        if m.is_file() && m.len() > MAX_FILE {
+            log::error!(
+                "terms.json 有 {} 字节，超过 {MAX_FILE} 上限，按上一次成功加载的表工作",
+                m.len()
+            );
+            return fallback();
+        }
+    }
+
     match std::fs::read_to_string(&path) {
         Ok(s) => match serde_json::from_str::<Terms>(&s) {
-            Ok(t) => sanitize(t),
+            Ok(t) => {
+                let clean = sanitize(t);
+                *LAST_GOOD.lock().unwrap_or_else(|e| e.into_inner()) = Some(clean.clone());
+                clean
+            }
             Err(e) => {
-                log::error!("terms.json 解析失败，改用默认术语表（不覆盖你的文件）: {e}");
-                Terms::default()
+                log::warn!("terms.json 解析失败（正在编辑？），改用上一次成功加载的表: {e}");
+                fallback()
             }
         },
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            // **文件不存在不等于首次启动。** 已经成功加载过的话，
+            // 多半是编辑器或同步工具正把文件挪开重写——此时退回 last-good，
+            // 绝不能把缓存覆盖成默认表。
+            if let Some(good) = LAST_GOOD.lock().unwrap_or_else(|e| e.into_inner()).clone() {
+                log::warn!("terms.json 暂时不见了（正在保存？），沿用上一次成功加载的表");
+                return good;
+            }
             let d = Terms::default();
             if let Err(e) = write_default(&path, &d) {
                 log::error!("写入默认术语表失败（仍按默认表工作）: {e:#}");
             }
+            *LAST_GOOD.lock().unwrap_or_else(|e| e.into_inner()) = Some(d.clone());
             d
         }
         Err(e) => {
-            log::error!("读取 terms.json 失败，改用默认术语表: {e}");
-            Terms::default()
+            log::warn!("读取 terms.json 失败，改用上一次成功加载的表: {e}");
+            fallback()
         }
     }
+}
+
+/// 读不成时用什么。**上一次成功的表优先于内置默认表**——
+/// 见 `LAST_GOOD` 的说明。
+fn fallback() -> Terms {
+    LAST_GOOD
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
+        .unwrap_or_else(|| {
+            log::warn!("还没有成功加载过术语表，用内置默认表");
+            Terms::default()
+        })
+}
+
+/// 仅供测试：清掉 last-good 缓存，并**串行化**所有会碰它的测试。
+///
+/// `LAST_GOOD` 是进程级的全局状态，而 Rust 测试默认并行跑——
+/// 不串行的话，一条测试的 `load` 会污染另一条的 last-good，
+/// 表现为随机失败（我第一次写就踩了）。
+#[cfg(test)]
+fn reset_last_good() -> std::sync::MutexGuard<'static, ()> {
+    static TEST_LOCK: Mutex<()> = Mutex::new(());
+    let g = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    *LAST_GOOD.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    g
 }
 
 /// 只在文件不存在时写。
@@ -325,6 +406,7 @@ mod tests {
     /// 首次启动写入默认表。
     #[test]
     fn first_run_writes_default_file() {
+        let _g = reset_last_good();
         let d = tmp();
         let p = path_in(&d);
         std::fs::remove_file(&p).ok();
@@ -342,6 +424,7 @@ mod tests {
     /// 只会觉得「怎么又不灵了」。
     #[test]
     fn existing_file_is_never_overwritten() {
+        let _g = reset_last_good();
         let d = tmp();
         let p = path_in(&d);
         let mine = r#"{"version":1,"terms":[{"canonical":"我自己加的词","aliases":["xyz"]}]}"#;
@@ -355,11 +438,106 @@ mod tests {
         std::fs::remove_dir_all(&d).ok();
     }
 
+    /// **编辑到一半时读到坏文件，退回的是「上一次成功的表」，不是内置默认表。**
+    ///
+    /// 这是这个 task 的核心。很多编辑器保存时是「截断原文件 → 写入新内容」
+    /// 两步走，那两步之间文件是空的或半截的。用户如果恰好在这时录音，
+    /// 退回内置默认表意味着**他自己加的词在那一瞬间全部失效**，
+    /// 而他完全不知道发生了什么（下一次就又好了，更难查）。
+    #[test]
+    fn corrupt_file_falls_back_to_last_good_not_builtin() {
+        let _g = reset_last_good();
+        let d = tmp();
+        let p = path_in(&d);
+
+        // 先成功加载一次用户自己的表
+        let mine = r#"{"version":1,"terms":[{"canonical":"我加的词","aliases":["abc"]}]}"#;
+        std::fs::write(&p, mine).unwrap();
+        let first = load(&d);
+        assert_eq!(first.terms.len(), 1);
+        assert_eq!(first.terms[0].canonical, "我加的词");
+
+        // 编辑器把文件截断了（保存的中间状态）
+        std::fs::write(&p, "").unwrap();
+        let during_edit = load(&d);
+        assert_eq!(
+            during_edit.terms.len(),
+            1,
+            "应该退回上一次成功的表，而不是内置默认表（默认表有二十多条）"
+        );
+        assert_eq!(during_edit.terms[0].canonical, "我加的词");
+
+        // 编辑完成，新内容生效
+        std::fs::write(&p, r#"{"version":1,"terms":[{"canonical":"新词","aliases":[]}]}"#).unwrap();
+        assert_eq!(load(&d).terms[0].canonical, "新词", "改完下次录音就该生效");
+
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    /// **文件被临时移走时，也要退回 last-good，而不是当成首次启动。**
+    ///
+    /// codex 抓到的 High：编辑器和同步工具都会短暂移走文件重写，
+    /// 原来的实现把所有 `NotFound` 当首次启动，返回默认表**并把
+    /// last-good 覆盖掉**——用户自己加的词在那次录音里静默失效，
+    /// 而且缓存被污染后，后续的解析失败也只能退回被污染的默认表。
+    #[test]
+    fn temporarily_missing_file_falls_back_to_last_good() {
+        let _g = reset_last_good();
+        let d = tmp();
+        let p = path_in(&d);
+
+        let mine = r#"{"version":1,"terms":[{"canonical":"我加的词","aliases":[]}]}"#;
+        std::fs::write(&p, mine).unwrap();
+        assert_eq!(load(&d).terms[0].canonical, "我加的词");
+
+        // 编辑器把文件挪开了（保存的中间状态）
+        std::fs::remove_file(&p).unwrap();
+        let during = load(&d);
+        assert_eq!(during.terms.len(), 1, "文件暂时消失时应该沿用 last-good");
+        assert_eq!(during.terms[0].canonical, "我加的词");
+
+        // **而且缓存不能被污染**：再来一次仍然是用户的表
+        let again = load(&d);
+        assert_eq!(again.terms[0].canonical, "我加的词", "last-good 被覆盖成默认表了");
+
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    /// 超大文件不读进内存——这个函数在主线程也会被调用。
+    #[test]
+    fn oversized_file_is_refused_without_reading() {
+        let _g = reset_last_good();
+        let d = tmp();
+        let p = path_in(&d);
+        // 先建立一个 last-good
+        std::fs::write(&p, r#"{"version":1,"terms":[{"canonical":"好词","aliases":[]}]}"#).unwrap();
+        assert_eq!(load(&d).terms[0].canonical, "好词");
+
+        // 误编辑成超大文件
+        std::fs::write(&p, "x".repeat((1 << 20) + 10)).unwrap();
+        let t = load(&d);
+        assert_eq!(t.terms[0].canonical, "好词", "超大文件应该被拒，退回 last-good");
+
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    /// 从来没成功加载过时（首次启动且文件就是坏的），才用内置默认表。
+    #[test]
+    fn builtin_is_used_only_when_nothing_ever_loaded() {
+        let _g = reset_last_good();
+        let d = tmp();
+        std::fs::write(path_in(&d), "{ 坏的").unwrap();
+        let t = load(&d);
+        assert!(t.terms.len() > 5, "没有 last-good 时应该用内置默认表");
+        std::fs::remove_dir_all(&d).ok();
+    }
+
     /// 文件损坏 → 退回默认表，**但不覆盖用户的文件**。
     ///
     /// 他可能只是漏了个逗号。覆盖等于替他把编辑成果删了。
     #[test]
     fn corrupt_file_falls_back_without_clobbering() {
+        let _g = reset_last_good();
         let d = tmp();
         let p = path_in(&d);
         let broken = "{ 这不是 JSON";

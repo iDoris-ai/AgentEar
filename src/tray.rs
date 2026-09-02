@@ -95,6 +95,7 @@ const TAG_RETENTION_BASE: isize = 200;
 const TAG_UI_LANG_BASE: isize = 300;
 const TAG_ASR_LANG_BASE: isize = 400;
 const TAG_CORRECT_TERMS: isize = 5;
+const TAG_OPEN_TERMS: isize = 6;
 /// `+0` 是「系统默认」，`+1..` 对应 `DEVICE_SNAPSHOT` 的下标。
 const TAG_DEVICE_BASE: isize = 1000;
 
@@ -404,6 +405,15 @@ fn populate(menu: &NSMenu, mtm: MainThreadMarker, target: &MenuTarget) {
     menu.addItem(&ret_item);
 
     menu.addItem(&NSMenuItem::separatorItem(mtm));
+    // 术语表编辑入口紧跟在纠错开关那一组之后——它们是同一件事的两半：
+    // 开关决定要不要纠，术语表决定纠什么。
+    menu.addItem(&item(
+        mtm,
+        target,
+        i18n::t(lang, Key::OpenTerms),
+        TAG_OPEN_TERMS,
+        false,
+    ));
     menu.addItem(&item(
         mtm,
         target,
@@ -437,6 +447,32 @@ fn handle(tag: isize, mtm: MainThreadMarker) {
             log::info!("技术术语纠错：{}", if on { "开（下次录音生效）" } else { "关" });
             if on && !crate::correct::service_reachable() {
                 log::warn!("  ⚠️ 纠错服务没在跑，先跑 scripts/serve-llm.sh，否则每次录音会白等一次超时");
+            }
+        }
+        TAG_OPEN_TERMS => {
+            let Some(root) = DATA_ROOT.get() else {
+                log::error!("数据目录未初始化");
+                return;
+            };
+            let path = crate::terms::path_in(root);
+            // **不在这里调完整的 `load`。**
+            //
+            // 这是 AppKit 主线程：`load` 会读整个文件、解析 JSON，
+            // 文件缺失时还要写盘并 fsync。慢磁盘或误编辑出的超大文件
+            // 会直接冻住菜单和整个界面。
+            //
+            // 启动时 `main` 已经确保过文件存在，所以常见路径只要一次 stat。
+            // 真不存在才补一次——那种情况本来就罕见。
+            if !path.exists() {
+                log::info!("术语表还不存在，先创建默认表");
+                let _ = crate::terms::load(root);
+            }
+            // 仍然不存在说明创建失败（目录只读、磁盘满……），
+            // 这时 `open` 一个不存在的路径只会弹一个看不懂的系统错误框。
+            if path.exists() {
+                open_path(Some(path));
+            } else {
+                log::error!("无法创建术语表 {}，不打开", path.display());
             }
         }
         TAG_OPEN_DATA => open_path(DATA_ROOT.get().cloned()),
