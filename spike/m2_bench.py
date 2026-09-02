@@ -11,6 +11,7 @@
 """
 
 import argparse
+import pathlib
 import json
 import re
 import subprocess
@@ -153,26 +154,38 @@ def bench_terms(url):
     return hit / len(TERM_CASES)
 
 
-def bench_tags(url):
-    print("\n=== 2. 标签分类 ===")
-    labels = " / ".join(LABELS)
+def bench_tags(url, binary):
+    """标签分类。
+
+    **走生产二进制的 `--classify`，不自带提示词和解析器。**
+
+    早先这里有一份自己的提示词和一个更宽松的解析器（删掉所有非 [a-z]
+    字符再匹配），结果基准报 18/18 而生产路径报 17/18——差异稳定复现，
+    排除了标签顺序、期望值、规则语义之后仍然查不出根因
+    （docs/benchmarks-m2.md §9）。
+
+    评测和产品共用同一段代码之后，这类疑问从根上就不会出现：
+    基准报的就是产品的行为。
+    """
+    print("\n=== 2. 标签分类（走生产路径 --classify）===")
+    if not binary:
+        print("  ⚠️ 找不到 agentear 二进制，跳过。先 cargo build --release")
+        return 0.0
     hit = 0
     got_all = []
     for text, want in TAG_CASES:
-        prompt = (
-            f"把下面这句话归入其中一类：{labels}\n\n"
-            f"{LABEL_RULES}\n"
-            f"只输出类名，不要解释。\n\n{text}"
-        )
-        out, _, _ = chat(url, [{"role": "user", "content": prompt}], max_tokens=16)
-        got = re.sub(r"[^a-z]", "", last_line(out).lower())
+        try:
+            got = subprocess.run(
+                [binary, "--classify", text],
+                capture_output=True, text=True, timeout=60,
+            ).stdout.strip()
+        except subprocess.TimeoutExpired:
+            got = "(超时)"
         got_all.append(got)
         ok = got == want
         hit += ok
         print(f"  {'✅' if ok else '❌'} {text[:26]:28s} 期望 {want:10s} 得到 {got}")
     print(f"  命中 {hit}/{len(TAG_CASES)} = {hit/len(TAG_CASES)*100:.0f}%")
-    # 按类汇总:总分掩盖了「哪一类不行」,而修法完全不同——
-    # 某一类全错通常是定义问题,零散错才是模型能力问题
     per = {}
     for (text, want), got in zip(TAG_CASES, got_all):
         d = per.setdefault(want, [0, 0])
@@ -204,7 +217,14 @@ def rss_of(pattern):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--url", default="http://127.0.0.1:8080")
+    ap.add_argument("--url", default="http://127.0.0.1:8793")
+    # 标签评测走这个二进制的 --classify。默认找仓库的 release 产物；
+    # 找不到就跳过标签那一节而不是退回自带实现——**宁可少一个数字,
+    # 也不要一个和产品对不上的数字**。
+    ap.add_argument(
+        "--binary",
+        default=str(pathlib.Path(__file__).resolve().parent.parent / "target/release/agentear"),
+    )
     args = ap.parse_args()
 
     try:
@@ -220,7 +240,8 @@ def main():
         print(f"mlx-dspark 常驻 RSS: {rss:.2f} GiB")
 
     t = bench_terms(args.url)
-    g = bench_tags(args.url)
+    binary = args.binary if pathlib.Path(args.binary).exists() else None
+    g = bench_tags(args.url, binary)
     bench_speed(args.url)
 
     print(f"\n=== 汇总 ===")
