@@ -122,6 +122,35 @@ impl Store {
         Ok(path)
     }
 
+    /// 写一条 `routes/` 记录。
+    ///
+    /// ## 这一层的定位
+    ///
+    /// `routes/` 是**下游决策的本地权威记录**（CLAUDE.md 的存储语义）。
+    /// 它可以从 `raw` + `derived` 重算，但在重算之前它就是那份记录——
+    /// 投递到知识库失败、下游服务挂了，都不影响这里已经落好的东西
+    /// （架构边界 B6：先落盘再投递）。
+    ///
+    /// ## 按月分目录
+    ///
+    /// `routes/2026-09/<hash>.json`。一天几十条、一年上万条，
+    /// 平铺在一个目录里会让 `ls` 和 Finder 都变慢，也不好按时间归档。
+    /// 用内容哈希做文件名（和 `raw/audio/`、`derived/transcripts/` 对齐），
+    /// 同一段音频重跑不会产生第二条记录——**幂等**。
+    ///
+    /// 写入走「临时文件 + rename」，和本模块其他写入一致：
+    /// 崩在写一半不会留下半截 JSON 让下次读取失败。
+    pub fn write_route(&self, record: &crate::route::Route) -> Result<PathBuf> {
+        let dir = self.root.join("routes").join(record.month());
+        fs::create_dir_all(&dir).with_context(|| format!("建 {} 失败", dir.display()))?;
+        let path = dir.join(format!("{}.json", record.content_hash));
+        let tmp = dir.join(format!(".{}.tmp", record.content_hash));
+        let json = serde_json::to_string_pretty(record).context("序列化 route 失败")?;
+        fs::write(&tmp, json).with_context(|| format!("写 {} 失败", tmp.display()))?;
+        fs::rename(&tmp, &path).context("rename route 文件失败")?;
+        Ok(path)
+    }
+
     /// 删除 `raw/audio/` 下超过 `days` 天未修改的音频，返回删除数量。
     /// `days == 0` 表示永不清理，直接返回。
     ///
@@ -461,5 +490,98 @@ mod tests {
         let n = 200;
         let set: std::collections::HashSet<_> = (0..n).map(|_| new_session_id()).collect();
         assert_eq!(set.len(), n, "session_id 必须唯一");
+    }
+
+    /// routes 记录按月分目录，文件名是内容哈希。
+    #[test]
+    fn route_lands_in_month_directory_named_by_hash() {
+        let d = tmpdir();
+        let s = Store::open(&d).unwrap();
+        let mut r = crate::route::Route::new(
+            "abc123",
+            crate::label::Label::Idea,
+            crate::label::Source::Explicit,
+            "给录音笔加 WiFi",
+        );
+        r.created_at = "2026-09-03T10:00:00+0700".into();
+
+        let p = s.write_route(&r).unwrap();
+        assert!(p.ends_with("routes/2026-09/abc123.json"), "路径不对: {}", p.display());
+
+        let back: crate::route::Route =
+            serde_json::from_str(&std::fs::read_to_string(&p).unwrap()).unwrap();
+        assert_eq!(back.label, crate::label::Label::Idea);
+        assert_eq!(back.text, "给录音笔加 WiFi");
+
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    /// **同一段音频重跑不产生第二条记录**——文件名是内容哈希，天然幂等。
+    ///
+    /// 这条要紧：转写失败重试、用户手动重跑 --transcribe，都不该在
+    /// routes 里堆出一串重复条目。
+    #[test]
+    fn rewriting_the_same_hash_is_idempotent() {
+        let d = tmpdir();
+        let s = Store::open(&d).unwrap();
+        let r = crate::route::Route::new(
+            "same",
+            crate::label::Label::Note,
+            crate::label::Source::Model,
+            "第一次",
+        );
+        let p1 = s.write_route(&r).unwrap();
+
+        let mut r2 = r.clone();
+        r2.text = "重跑后的文本".into();
+        let p2 = s.write_route(&r2).unwrap();
+
+        assert_eq!(p1, p2, "同一个 hash 应该覆盖同一个文件");
+        let dir = d.join("routes").join(r.month());
+        let n = std::fs::read_dir(&dir).unwrap().filter(|e| {
+            e.as_ref().is_ok_and(|e| e.path().extension().is_some_and(|x| x == "json"))
+        }).count();
+        assert_eq!(n, 1, "不该堆出重复记录");
+
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    /// **标签识别失败（unknown）也要落盘。**
+    ///
+    /// 判成 unknown 是一条有用的记录；缺一条记录才是真的丢东西——
+    /// 那段音频会在下游彻底消失。
+    #[test]
+    fn unknown_label_is_still_recorded() {
+        let d = tmpdir();
+        let s = Store::open(&d).unwrap();
+        let r = crate::route::Route::new(
+            "unk",
+            crate::label::Label::Unknown,
+            crate::label::Source::Model,
+            "嗯这个那个",
+        );
+        let p = s.write_route(&r).unwrap();
+        assert!(p.exists(), "unknown 也必须落盘");
+
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    /// 写入不留半截文件：临时文件用完即走。
+    #[test]
+    fn no_temp_file_is_left_behind() {
+        let d = tmpdir();
+        let s = Store::open(&d).unwrap();
+        let r = crate::route::Route::new("t", crate::label::Label::Task, crate::label::Source::Model, "x");
+        s.write_route(&r).unwrap();
+
+        let dir = d.join("routes").join(r.month());
+        let leftovers: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().starts_with('.'))
+            .collect();
+        assert!(leftovers.is_empty(), "留下了临时文件: {leftovers:?}");
+
+        std::fs::remove_dir_all(&d).ok();
     }
 }
