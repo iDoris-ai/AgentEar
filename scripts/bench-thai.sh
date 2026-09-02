@@ -41,7 +41,7 @@ for c in ffmpeg ffprobe bc say shasum; do
   command -v "$c" >/dev/null || die "缺少 $c"
 done
 [ -x /usr/bin/time ] || die "缺少 /usr/bin/time（本脚本依赖它的 -l 输出取峰值 RSS）"
-[ -x "$CLI" ] || die "找不到 whisper-cli：$CLI（设 WHISPER_CPP 指向 whisper.cpp 仓库）"
+[ -x "$CLI" ] || die "找不到 whisper-cli：${CLI}（设 WHISPER_CPP 指向 whisper.cpp 仓库）"
 [ -f "$CORPUS_TXT" ] || die "找不到语料文本：$CORPUS_TXT"
 [ $# -gt 0 ] || die "用法：$0 [--regenerate] <ggml模型> [...]"
 [[ "$THREADS" =~ ^[1-9][0-9]*$ ]] || die "THREADS 必须是正整数，当前是 '$THREADS'"
@@ -182,7 +182,7 @@ for m in "$@"; do
   # 非零，外层 printf 照样成功 —— 于是打出一行哈希为空的测量、SKIPPED 仍是 0、
   # 最终 exit 0。和最初那个「伪造整行」的坑是同一类。
   MSHA="$(shasum -a 256 "$m" | cut -c1-12)" || die "模型哈希计算失败：$m"
-  [[ "$MSHA" =~ ^[0-9a-f]{12}$ ]] || die "模型哈希格式异常：'$MSHA'（$m）"
+  [[ "$MSHA" =~ ^[0-9a-f]{12}$ ]] || die "模型哈希格式异常：'$MSHA'（${m}）"
   printf '%-24s %7d %8.3f %8.3f %8.3f %8d %8d  %s\n' "$tag" \
     $((sz/1000000)) "$RS" "$RM" "$RL" $((rs/1000000)) $((rl/1000000)) "$MSHA"
 done

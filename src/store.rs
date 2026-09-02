@@ -96,7 +96,24 @@ impl Store {
     /// 让人误以为转写内容就那么短。
     ///
     /// 写失败不应该影响主链路——调用方只记日志，不要往上抛。
+    /// 写**纠错前**的原始转写，文件名带 `.raw` 后缀。
+    ///
+    /// 为什么单独存一份：术语纠错是**有损**的——模型可能改错、可能过度改写。
+    /// 只留纠正后的版本，等于把「模型认为的」当成了唯一记录，
+    /// 而 CLAUDE.md 的存储语义要求 derived 层可以从上一层重算、可以对照。
+    /// 出了问题时，这份原始转写是判断「是 ASR 错了还是 LLM 改坏了」的唯一依据。
+    ///
+    /// 只在**真的做了纠错且结果与原文不同**时才写——否则每次录音多出一个
+    /// 内容一模一样的文件，纯属噪音。
+    pub fn write_raw_transcript(&self, content_hash: &str, text: &str) -> Result<PathBuf> {
+        self.write_transcript_named(&format!("{content_hash}.raw"), text)
+    }
+
     pub fn write_transcript(&self, content_hash: &str, text: &str) -> Result<PathBuf> {
+        self.write_transcript_named(content_hash, text)
+    }
+
+    fn write_transcript_named(&self, content_hash: &str, text: &str) -> Result<PathBuf> {
         let dir = self.root.join("derived/transcripts");
         let path = dir.join(format!("{content_hash}.txt"));
         let tmp = dir.join(format!(".{content_hash}.tmp"));

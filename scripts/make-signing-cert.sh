@@ -33,7 +33,7 @@ FORCE=0
 [ "${1:-}" = "--force" ] && FORCE=1
 
 if [ "$FORCE" -eq 0 ] && security find-identity -v -p codesigning 2>/dev/null | grep -qF "$NAME"; then
-  echo "✅ 签名身份「$NAME」已存在，无需创建"
+  echo "✅ 签名身份「${NAME}」已存在，无需创建"
   security find-identity -v -p codesigning | grep -F "$NAME" | sed 's/^/   /'
   exit 0
 fi
