@@ -12,6 +12,7 @@ mod config;
 mod correct;
 mod hotkey;
 mod i18n;
+mod label;
 mod paste;
 mod store;
 mod terms;
