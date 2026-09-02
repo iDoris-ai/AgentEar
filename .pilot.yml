@@ -1,0 +1,18 @@
+# AgentEar 的 pilot 配置。
+#
+# 单主干仓库：没有集成分支，PR 直接开向 main。所以 integration_branch
+# 就等于 base_branch —— 这是合法配置，不要为了迁就默认值去建一个 preview。
+# 合并时要带 --allow-trunk（它不是绕过：仍要求分支保护要求审批、PR 已 APPROVED）。
+base_branch: main
+integration_branch: main
+protect_patterns: [release, hotfix]
+remote: origin
+docs_dir: docs/agent
+
+# 开 PR 前必须全绿的检查。preflight 拒绝「找不到检查」的仓库（那是 fail-open），
+# 所以这里显式声明本仓库的三道：
+#   - lint-shell：bash 3.2 把 $VAR 后的中文标点当变量名，2026-09-02 一天踩两次
+#   - cargo test：单元测试
+#   - cargo build --release：产品构建（debug 能过而 release 挂过，值得单列）
+preflight: scripts/lint-shell.sh && cargo test && cargo build --release
+planning_source: docs
