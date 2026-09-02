@@ -70,6 +70,8 @@ pub enum Key {
     /// 术语纠错开关。文案要说清**代价**——它让上屏从 0.3 秒变成 1–3 秒。
     CorrectTerms,
     CorrectTermsOffline,
+    /// 打开术语表文件供用户编辑。
+    OpenTerms,
     OpenDataDir,
     ViewLog,
     Quit,
@@ -148,6 +150,13 @@ pub fn t(lang: Lang, key: Key) -> &'static str {
             "Fix technical terms (service not running)",
             "技术术语纠错（服务未启动）",
             "แก้คำศัพท์เทคนิค (บริการยังไม่ทำงาน)",
+        ),
+        // 文案要说清**改完什么时候生效**：不说的话用户改完会以为要重启。
+        K::OpenTerms => pick(
+            lang,
+            "Edit Term List (applies next recording)",
+            "编辑术语表（下次录音生效）",
+            "แก้ไขรายการคำศัพท์ (มีผลครั้งถัดไป)",
         ),
         K::OpenDataDir => pick(lang, "Open Data Folder", "打开数据目录", "เปิดโฟลเดอร์ข้อมูล"),
         K::ViewLog => pick(lang, "View Log", "查看日志", "ดูบันทึก"),
@@ -236,7 +245,7 @@ fn fail_reason(lang: Lang, f: crate::download::Fail) -> &'static str {
 mod tests {
     use super::*;
 
-    const ALL_KEYS: [Key; 22] = [
+    const ALL_KEYS: [Key; 23] = [
         Key::StartRecording,
         Key::Transcribing,
         Key::TitleTranscribing,
@@ -256,6 +265,7 @@ mod tests {
         Key::AsrLangAuto,
         Key::CorrectTerms,
         Key::CorrectTermsOffline,
+        Key::OpenTerms,
         Key::OpenDataDir,
         Key::ViewLog,
         Key::Quit,
