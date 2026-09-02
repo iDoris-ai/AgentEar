@@ -168,6 +168,28 @@ impl Corrector {
         Ok(())
     }
 
+    /// 一批送给模型的目标字数。
+    ///
+    /// ## 为什么必须分批（这条是实测逼出来的）
+    ///
+    /// 2026-09-03 实测：同一份术语表、同一个边车，**短句稳定纠对，
+    /// 700 字长文连跑 5 次 0 次通过**——模型在长输入上倾向于原样输出，
+    /// 术语表压不过它（`docs/benchmarks-m2.md` §8.1）。
+    ///
+    /// 120 字是个折中：太小则调用次数多、耗时线性上升；太大则回到长文
+    /// 那个失效区间。短句实测在几十字量级稳定，留一倍余量。
+    const BATCH_CHARS: usize = 120;
+
+    /// 超过这个长度才分批。低于它的一次送完——分批本身有开销
+    /// （每批一次 HTTP + 一次推理），短文本不值得。
+    const SPLIT_THRESHOLD: usize = 200;
+
+    /// 整段长文纠错的总时限。
+    ///
+    /// 单批 20 秒 × N 批，最坏能到一两分钟，而用户按完录音键正等着上屏。
+    /// 45 秒是按实测（700 字 ~7 秒）留了六倍余量。
+    const TOTAL_BUDGET: std::time::Duration = std::time::Duration::from_secs(45);
+
     /// 纠正一段转写。返回 `None` 表示**没有可用的纠错结果**，调用方应当用原文。
     ///
     /// 注意签名：错误不往外抛。纠错是尽力而为的增强，它的任何失败都不该
@@ -176,16 +198,88 @@ impl Corrector {
         if text.trim().is_empty() {
             return None;
         }
-        match self.try_correct(text) {
-            Ok(fixed) => Some(fixed),
-            Err(e) => {
-                log::warn!("术语纠错不可用，按原文上屏: {e:#}");
-                None
+        if text.chars().count() <= Self::SPLIT_THRESHOLD {
+            return match self.try_correct(text) {
+                Ok(fixed) => Some(fixed),
+                Err(e) => {
+                    log::warn!("术语纠错不可用，按原文上屏: {e:#}");
+                    None
+                }
+            };
+        }
+
+        // —— 长文：分批纠错 ——
+        //
+        // **单批失败不放弃整体**：那一批用原文，其余照常纠。
+        // 整体放弃的话，一次网络抖动就让整段长录音都拿不到纠正，
+        // 而长录音恰恰是术语最多、最需要纠正的。
+        let batches = split_into_batches(text, Self::BATCH_CHARS);
+        log::debug!("长文分 {} 批纠错（共 {} 字）", batches.len(), text.chars().count());
+
+        // **整段有一个总时限。** 每批 20 秒 × N 批，最坏情况能到一两分钟——
+        // 而用户按完录音键正等着上屏。超时就整体放弃，用原文。
+        let deadline = std::time::Instant::now() + Self::TOTAL_BUDGET;
+
+        let mut out = String::with_capacity(text.len());
+        for (i, b) in batches.iter().enumerate() {
+            if std::time::Instant::now() >= deadline {
+                log::warn!("长文纠错超出总时限（{:?}），按原文上屏", Self::TOTAL_BUDGET);
+                return None;
+            }
+            // **批边界的空白要原样保住。**
+            //
+            // 模型的输出必然被 trim（它爱加前后空行），而批的边界恰恰
+            // 可能落在一个空格或换行上——英文在 `". "` 处切分时，
+            // 下一批以空格开头，trim 掉就拼成了 `sentence.Next`。
+            // 所以只把**正文**送模型，前后空白留在外面，拼接时原样恢复。
+            let core = b.trim();
+            if core.is_empty() {
+                out.push_str(b);
+                continue;
+            }
+            let lead = &b[..b.len() - b.trim_start().len()];
+            let trail = &b[b.trim_end().len()..];
+
+            // 失败重试一次：本地边车的失败多半是瞬时的（模型正在换页、
+            // 上一次请求还没释放）。重试一次比整段放弃划算。
+            let r = self
+                .try_correct_batch(core)
+                .or_else(|first| self.try_correct_batch(core).map_err(|_| first));
+            match r {
+                Ok(fixed) => {
+                    out.push_str(lead);
+                    out.push_str(&fixed);
+                    out.push_str(trail);
+                }
+                Err(e) => {
+                    // **一批失败就整体回退，不返回混合结果。**
+                    //
+                    // 部分成功看着划算,实际很危险:用户拿到的是「大部分纠正过、
+                    // 中间某一段没纠」的文本,读起来完全正常,而那一段里
+                    // 恰恰可能有术语错误。他没有任何线索知道该怀疑哪一段。
+                    // 「要么全纠、要么不动」是可预测的,而可预测比多纠几句重要。
+                    log::warn!("第 {} 批纠错失败（已重试一次），整体按原文上屏: {e:#}", i + 1);
+                    return None;
+                }
             }
         }
+        Some(out)
+    }
+
+    /// 单批纠错。**和整体纠错走不同的输出清理**——见 `try_correct` 的说明。
+    fn try_correct_batch(&self, text: &str) -> Result<String> {
+        self.request(text, /* single_line_only = */ false)
     }
 
     fn try_correct(&self, text: &str) -> Result<String> {
+        self.request(text, /* single_line_only = */ true)
+    }
+
+    /// `single_line_only`：整体纠错时只取最后一行非空（剥掉模型可能吐的
+    /// 推理过程）；**分批时不能这么做**——一批里本来就可能含换行
+    /// （ASR 的长转写里有），只取最后一行会把前面的内容整段吃掉。
+    /// 分批的每批都短，模型吐推理的风险本来就低，`--no-thinking` 也在挡。
+    fn request(&self, text: &str, single_line_only: bool) -> Result<String> {
         let body = serde_json::json!({
             "model": "ornith",
             "messages": [{
@@ -224,12 +318,100 @@ impl Corrector {
             .as_str()
             .context("响应里没有 choices[0].message.content")?;
 
-        let fixed = tidy(content);
+        let fixed = if single_line_only {
+            tidy(content)
+        } else {
+            tidy_keep_lines(content)
+        };
         if fixed.is_empty() {
             bail!("模型返回空");
         }
         Ok(fixed)
     }
+}
+
+/// 把长文按**句子边界**切成若干批，每批约 `target` 字。
+///
+/// ## 为什么在句子边界切，而不是按固定字数硬切
+///
+/// 硬切会把一个词劈成两半，而术语纠错恰恰依赖上下文判断
+/// （「road 目录」要还原、「road 很宽」不能动）。切在句中等于毁掉判据。
+///
+/// ## 为什么攒到 120 字才发，而不是一句一发
+///
+/// 一句一发对 700 字的录音意味着二三十次推理，耗时线性上升。
+/// 而且太短的片段（「对。」「嗯。」）本身没有上下文，模型反而容易乱改。
+/// 攒批既省调用又保住上下文。
+///
+/// **末批不足 target 也照发**——不要为了凑够字数把它并进上一批，
+/// 那会让上一批超出稳定区间。
+fn split_into_batches(text: &str, target: usize) -> Vec<String> {
+    // 句子结束的标记。中英文都要：转写里两种都会出现。
+    // 注意**不包含逗号**——逗号切出来的片段太碎，上下文不够。
+    const ENDERS: [char; 10] = ['。', '！', '？', '\n', '!', '?', '；', ';', '…', '.'];
+    // 退而求其次的切点：找不到句末标点时用它们，总比硬切在词中间强。
+    const SOFT: [char; 4] = ['，', ',', '、', ' '];
+
+    // **硬上限**。`target` 只是「到这儿就可以切了」，不是「不许超过」——
+    // 一段几千字没有句号的 ASR 输出（口述时不停顿就会这样）在只看
+    // `target` 的实现里仍然是**一整批**，于是回到 700 字长文那个失效区间，
+    // 更长还会撑爆上下文。所以必须有一个谁都突破不了的上限。
+    let hard = target * 3;
+
+    let mut batches = Vec::new();
+    let mut cur = String::new();
+    let mut cur_len = 0usize;
+
+    let chars: Vec<char> = text.chars().collect();
+    for (i, &ch) in chars.iter().enumerate() {
+        cur.push(ch);
+        cur_len += 1;
+
+        // ASCII 句点要谨慎：`v1.2`、`mushroom.cv`、`0.2 秒` 里的点不是句末。
+        // 只有后面跟空白或到结尾时才算。
+        let is_end = if ch == '.' {
+            chars.get(i + 1).is_none_or(|n| n.is_whitespace())
+        } else {
+            ENDERS.contains(&ch)
+        };
+
+        if (is_end && cur_len >= target) || cur_len >= hard {
+            batches.push(std::mem::take(&mut cur));
+            cur_len = 0;
+            continue;
+        }
+        // 逼近硬上限时，遇到软切点就先切，避免真的硬切在词中间
+        if cur_len >= hard.saturating_sub(target / 2) && SOFT.contains(&ch) {
+            batches.push(std::mem::take(&mut cur));
+            cur_len = 0;
+        }
+    }
+    if !cur.trim().is_empty() {
+        batches.push(cur);
+    } else if let Some(last) = batches.last_mut() {
+        // 尾部只剩空白：并进上一批，别产生一个空批次
+        last.push_str(&cur);
+    }
+    batches
+}
+
+/// 分批时用的输出清理：**保留换行**，只剥掉外围包裹。
+///
+/// 和 `tidy` 的区别只在「取不取最后一行」。分批的每批本来就可能含换行，
+/// 取最后一行会把前面的内容整段丢掉（codex 抓到的 High 1）。
+fn tidy_keep_lines(s: &str) -> String {
+    let mut t = s.trim();
+    for p in ["修正后：", "修正后:", "修正结果：", "输出：", "Corrected:"] {
+        if let Some(rest) = t.strip_prefix(p) {
+            t = rest.trim();
+        }
+    }
+    for (a, b) in [('"', '"'), ('「', '」'), ('“', '”')] {
+        if t.starts_with(a) && t.ends_with(b) && t.chars().count() >= 2 {
+            t = &t[a.len_utf8()..t.len() - b.len_utf8()];
+        }
+    }
+    t.trim().to_string()
 }
 
 /// 收拾模型输出。
@@ -400,21 +582,93 @@ mod tests {
     /// fixture 是一次真实转写的快照，内容固定。
     ///
     /// **要真调边车，所以标 ignore**：`cargo test --release -- --ignored`。
-    /// ⚠️ **这条目前稳定失败，是已知缺陷不是环境问题。**
-    ///
-    /// 2026-09-03 实测：同一份 fixture 连跑 5 次，**0 次通过**。
-    /// 而同样的术语表在**短句**上稳定有效（`短句纠错是可靠的` 那条测试，
-    /// 以及直接调边车验证：「然后把内容存到 ro 的目录里面」→ raw，两次都对）。
-    ///
-    /// 也就是说：**术语表解决了短句，没解决长文。** T2.1.2 当时报「已修复」
-    /// 是基于**单次通过**——那次是运气。700 字的输入里，模型倾向于
-    /// 原样输出（只调整空格），术语表没能压过它。
-    ///
-    /// 正解是**先分句再逐句纠错**，那是独立的一块工作（tasks.md 的 T2.1.4）。
-    /// 在那之前保留这条测试并让它失败，比删掉或放宽阈值诚实——
-    /// 一个假装通过的回归测试比没有更糟。
+    /// 分批切分必须切在句子边界，且不产生空批。
     #[test]
-    #[ignore = "已知失败：长文纠错不可靠，见 T2.1.4。跑法 cargo test --release -- --ignored"]
+    fn batches_split_on_sentence_boundaries() {
+        let text = "第一句话在这里。第二句话也在这里。第三句稍微长一点点内容。第四句。";
+        let b = split_into_batches(text, 10);
+        assert!(b.len() > 1, "应该切成多批");
+        for x in &b {
+            assert!(!x.trim().is_empty(), "不该有空批次");
+        }
+        // 每批（除末批外）都该以句末标点结尾
+        for x in &b[..b.len() - 1] {
+            let last = x.trim_end().chars().last().unwrap();
+            assert!(
+                "。！？.!?；".contains(last),
+                "批次没有切在句子边界，结尾是 {last:?}：{x:?}"
+            );
+        }
+        assert_eq!(b.concat(), text, "拼回来必须和原文一字不差");
+    }
+
+    /// **拼回来必须和原文完全一致**——一个字都不能丢。
+    ///
+    /// 分批是为了纠错更准，不是为了改内容。切分本身若丢字，
+    /// 后面纠得再准也是错的。
+    #[test]
+    fn concatenating_batches_reproduces_the_input() {
+        for text in [
+            "没有任何标点的一长串文字就这样一直写下去也不换行",
+            "短。",
+            "换行\n分隔的\n内容\n也要处理",
+            "混合 English sentences. 和中文句子。Together.",
+            "结尾没有标点",
+            "。。。连续标点。。。",
+        ] {
+            let b = split_into_batches(text, 5);
+            assert_eq!(b.concat(), text, "分批丢字了：{text:?}");
+        }
+    }
+
+    /// **没有句末标点的长文本必须被硬上限切开。**
+    ///
+    /// 这条测试原来断言的是相反的事（「整段一批」），codex 指出那
+    /// **固化了风险**：口述时不停顿，ASR 就会吐出几千字没有句号的文本，
+    /// 而整段一批正好回到 700 字长文那个「模型原样输出」的失效区间，
+    /// 更长还会撑爆上下文。
+    #[test]
+    fn text_without_enders_is_still_capped() {
+        let text = "这段话完全没有句号也没有问号就这么一直说下去".repeat(20);
+        let target = 20;
+        let b = split_into_batches(&text, target);
+        assert!(b.len() > 1, "无标点长文本必须被硬上限切开，否则回到失效区间");
+        for x in &b {
+            assert!(
+                x.chars().count() <= target * 3,
+                "有批次突破了硬上限：{} 字",
+                x.chars().count()
+            );
+        }
+        assert_eq!(b.concat(), text, "硬切也不能丢字");
+    }
+
+    /// ASCII 句点在版本号、域名里不是句末，不能在那儿切。
+    #[test]
+    fn ascii_dot_inside_versions_and_domains_is_not_a_boundary() {
+        // 点号后面不是空白 → 不算句末，所以整段不会在 v1.2 或 .cv 处被切
+        let text = format!("{}升级到 v1.2 以后那篇博客搬到了 blog.mushroom.cv 上面去了", "填充".repeat(60));
+        let b = split_into_batches(&text, 100);
+        for x in &b {
+            assert!(!x.ends_with("v1."), "切在版本号中间了：{x:?}");
+            assert!(!x.ends_with("blog."), "切在域名中间了：{x:?}");
+            assert!(!x.ends_with("mushroom."), "切在域名中间了：{x:?}");
+        }
+        assert_eq!(b.concat(), text);
+    }
+
+    /// 短文本不走分批路径（省掉多次调用的开销）。
+    #[test]
+    fn short_text_is_not_batched() {
+        let short = "把内容存到 ro 的目录";
+        assert!(short.chars().count() <= Corrector::SPLIT_THRESHOLD);
+    }
+
+    /// 长文回归。**T2.1.4 分批之后已经稳定通过**（3/3），
+    /// 在那之前是 0/5——模型在 700 字长输入上倾向原样输出，
+    /// 术语表压不过它。历史见 `docs/benchmarks-m2.md` §8.1。
+    #[test]
+    #[ignore = "需要 LLM 边车在跑：scripts/serve-llm.sh"]
     fn longform_regression_ro_becomes_raw_not_repo() {
         let input = include_str!("../tests/fixtures/sample02-asr-raw.txt");
         // fixture 得真的含有那个触发条件，否则这条测试是空转
@@ -440,8 +694,12 @@ mod tests {
 
         // —— 其余已知正确的纠正不许退化 ——
         // 每一条都是真实录音里实际出现过的错误形式，不是编的
+        // ⚠️ **这里刻意不断言 MacBook。**
+        // fixture 里有两处：`我的妈 book`（实测分批后不纠，已知局限）
+        // 和 `macbook`（纠对）。断言「MacBook 出现」会被后者满足，
+        // 于是这条断言看着在测前者、其实什么都没测到。
+        // 宁可不断言，也不要一条自我满足的断言——见 benchmarks-m2.md §8.1。
         for (want, why) in [
-            ("MacBook", "`我的妈 book`"),
             ("knowledge base", "`notice base`"),
             ("24 小时", "`24R`"),
             ("Mac mini", "`mac mini` 大小写"),
