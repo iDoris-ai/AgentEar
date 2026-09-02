@@ -10,6 +10,7 @@ use serde::{Deserialize, Deserializer, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::{OnceLock, RwLock};
 
+use crate::asr::AsrLang;
 use crate::i18n::Lang;
 
 /// 单个字段解析失败时退回默认值，**而不是让整份配置解析失败**。
@@ -83,6 +84,14 @@ pub struct Config {
     /// **界面**语言（菜单文案），不影响识别。默认英文。
     #[serde(deserialize_with = "lenient")]
     pub ui_lang: Lang,
+    /// **识别**语言，决定走哪个 ASR 引擎。默认 Auto（SenseVoice，
+    /// 中/英/粤/日/韩自动判别）。切到 Thai 需要先下载模型。
+    ///
+    /// 和 `ui_lang` 各存各的：界面泰文 + 识别中文，或者界面英文 + 识别泰语，
+    /// 都是合理组合。把两者绑在一起是很容易犯的错——一个在泰国工作的
+    /// 英语用户，界面要英文，识别要泰语。
+    #[serde(deserialize_with = "lenient")]
+    pub asr_lang: AsrLang,
 }
 
 // 这两个字段的「默认」不是 `Default::default()`，坏值要退回文档里写的默认，
@@ -105,11 +114,15 @@ impl Default for Config {
             trigger: Trigger::RightCommand,
             retention_days: default_retention_days(),
             ui_lang: Lang::default(),
+            asr_lang: AsrLang::default(),
         }
     }
 }
 
 static CURRENT: RwLock<Option<Config>> = RwLock::new(None);
+/// 写者之间的串行锁。见 `update` 的说明——它和 `CURRENT` 分工不同，
+/// 别合并成一把。
+static SAVE: std::sync::Mutex<()> = std::sync::Mutex::new(());
 static PATH: OnceLock<PathBuf> = OnceLock::new();
 
 /// 从数据目录读配置。文件不存在或解析失败都退回默认值——**配置损坏不能
@@ -144,14 +157,36 @@ pub fn get() -> Config {
 }
 
 /// 改配置并立即落盘。写失败只记日志，内存里的改动仍然生效。
+///
+/// ## 两把锁，各司其职
+///
+/// 原来是「锁内改、克隆一份、放锁、锁外写」。菜单只在主线程点，这看着没事——
+/// 直到模型下载线程也开始改配置（装完泰语要提交 `asr_lang`）。那时两个写者
+/// 可以这样交错：
+///
+/// ```text
+/// 下载线程: 改成 Thai, 克隆 A, 放锁 ────────────────► 写 A（旧）
+/// 主线程:              改保留期, 克隆 B, 放锁 ──► 写 B（新）
+/// ```
+///
+/// 落盘顺序反过来，用户刚改的保留期就被旧快照盖掉了。
+///
+/// 但把落盘直接塞进 `CURRENT` 的写锁里也不行：**磁盘慢的时候，
+/// 所有 `get()` 都跟着卡**——包括 AppKit 那个 0.5s 定时器和菜单构建，
+/// 表现就是界面冻住。
+///
+/// 所以用两把：`SAVE` 只序列化写者（保证落盘顺序和改动顺序一致），
+/// `CURRENT` 的写锁只护住内存里那几纳秒的改动。读者永远不会等磁盘。
 pub fn update(f: impl FnOnce(&mut Config)) {
-    let cfg = {
+    // 先拿 SAVE，全程持有到落盘结束——写者之间因此是严格串行的。
+    let _writer = SAVE.lock().unwrap_or_else(|e| e.into_inner());
+    let snapshot = {
         let mut guard = CURRENT.write().unwrap();
         let cfg = guard.get_or_insert_with(Config::default);
         f(cfg);
         cfg.clone()
-    };
-    if let Err(e) = save(&cfg) {
+    }; // CURRENT 的写锁在这里就放了，读者不必等下面的磁盘 IO
+    if let Err(e) = save(&snapshot) {
         log::error!("保存配置失败: {e:#}");
     }
 }
@@ -160,8 +195,13 @@ fn save(cfg: &Config) -> Result<()> {
     let path = PATH.get().context("配置路径未初始化")?;
     let json = serde_json::to_string_pretty(cfg)?;
     // 先写临时文件再 rename：崩在写一半不会留下半截 JSON,
-    // 否则下次启动会解析失败并静默退回默认值
-    let tmp = path.with_extension("json.tmp");
+    // 否则下次启动会解析失败并静默退回默认值。
+    //
+    // 临时文件名带 pid：同进程的并发已由 `update` 的写锁挡住，但**两个
+    // AgentEar 实例**（终端一个、.app 一个）会用同一个数据目录。
+    // 共享一个 `.tmp` 路径的话，两边的写和 rename 会互相踩，
+    // 甚至把对方写了一半的内容 rename 成正式配置。
+    let tmp = path.with_extension(format!("json.tmp.{}", std::process::id()));
     std::fs::write(&tmp, json).with_context(|| format!("写 {} 失败", tmp.display()))?;
     std::fs::rename(&tmp, path).context("rename 配置文件失败")?;
     Ok(())
@@ -196,6 +236,7 @@ mod tests {
         assert_eq!(c.trigger, Trigger::RightCommand);
         assert_eq!(c.retention_days, 30);
         assert_eq!(c.ui_lang, Lang::En, "没有 ui_lang 字段时应取默认英文");
+        assert_eq!(c.asr_lang, AsrLang::Auto, "没有 asr_lang 字段时应取默认 Auto");
     }
 
     #[test]
@@ -223,6 +264,7 @@ mod tests {
     fn unknown_enum_value_does_not_reset_everything() {
         let json = r#"{
             "ui_lang": "fr",
+            "asr_lang": "klingon",
             "input_device": "MacBook Pro麦克风",
             "trigger": "ctrl_shift_r",
             "retention_days": 90,
@@ -230,6 +272,7 @@ mod tests {
         }"#;
         let c: Config = serde_json::from_str(json).expect("坏字段不该让整份配置解析失败");
         assert_eq!(c.ui_lang, Lang::En, "未知语言退回默认");
+        assert_eq!(c.asr_lang, AsrLang::Auto, "未知识别语言退回默认");
         assert_eq!(c.input_device.as_deref(), Some("MacBook Pro麦克风"), "设备被连累了");
         assert_eq!(c.trigger, Trigger::CtrlShiftR, "触发键被连累了");
         assert_eq!(c.retention_days, 90, "保留期被连累了");
@@ -257,6 +300,26 @@ mod tests {
         assert_eq!(c.trigger, Trigger::RightCommand);
     }
 
+    /// 界面语言和识别语言是**两个独立的字段**，不能互相影响。
+    ///
+    /// 这条挡的是一类很自然的错误实现：「用户把界面切成泰文，那识别
+    /// 大概也想要泰语吧」。不对——在泰国工作的英语用户要的是
+    /// 英文界面 + 泰语识别，而一个学泰语的中国人可能要中文界面 + 泰语识别。
+    #[test]
+    fn ui_lang_and_asr_lang_are_independent() {
+        for ui in Lang::ALL {
+            for asr in [AsrLang::Auto, AsrLang::Thai] {
+                let mut c = Config::default();
+                c.ui_lang = ui;
+                c.asr_lang = asr;
+                let back: Config =
+                    serde_json::from_str(&serde_json::to_string(&c).unwrap()).unwrap();
+                assert_eq!(back.ui_lang, ui);
+                assert_eq!(back.asr_lang, asr);
+            }
+        }
+    }
+
     #[test]
     fn missing_fields_fall_back_to_defaults() {
         // 老版本写的配置文件缺字段时不能报错——serde(default) 保证这一点
@@ -276,5 +339,27 @@ mod tests {
         assert_eq!(back.input_device.as_deref(), Some("MacBook Pro麦克风"));
         assert_eq!(back.trigger, Trigger::CtrlShiftR);
         assert_eq!(back.retention_days, 0);
+    }
+
+    /// 落盘必须发生在持有写锁期间，否则两个写者可以乱序落盘、
+    /// 让先改的覆盖后改的。这条测不了时序，但能钉住「update 之后
+    /// 内存和磁盘一致」这个可观察的后果。
+    #[test]
+    fn update_persists_atomically() {
+        let tmp = std::env::temp_dir().join(format!("agentear-cfg-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        load(&tmp);
+
+        update(|c| c.retention_days = 90);
+        update(|c| c.asr_lang = AsrLang::Thai);
+
+        let on_disk: Config =
+            serde_json::from_str(&std::fs::read_to_string(tmp.join("config.json")).unwrap())
+                .unwrap();
+        assert_eq!(on_disk.retention_days, 90, "先改的那项被后一次写覆盖了");
+        assert_eq!(on_disk.asr_lang, AsrLang::Thai);
+        assert_eq!(get().retention_days, 90, "内存和磁盘不一致");
+
+        std::fs::remove_dir_all(&tmp).ok();
     }
 }

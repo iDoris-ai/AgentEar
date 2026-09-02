@@ -63,6 +63,10 @@ pub enum Key {
     Retention90,
     RetentionNever,
     LanguageSection,
+    /// 识别语言这一节。**和 `LanguageSection`（界面语言）是两回事**，
+    /// 菜单里挨着放，文案必须让人一眼分清哪个管显示、哪个管识别。
+    AsrLangSection,
+    AsrLangAuto,
     OpenDataDir,
     ViewLog,
     Quit,
@@ -110,7 +114,21 @@ pub fn t(lang: Lang, key: Key) -> &'static str {
         K::Retention30 => pick(lang, "30 days", "30 天", "30 วัน"),
         K::Retention90 => pick(lang, "90 days", "90 天", "90 วัน"),
         K::RetentionNever => pick(lang, "Never delete", "永不清理", "ไม่ลบ"),
-        K::LanguageSection => pick(lang, "Language", "语言", "ภาษา"),
+        K::LanguageSection => pick(lang, "Interface Language", "界面语言", "ภาษาของเมนู"),
+        K::AsrLangSection => pick(
+            lang,
+            "Recognition Language",
+            "识别语言",
+            "ภาษาที่ใช้ถอดความ",
+        ),
+        // 把支持的语种列出来，而不是只写「自动」——用户得知道自动都包括谁，
+        // 否则「为什么我说泰语它转不出来」这个问题永远要问一遍。
+        K::AsrLangAuto => pick(
+            lang,
+            "Auto (ZH / EN / JA / KO / Cantonese)",
+            "自动（中 / 英 / 日 / 韩 / 粤）",
+            "อัตโนมัติ (จีน / อังกฤษ / ญี่ปุ่น / เกาหลี / กวางตุ้ง)",
+        ),
         K::OpenDataDir => pick(lang, "Open Data Folder", "打开数据目录", "เปิดโฟลเดอร์ข้อมูล"),
         K::ViewLog => pick(lang, "View Log", "查看日志", "ดูบันทึก"),
         K::Quit => pick(lang, "Quit AgentEar", "退出 AgentEar", "ออกจาก AgentEar"),
@@ -140,11 +158,65 @@ pub fn system_default_device(lang: Lang, name: &str) -> String {
     }
 }
 
+/// 识别语言菜单里的泰语那一项。
+///
+/// 它比别的菜单项复杂，因为**模型是按需下载的**，同一个菜单项在不同时刻
+/// 代表四件不同的事：可以直接用 / 点了会开始下 574 MB / 正在下 / 下失败了。
+/// 把状态写进标题，用户不用去别处找进度。
+///
+/// 语言名本身永远是 `ไทย`（endonym），后缀才翻译——和界面语言菜单同一个
+/// 道理：用户靠认出自己的语言名找到它。
+pub fn thai_option(lang: Lang, state: crate::download::State) -> String {
+    use crate::download::State as S;
+    let th = Lang::Th.endonym();
+    match state {
+        S::Ready => th.to_string(),
+        // 体积写死在文案里：574 MB 是真实要下的字节数，
+        // 用户在点之前就该知道代价，尤其是用手机热点的时候。
+        S::Absent => match lang {
+            Lang::En => format!("{th} — download 574 MB"),
+            Lang::Zh => format!("{th} —— 需下载 574 MB"),
+            Lang::Th => format!("{th} — ดาวน์โหลด 574 MB"),
+        },
+        // 「验证中」和「下载中」要分开说：进度条走到 100% 之后还要
+        // 加载一次模型，那几秒里显示「下载中 100%」会让人以为卡住了。
+        S::Verifying => match lang {
+            Lang::En => format!("{th} — verifying…"),
+            Lang::Zh => format!("{th} —— 验证中……"),
+            Lang::Th => format!("{th} — กำลังตรวจสอบ…"),
+        },
+        S::Downloading(pct) => match lang {
+            Lang::En => format!("{th} — downloading {pct}%"),
+            Lang::Zh => format!("{th} —— 下载中 {pct}%"),
+            Lang::Th => format!("{th} — กำลังดาวน์โหลด {pct}%"),
+        },
+        // 失败必须带上**原因**和**能再点一次**这两条信息。
+        // 只说「失败」的话，用户既不知道是自己没网还是服务器挂了，
+        // 也不知道还能不能重试。
+        S::Failed(f) => match lang {
+            Lang::En => format!("{th} — failed ({}), click to retry", fail_reason(lang, f)),
+            Lang::Zh => format!("{th} —— 失败（{}），点击重试", fail_reason(lang, f)),
+            Lang::Th => format!("{th} — ล้มเหลว ({}) แตะเพื่อลองใหม่", fail_reason(lang, f)),
+        },
+    }
+}
+
+fn fail_reason(lang: Lang, f: crate::download::Fail) -> &'static str {
+    use crate::download::Fail as F;
+    match f {
+        F::Network => pick(lang, "network", "网络", "เครือข่าย"),
+        F::Checksum => pick(lang, "checksum", "校验不符", "ตรวจสอบไม่ผ่าน"),
+        F::Disk => pick(lang, "disk full", "磁盘不足", "พื้นที่ไม่พอ"),
+        F::Busy => pick(lang, "already running", "已在下载", "กำลังดาวน์โหลดอยู่"),
+        F::Io => pick(lang, "file error", "文件错误", "ไฟล์ผิดพลาด"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    const ALL_KEYS: [Key; 18] = [
+    const ALL_KEYS: [Key; 20] = [
         Key::StartRecording,
         Key::Transcribing,
         Key::TitleTranscribing,
@@ -160,6 +232,8 @@ mod tests {
         Key::Retention90,
         Key::RetentionNever,
         Key::LanguageSection,
+        Key::AsrLangSection,
+        Key::AsrLangAuto,
         Key::OpenDataDir,
         Key::ViewLog,
         Key::Quit,
@@ -216,6 +290,52 @@ mod tests {
             assert!(stop_recording(lang, 12).contains("12"), "{lang:?} 丢了秒数");
             let d = system_default_device(lang, "MacBook Pro麦克风");
             assert!(d.contains("MacBook Pro麦克风"), "{lang:?} 丢了设备名");
+        }
+    }
+
+    /// 泰语菜单项的四种状态都得能读，且**都带得上语言名**。
+    ///
+    /// 漏掉语言名是很容易犯的错：写成「下载中 42%」，用户在菜单里
+    /// 就不知道这是在下什么。
+    #[test]
+    fn thai_option_covers_every_state() {
+        use crate::download::{Fail, State};
+        let states = [
+            State::Ready,
+            State::Absent,
+            State::Downloading(42),
+            State::Verifying,
+            State::Failed(Fail::Network),
+            State::Failed(Fail::Checksum),
+            State::Failed(Fail::Disk),
+            State::Failed(Fail::Busy),
+            State::Failed(Fail::Io),
+        ];
+        for lang in Lang::ALL {
+            for st in states {
+                let s = thai_option(lang, st);
+                assert!(s.contains("ไทย"), "{lang:?}/{st:?} 丢了语言名: {s:?}");
+                assert!(!s.is_empty());
+            }
+            assert!(
+                thai_option(lang, State::Downloading(42)).contains("42"),
+                "{lang:?} 丢了百分比"
+            );
+        }
+    }
+
+    /// 「界面语言」和「识别语言」两个标题**不能一样**。
+    ///
+    /// 它们在菜单里上下挨着。文案撞了的话，用户点开一个发现是
+    /// English/中文/ไทย，点开另一个发现是「自动/ไทย」，只能靠试。
+    #[test]
+    fn ui_and_asr_language_sections_are_distinguishable() {
+        for lang in Lang::ALL {
+            assert_ne!(
+                t(lang, Key::LanguageSection),
+                t(lang, Key::AsrLangSection),
+                "{lang:?} 的界面语言和识别语言标题一模一样"
+            );
         }
     }
 

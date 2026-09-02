@@ -35,7 +35,11 @@
 ## 安装
 
 **要求:Apple Silicon Mac(M1 及以上)、macOS 11+。**
-不支持 Intel——内置的 ASR 运行时官方只发 arm64 版本。
+不支持 Intel——内置的 ASR 运行时官方只发 arm64 版本。上游
+[modelscope/FunASR](https://github.com/modelscope/FunASR/releases) 从
+`runtime-llamacpp-v0.1.9` 到最新的 `v0.2.6`,macOS 一直只有 `macos-arm64`
+(Linux/Windows 才有 x64)。所以这不是「暂时没做」,是上游没有——
+就算把主程序编成通用二进制,Intel 上 ASR 子进程照样起不来。
 
 ### 用发布版
 
@@ -64,8 +68,18 @@ B=https://huggingface.co/FunAudioLLM
 curl -sL -o vendor/models/sensevoice-small-q8.gguf "$B/SenseVoiceSmall-GGUF/resolve/main/sensevoice-small-q8.gguf"
 curl -sL -o vendor/models/fsmn-vad.gguf            "$B/fsmn-vad-GGUF/resolve/main/fsmn-vad.gguf"
 
+# 泰语引擎(可选):静态单二进制,需要本地有 whisper.cpp 的 checkout
+WHISPER_CPP=../whisper.cpp scripts/build-whisper-cli.sh
+
 cargo build --release
 scripts/bundle.sh        # → dist/AgentEar.app
+```
+
+泰语**模型**不用在这里准备——它由 app 按需下载。要自己从上游权重复现那份
+GGML 产物(会校验指纹是否与 ADR-0004 记录一致):
+
+```bash
+scripts/build-thai-model.sh
 ```
 
 ## 用法
@@ -78,6 +92,39 @@ agentear --debug-keys         # 打印每个修饰键事件,排查按键问题
 ```
 
 菜单栏状态:`🎙` 空闲 / `● 7s` 录音中 / `◌ 转写中`
+
+## 语言
+
+**界面**和**识别**是两套语言设置,菜单里分开列,互不影响
+(在泰国工作的英语用户要的是英文界面 + 泰语识别)。
+
+| | 支持 |
+|---|---|
+| **界面语言** | English / 中文 / ไทย |
+| **识别语言** | 自动(中 / 英 / 日 / 韩 / 粤,模型自己判)、ไทย 泰语(需显式选择) |
+
+### 泰语要单独开,还要下模型
+
+主链路的 SenseVoiceSmall **根本不支持泰语**——它的语种集合里只有
+zh/en/yue/ja/ko,永远不可能输出泰语。所以泰语走的是**另一个引擎**
+(whisper.cpp + Thonburian 泰语微调模型),模型 574 MB,**第一次在菜单里
+选「识别语言 → ไทย」时才下载**,落到 `~/.agentear/models/`。
+
+也可以提前下好:
+
+```bash
+agentear --fetch-thai            # 下载泰语模型(574 MB)
+agentear --transcribe x.wav --lang th   # 不改配置试一下泰语链路
+```
+
+> **这不违背「不经过第三方服务器」那条约束。** 下模型是一次性的、
+> 用户显式触发的,取的是模型权重;**你的音频和转写始终不出本机**。
+
+**泰语现在的成色要说清楚**:纯泰语朗读的准确率测过(FLEURS,CER 0.062),
+但**泰语夹英文技术词的场景没有任何可信数据**,而实测里 `review pull request`
+会被音译成 `รีวิว พูล รีเควสต์`。泰文界面文案也**尚未经母语者校对**。
+选型依据与它的局限见
+[`docs/decisions/0004-thai-asr-engine.md`](docs/decisions/0004-thai-asr-engine.md)。
 
 数据落在 `~/.agentear/`(`AGENTEAR_DATA` 可覆盖):
 

@@ -6,6 +6,7 @@
 //! 提前引入 TTS 或无边界流。**
 
 mod asr;
+mod download;
 mod audio;
 mod config;
 mod hotkey;
@@ -24,6 +25,13 @@ enum State {
         session: store::Session,
         recorder: audio::Recorder,
         started: Instant,
+        /// 这一段录音用哪个引擎转，**在按下录音键那一刻就定死**。
+        ///
+        /// 菜单说的是「下次录音生效」，那就得说到做到：录到一半时用户
+        /// 改了识别语言、或者泰语模型刚好下载完成自动切了过去，
+        /// 都不该改变**这一段**音频的去向。不快照的话，`finish` 是在
+        /// 录音结束后才读配置的，那时读到的已经是新值了。
+        asr_lang: asr::AsrLang,
     },
 }
 
@@ -34,13 +42,69 @@ fn main() -> Result<()> {
     let vendor = vendor_root()?;
     log::debug!("vendor 目录: {}", vendor.display());
 
+    // 泰语链路的加载冒烟跑在下载线程上，那里拿不到下面这个 `asr` 实例，
+    // 所以 vendor 路径单独存一份。必须在任何可能触发下载的东西之前设好。
+    asr::set_vendor(vendor.clone());
+
+    // 数据目录和配置要在**所有子命令之前**就绪：`--transcribe --lang th`
+    // 得能找到下载好的泰语模型（在数据目录里），也得读得到配置。
+    // 早期版本把这两步放在子命令后面，于是离线转写永远走默认配置——
+    // 那种错很难发现，因为默认配置恰好是大多数情况下对的那个。
+    let data_root = data_root()?;
+    download::set_data_root(data_root.clone());
+    let cfg = config::load(&data_root);
+
+    // 引擎指纹要在对账之前设好——`download::is_installed` 拿它判断
+    // 「验过这个模型的引擎，是不是现在这一个」。
+    match asr::engine_fingerprint() {
+        Some(id) => {
+            log::debug!("泰语引擎指纹 {id}");
+            download::set_engine_id(id);
+        }
+        None => log::debug!("vendor 里没有泰语引擎，泰语功能不可用"),
+    }
+
+    // **配置和实际安装状态对账。**
+    //
+    // 配置里写着泰语，但模型可能已经被删了、被换过、或者当初压根没装完。
+    // 不对账的话，菜单只是不显示勾，而**每一次录音都会走泰语分支然后失败**，
+    // 错误只出现在日志里——用户看到的是「按了键，什么都没出来」。
+    // 宁可退回自动（那条链路的模型随包走，一定在），并把原因写清楚。
+    let cfg = if cfg.asr_lang == asr::AsrLang::Thai && !download::is_installed(&download::THAI) {
+        // 「没装好」涵盖三种：模型不在、模型坏了、**以及引擎换了**——
+        // 升级把 whisper-cli 换成不兼容的版本时，旧的冒烟结果不再作数
+        // （安装记录绑定了引擎指纹）。三种的处置一样：退回自动。
+        log::warn!("配置里选的是泰语，但泰语模型现在不可用（缺失、损坏，或引擎已更换）");
+        log::warn!("  已退回自动识别。要用泰语：菜单「识别语言 → ไทย」，或跑 --fetch-thai");
+        config::update(|c| c.asr_lang = asr::AsrLang::Auto);
+        config::get()
+    } else {
+        cfg
+    };
+
     let asr = asr::Asr::new(&vendor)?;
     log::debug!("ASR 依赖检查通过");
 
-    // 离线转写一个已有的 wav，不占麦克风，用于验证 ASR 链路
-    if args.len() == 3 && args[1] == "--transcribe" {
+    // 离线转写一个已有的 wav，不占麦克风，用于验证 ASR 链路。
+    //
+    // `--lang th` 可以在不改配置的情况下试泰语链路——排查「是模型的问题还是
+    // 录音的问题」时，不该逼用户先去菜单里改设置再改回来。
+    if args.len() >= 3 && args[1] == "--transcribe" {
+        // 取 `--lang` **紧跟着的那个值**，不是「参数里出现过 th 就算」——
+        // 后者会把 `--transcribe th.wav` 里的文件名当成语言选择。
+        // 写错了就报错退出，不静默用配置里的值：排障时最怕的就是
+        // 「我明明指定了泰语」而它其实走了别的引擎。
+        let lang = match args.iter().position(|a| a == "--lang") {
+            Some(i) => match args.get(i + 1).map(String::as_str) {
+                Some("th") | Some("thai") => asr::AsrLang::Thai,
+                Some("auto") => asr::AsrLang::Auto,
+                Some(other) => anyhow::bail!("--lang 只认 th / auto，收到 {other:?}"),
+                None => anyhow::bail!("--lang 后面要跟语言（th 或 auto）"),
+            },
+            None => config::get().asr_lang,
+        };
         let t0 = Instant::now();
-        let t = asr.transcribe(std::path::Path::new(&args[2]))?;
+        let t = asr.transcribe(std::path::Path::new(&args[2]), lang)?;
         println!("{}", t.text);
         eprintln!(
             "（语种 {}，耗时 {:.2}s）",
@@ -48,6 +112,47 @@ fn main() -> Result<()> {
             t0.elapsed().as_secs_f32()
         );
         return Ok(());
+    }
+
+    // 先把泰语模型下下来，不必等到在菜单里点。
+    //
+    // 存在的理由有三个：想在有网的时候提前下好；菜单那条路出问题时的
+    // 备用入口；以及排障时能看到完整的失败原因——菜单里只显示
+    // 「失败（网络）」五个字，这里能看到 curl 的退出码。
+    if args.len() == 2 && args[1] == "--fetch-thai" {
+        println!("下载泰语模型（{:.0} MB）…", download::THAI.bytes as f64 / 1e6);
+        // **只装，不选。** 这条命令的语义是「先把模型下好」，
+        // 不该顺手改掉用户的识别语言——预下载和「我要开始用泰语」
+        // 是两件事。选择留给菜单（或用户自己改配置）。
+        download::start(&download::THAI, asr::verify_thai_model, || {});
+        // 下载跑在后台线程上，这里等它。**每秒打一次进度**——
+        // 574 MB 在慢网上要十几分钟，一个不动的光标会让人以为卡死了。
+        loop {
+            match download::state(&download::THAI) {
+                download::State::Downloading(pct) => {
+                    print!("\r  {pct}%   ");
+                    use std::io::Write;
+                    std::io::stdout().flush().ok();
+                }
+                download::State::Ready => {
+                    println!("\r  ✅ 已安装。到菜单「识别语言 → ไทย」选用它");
+                    return Ok(());
+                }
+                download::State::Failed(f) => {
+                    println!();
+                    anyhow::bail!("下载失败：{f}（详情见日志）");
+                }
+                download::State::Verifying => {
+                    print!("\r  验证中……");
+                    use std::io::Write;
+                    std::io::stdout().flush().ok();
+                }
+                download::State::Absent => {
+                    // 线程刚起来还没把状态置上，再等一轮
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_secs(1));
+        }
     }
 
     // 环境自检，排查「按了没反应」
@@ -61,12 +166,9 @@ fn main() -> Result<()> {
         log::info!("已开启按键调试：将打印每一个 flagsChanged 事件");
     }
 
-    let data_root = data_root()?;
     let store = store::Store::open(&data_root)?;
     log::info!("数据目录: {}", store.root().display());
     tray::set_data_root(data_root.clone());
-
-    let cfg = config::load(&data_root);
     log::debug!("配置: {cfg:?}");
 
     // 启动时清一次过期 raw。之后由工作线程每 6 小时再查一次——守护进程
@@ -220,8 +322,15 @@ fn worker(
 fn begin(store: &store::Store) -> Result<State> {
     let t0 = Instant::now();
     log::debug!("打开麦克风……（首次运行时 macOS 会在此弹出权限请求）");
-    // 每次录音才读配置，所以菜单里换设备立刻生效，不用重启
-    let recorder = audio::Recorder::start(config::get().input_device.as_deref())?;
+    // **一次读完，两处都用这一份快照。**
+    //
+    // 每次录音才读配置，所以菜单里换设备立刻生效，不用重启。
+    // 但设备和识别语言必须来自**同一时刻**：`Recorder::start` 可能要花
+    // 好几秒（首次运行时 macOS 在这里弹权限框），期间用户改了识别语言、
+    // 或者泰语模型刚好下载完成自动切了过去，事后再读就把这段音频
+    // 送去了另一个引擎——而用户按下录音键时看到的还是旧设置。
+    let cfg = config::get();
+    let recorder = audio::Recorder::start(cfg.input_device.as_deref())?;
     let session = store.begin()?;
     tray::set(tray::Status::Recording);
     println!("● 开始录音…… 再按一次停止");
@@ -230,6 +339,7 @@ fn begin(store: &store::Store) -> Result<State> {
         session,
         recorder,
         started: Instant::now(),
+        asr_lang: cfg.asr_lang,
     })
 }
 
@@ -238,6 +348,7 @@ fn finish(state: State, store: &store::Store, asr: &asr::Asr) -> Result<State> {
         mut session,
         recorder,
         started,
+        asr_lang,
     } = state
     else {
         return Ok(state);
@@ -270,7 +381,7 @@ fn finish(state: State, store: &store::Store, asr: &asr::Asr) -> Result<State> {
     println!("✓ 已保存 {secs:.1}s 录音");
 
     let t_asr = Instant::now();
-    match asr.transcribe(&committed.path) {
+    match asr.transcribe(&committed.path, asr_lang) {
         Ok(t) if !t.text.is_empty() => {
             log::debug!(
                 "转写耗时 {:.2}s，语种 {}",
@@ -408,6 +519,39 @@ fn diagnose(vendor: &std::path::Path) -> Result<()> {
             size
         );
     }
+
+    // 泰语是**可选**链路：缺东西不是故障，是「还没装」。
+    // 所以这里不用 ❌ 而用 ⚪，免得自检看起来像是坏了。
+    println!("\n泰语识别（可选，按需下载）:");
+    let wbin = vendor.join("bin/whisper-cli");
+    println!(
+        "  {} 引擎: {}",
+        if wbin.exists() { "✅" } else { "⚪" },
+        wbin.display()
+    );
+    match download::path_of(&download::THAI) {
+        Some(m) => {
+            // 判据必须是 `is_installed`（清单 + 体积），**不能是 `exists()`**。
+            // 用 exists 的话，删掉清单、清单里 sha 对不上、文件被截断
+            // 这三种坏情况自检全都报 ✅，而实际一录音就失败——
+            // 自检骗人比没有自检更糟。
+            // 判据必须是 `is_installed`（记录 + 体积 + 引擎指纹），
+            // **不能是 `exists()`**。用 exists 的话，删掉记录、记录对不上、
+            // 文件被截断、引擎换了这几种坏情况自检全都报 ✅，
+            // 而实际一录音就失败——自检骗人比没有自检更糟。
+            let issue = download::install_issue(&download::THAI);
+            let size = m.metadata().map(|x| x.len() / 1048576).unwrap_or(0);
+            println!(
+                "  {} 模型: {} ({} MiB{})",
+                if issue.is_none() { "✅" } else { "⚪" },
+                m.display(),
+                size,
+                issue.map(|r| format!("，{r}")).unwrap_or_default()
+            );
+        }
+        None => println!("  ⚪ 模型: 数据目录未初始化"),
+    }
+    println!("  当前识别语言: {:?}", config::get().asr_lang);
 
     println!("\n数据目录: {}", data_root()?.display());
     Ok(())

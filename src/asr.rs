@@ -5,10 +5,52 @@
 //! 关键设计：SenseVoice 冷启动仅 0.2s（含加载 242 MiB 权重），所以**不需要常驻
 //! 模型服务**——每次录音直接起一个子进程即可。这是换掉 Fun-ASR-Nano 换来的
 //! 简化（Nano 冷启动 11.45s，必须常驻）。
+//!
+//! ## 两条链路，不是一条链路的两个参数
+//!
+//! 泰语走的是**完全不同的引擎**：`whisper-cli` + Thonburian 微调模型
+//! （`docs/decisions/0004-thai-asr-engine.md`）。原因不是「SenseVoice 泰语
+//! 差」，而是 `llama-funasr-sensevoice` 的语种集合里**根本没有 `th`**
+//! （只有 zh/en/yue/ja/ko/nospeech），它永远不可能输出泰语。
+//!
+//! 两条链路的输出格式毫不相干，所以解析也是两套：SenseVoice 靠 `<|zh|>`
+//! 这类标记区分结果与日志（`clean`），whisper 靠 `-np -nt` 把输出压成纯文本
+//! （`clean_whisper`）。**不要试图合并它们**——合并意味着放松判据，而放松
+//! 判据的后果是日志被当成转写敲进用户的窗口。
 
 use anyhow::{bail, Context, Result};
+use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::OnceLock;
+
+/// vendor 目录。`Asr` 实例被 move 进了工作线程，而「下载完成后跑一次加载
+/// 冒烟」发生在下载线程上，两边碰不着面——所以路径单独存一份。
+static VENDOR: OnceLock<PathBuf> = OnceLock::new();
+
+pub fn set_vendor(p: PathBuf) {
+    VENDOR.set(p).ok();
+}
+
+/// 泰语引擎的身份指纹：`whisper-cli` 内容的 sha256 前 16 位。
+///
+/// 用途是把「模型验过了」这件事**绑到验它的那个引擎上**。模型放在数据目录里、
+/// 跨升级保留；引擎随 .app 走、升级即替换。不绑的话，升级换了引擎之后
+/// 上一次的加载冒烟就名不副实了——新引擎可能根本读不了这个量化格式，
+/// 而安装记录还说「已验证」。
+///
+/// 引擎不在（老版本升上来、bundle 残缺）时返回 `None`，
+/// 上层据此把泰语判为不可用。
+///
+/// 只在启动时算一次，2.5 MB 的 sha 几毫秒。
+pub fn engine_fingerprint() -> Option<String> {
+    use sha2::{Digest, Sha256};
+    let bin = VENDOR.get()?.join("bin/whisper-cli");
+    let bytes = std::fs::read(&bin).ok()?;
+    let mut h = Sha256::new();
+    h.update(&bytes);
+    Some(format!("{:x}", h.finalize())[..16].to_string())
+}
 
 /// 单段送入 ASR 的时长上限。
 ///
@@ -16,10 +58,31 @@ use std::process::Command;
 /// M1 的快捷键录音通常只有几十秒，这里只作为兜底护栏。
 pub const MAX_SEGMENT_SECS: f32 = 300.0;
 
+/// 识别语言的选择。**和界面语言（`i18n::Lang`）是两回事**：
+/// 界面切成泰文不会改变走哪个 ASR 引擎，识别切成泰语也不会改变菜单文字。
+///
+/// 为什么泰语要**用户显式选**，而不是自动路由：泰语是低频场景，为它引入
+/// 第二个常驻语种判别器和额外延迟不划算。这是**产品决策**，
+/// 不是「实测证明只能这样」——ADR-0004 §1 特意把这一点写清楚了，
+/// 自动路由列为后续实验项。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum AsrLang {
+    /// SenseVoice：中 / 英 / 粤 / 日 / 韩，模型自己判语种。
+    #[default]
+    Auto,
+    /// whisper + 泰语微调模型。需要先下载模型（`crate::download`）。
+    Thai,
+}
+
 pub struct Asr {
     bin: PathBuf,
     model: PathBuf,
     vad: PathBuf,
+    /// 泰语链路的二进制。**缺失不是致命错误**——它只影响泰语，
+    /// 主链路照常工作。老版本升级上来时 vendor 里没有这个文件，
+    /// 那时候不该连启动都失败。
+    whisper: PathBuf,
 }
 
 /// 一次转写的产物。
@@ -39,7 +102,10 @@ impl Asr {
             bin: vendor.join("bin/llama-funasr-sensevoice"),
             model: vendor.join("models/sensevoice-small-q8.gguf"),
             vad: vendor.join("models/fsmn-vad.gguf"),
+            whisper: vendor.join("bin/whisper-cli"),
         };
+        // 只校验主链路。whisper 的缺失留到真要用泰语时再报——
+        // 见 whisper 字段的说明。
         for p in [&a.bin, &a.model, &a.vad] {
             if !p.exists() {
                 bail!("缺少 ASR 依赖文件: {}", p.display());
@@ -48,7 +114,15 @@ impl Asr {
         Ok(a)
     }
 
-    pub fn transcribe(&self, wav: &Path) -> Result<Transcript> {
+    /// 按选定的识别语言分派到对应引擎。
+    pub fn transcribe(&self, wav: &Path, lang: AsrLang) -> Result<Transcript> {
+        match lang {
+            AsrLang::Auto => self.transcribe_sensevoice(wav),
+            AsrLang::Thai => self.transcribe_thai(wav),
+        }
+    }
+
+    fn transcribe_sensevoice(&self, wav: &Path) -> Result<Transcript> {
         let out = Command::new(&self.bin)
             .arg("-m")
             .arg(&self.model)
@@ -74,6 +148,109 @@ impl Asr {
         let stderr = String::from_utf8_lossy(&out.stderr);
         Ok(clean(&stdout, &stderr))
     }
+
+    /// 泰语：whisper-cli + Thonburian 微调模型。
+    ///
+    /// 解码参数**照抄 ADR-0004 §3 的基线**（线程 4、贪心 beam 1）——
+    /// 那张 RTF/RSS 表和 §4 的 CER 都是在这组参数下测的。改这里的任何一个
+    /// 数字，入库的数据就不再描述产品的实际行为了。
+    fn transcribe_thai(&self, wav: &Path) -> Result<Transcript> {
+        if !self.whisper.exists() {
+            bail!(
+                "泰语识别需要 {}，但它不在 vendor 里（跑 scripts/build-whisper-cli.sh）",
+                self.whisper.display()
+            );
+        }
+        let model = crate::download::path_of(&crate::download::THAI)
+            .context("数据目录未初始化，找不到泰语模型")?;
+        if !model.exists() {
+            bail!("泰语模型还没下载：{}", model.display());
+        }
+
+        let out = Command::new(&self.whisper)
+            .arg("-m").arg(&model)
+            .arg("-f").arg(wav)
+            // 强制泰语，不让它自己猜。模型是泰语微调的，猜错的代价远大于收益。
+            .arg("-l").arg("th")
+            .arg("-t").arg("4")
+            // 贪心解码：beam 1 + best-of 1。**两个都要给**——
+            // `-bo` 默认是 5，只给 `-bs 1` 的话温度回退时仍会采样五次，
+            // 那就不是基线测的那套解码参数了。
+            .arg("-bs").arg("1")
+            .arg("-bo").arg("1")
+            // -np：只输出结果，不打进度和模型信息
+            // -nt：不要时间戳。**这两个一起才够**——只给 -nt 的话
+            //      加载日志照样会混进 stdout。
+            .arg("-np")
+            .arg("-nt")
+            .output()
+            .with_context(|| format!("启动 {} 失败", self.whisper.display()))?;
+
+        if !out.status.success() {
+            bail!(
+                "泰语转写失败 (exit {:?}):\n{}",
+                out.status.code(),
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+        Ok(clean_whisper(&String::from_utf8_lossy(&out.stdout)))
+    }
+}
+
+/// whisper 的输出清理。
+///
+/// 和 SenseVoice 那套完全不同：`-np -nt` 之后 stdout 就是纯文本，没有
+/// `<|zh|>` 那样的标记可以拿来区分结果与日志。**所以判据只能是「stdout
+/// 上的非空行」**，这也是为什么必须同时给 `-np`——少了它，模型信息会
+/// 直接混进结果里被敲到用户的窗口。
+///
+/// 要过滤的是 whisper 的**非语音标注**：静音段会输出 `[BLANK_AUDIO]`、
+/// `(silence)`、`[音乐]` 之类。它们是模型的元信息，不是用户说的话，
+/// 粘到光标处纯属噪音。
+fn clean_whisper(stdout: &str) -> Transcript {
+    let mut text = String::new();
+    for line in stdout.lines() {
+        let t = line.trim();
+        if t.is_empty() || is_nonspeech_marker(t) {
+            continue;
+        }
+        // 段间要不要补空格：**两侧都是连写文字才不补**。
+        //
+        // ⚠️ 这条和 SenseVoice 那边的 `join_segments` **故意不一样**，
+        // 别去「统一」它们。那边是「任意一侧连写就不补」，为的是中英混排
+        // （`提交PR人家都review了`——中文夹英文本来就不带空格）。
+        // 泰语场景相反：泰文夹英文**是带空格的**，实测输出就是
+        // `ช่วย review pull request`。用「任意一侧」的判据，
+        // whisper 要是把它切成两段（`ช่วย` / `review …`），
+        // 拼出来就成了 `ช่วยreview` —— 词粘在一起。
+        let need_space = match (text.chars().last(), t.chars().next()) {
+            (Some(a), Some(b)) => !(is_scriptio_continua(a) && is_scriptio_continua(b)),
+            _ => false,
+        };
+        if need_space {
+            text.push(' ');
+        }
+        text.push_str(t);
+    }
+    let text = text.trim().to_string();
+    Transcript {
+        text,
+        // 强制 `-l th` 解码，语种就是我们指定的，不是模型判出来的。
+        // 这里如实写 `th`——`Transcript::lang` 的文档说它是「模型判定」，
+        // 在这条链路上它是「用户指定」，两者的可信度不同，但对下游
+        // （M2 的术语纠错选表）来说都是同一个用途。
+        lang: Some("th".into()),
+    }
+}
+
+/// whisper 的非语音标注。整行都是标注时才算——**不做行内剥离**，
+/// 因为 `[` 也可能是用户真的说了个方括号里的内容。
+fn is_nonspeech_marker(line: &str) -> bool {
+    let b = line.as_bytes();
+    matches!(
+        (b.first(), b.last()),
+        (Some(b'['), Some(b']')) | (Some(b'('), Some(b')'))
+    )
 }
 
 /// 从运行时输出里挑出转写文本，并过滤特殊 token。
@@ -273,6 +450,71 @@ fn strip_tags(s: &str) -> String {
         .to_string()
 }
 
+/// 泰语模型的安装校验：**让 whisper 真的加载一次这个文件**。
+///
+/// 由下载器在 **rename 之前**调用，所以传进来的是 `.part` 的路径，
+/// 不是最终路径——冒烟不过就不该产生最终文件。
+///
+/// 为什么 SHA 校验之外还要这一步：SHA 保证文件和我们测过的一致，
+/// 但保证不了**这个 whisper-cli 能加载它**——量化格式和 whisper.cpp
+/// 的版本是会脱节的。
+///
+/// ⚠️ **这个函数的契约是「模型能被加载」，不是「端到端转写可用」。**
+/// 它喂的是静音，只走通「解析模型头 → 分配张量 → 初始化」。
+/// 一个能加载、却在真实音频上解码失败的构建**能通过这一关**。
+/// 要覆盖那种情况得随包带一段真人泰语音频并断言输出内容，
+/// 那是另一笔成本，目前没做。
+///
+/// （`docs/plan-i18n-thai.md` §4 的状态机把「装好才提交配置」写成了硬要求；
+/// 「提交配置」这一半现在归 `tray::on_thai_installed`——用户可能在
+/// 这几分钟的下载里改了主意。）
+pub fn verify_thai_model(model: &Path) -> Result<()> {
+    let vendor = VENDOR.get().context("vendor 路径未初始化")?;
+    let bin = vendor.join("bin/whisper-cli");
+    if !bin.exists() {
+        bail!("泰语引擎不在 vendor 里：{}", bin.display());
+    }
+
+    let wav = std::env::temp_dir().join(format!("agentear-smoke-{}.wav", std::process::id()));
+    write_silence(&wav, 0.5).context("写冒烟用的静音 wav 失败")?;
+
+    let out = Command::new(&bin)
+        .arg("-m").arg(model)
+        .arg("-f").arg(&wav)
+        .arg("-l").arg("th")
+        .arg("-np").arg("-nt")
+        .output()
+        .with_context(|| format!("启动 {} 失败", bin.display()));
+    // 先删临时文件再判结果，别让失败路径漏掉清理
+    let _ = std::fs::remove_file(&wav);
+
+    let out = out?;
+    if !out.status.success() {
+        bail!(
+            "whisper 加载模型失败 (exit {:?}):\n{}",
+            out.status.code(),
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+    Ok(())
+}
+
+/// 16 kHz 单声道静音。whisper 只吃 16 kHz。
+fn write_silence(path: &Path, secs: f32) -> Result<()> {
+    let spec = hound::WavSpec {
+        channels: 1,
+        sample_rate: 16_000,
+        bits_per_sample: 16,
+        sample_format: hound::SampleFormat::Int,
+    };
+    let mut w = hound::WavWriter::create(path, spec)?;
+    for _ in 0..(16_000.0 * secs) as usize {
+        w.write_sample(0i16)?;
+    }
+    w.finalize()?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -443,4 +685,84 @@ mod tests {
         assert_eq!(t.text, "混流的结果");
     }
 
+}
+
+#[cfg(test)]
+mod whisper_tests {
+    use super::*;
+
+    /// whisper 的非语音标注不能进剪贴板。
+    ///
+    /// 静音段会输出 `[BLANK_AUDIO]`——自动上屏开着的话，用户按了录音键
+    /// 但没说话，光标处就会被敲进一行 `[BLANK_AUDIO]`。
+    #[test]
+    fn nonspeech_markers_are_dropped() {
+        let t = clean_whisper("[BLANK_AUDIO]\n(silence)\n[เสียงเพลง]\n");
+        assert_eq!(t.text, "", "只有非语音标注时应该什么都不输出");
+    }
+
+    /// 泰文段之间**不补空格**——泰文和中日文一样不用空格分词。
+    /// 补了的话，转写出来的句子中间会多出词典里没有的断点。
+    #[test]
+    fn thai_segments_are_not_space_joined() {
+        let t = clean_whisper("สวัสดี\nครับ\n");
+        assert_eq!(t.text, "สวัสดีครับ");
+    }
+
+    /// **泰文↔拉丁的接缝要补空格。**
+    ///
+    /// 这条是 codex 评审抓出来的：判据原本抄了 SenseVoice 那边的
+    /// 「任意一侧是连写文字就不补」，那是为中英混排设计的。
+    /// 泰语夹英文本来就带空格（实测 `ช่วย review pull request`），
+    /// 用那条判据、且 whisper 恰好在此处切了段，就会粘成 `ช่วยreview`。
+    #[test]
+    fn thai_to_latin_boundary_keeps_the_space() {
+        assert_eq!(clean_whisper("ช่วย\nreview\n").text, "ช่วย review");
+        assert_eq!(clean_whisper("review\nช่วย\n").text, "review ช่วย");
+        // 真实那句被切成两段的情形
+        assert_eq!(
+            clean_whisper("ช่วย\nreview pull request\nของผมหน่อยครับ\n").text,
+            "ช่วย review pull request ของผมหน่อยครับ"
+        );
+    }
+
+    /// 但拉丁字母之间要补。泰语里夹的英文技术词是真实场景
+    /// （ADR-0004 §4 记的 `ช่วย review pull request`），
+    /// 两段都是英文时粘成 `pullrequest` 就废了。
+    #[test]
+    fn latin_segments_still_get_a_space() {
+        let t = clean_whisper("pull\nrequest\n");
+        assert_eq!(t.text, "pull request");
+    }
+
+    /// 语种如实标 `th`。
+    ///
+    /// 注意这和 SenseVoice 那条链路的语义不同：那边是**模型判**的，
+    /// 这边是**用户指定**的（`-l th` 强制）。两者可信度不一样，
+    /// 但对下游（M2 按语种选术语表）是同一个用途。
+    #[test]
+    fn thai_path_reports_th() {
+        assert_eq!(clean_whisper("สวัสดี").lang.as_deref(), Some("th"));
+    }
+
+    /// 空输出不是错误——用户按了录音键又没说话，就该什么都不出。
+    #[test]
+    fn empty_output_is_empty_text() {
+        assert_eq!(clean_whisper("").text, "");
+        assert_eq!(clean_whisper("   \n  \n").text, "");
+    }
+
+    /// 识别语言默认是 Auto，**不是泰语**。
+    /// 泰语要用户显式选，还得先下 574 MB 的模型。
+    #[test]
+    fn default_recognition_language_is_auto() {
+        assert_eq!(AsrLang::default(), AsrLang::Auto);
+    }
+
+    /// 配置里的取值名要稳定——改了它，用户升级后设置会静默丢失。
+    #[test]
+    fn asr_lang_serializes_as_snake_case() {
+        assert_eq!(serde_json::to_string(&AsrLang::Auto).unwrap(), "\"auto\"");
+        assert_eq!(serde_json::to_string(&AsrLang::Thai).unwrap(), "\"thai\"");
+    }
 }

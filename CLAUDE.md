@@ -67,7 +67,10 @@ scripts/bundle.sh                             # 打 .app bundle → dist/
    这排除了「拿 SenseVoice 的语种标记当泰语路由依据」这一条路线（**但推不出
    「只能用户显式选择」**——显式菜单是产品决策，不是实测结论，见 ADR-0004 §1）。
    `src/asr.rs::thai_is_not_a_sensevoice_language` 钉住这个事实。
-6. **泰语引擎见 `docs/decisions/0004-thai-asr-engine.md`（草稿，未拍板）**。已完成：
+6. **泰语引擎见 `docs/decisions/0004-thai-asr-engine.md`（已临时选定 `distill` q5_0，
+   v0.3.1 落地）**。⚠️ 是「先用起来、拿到语料再复评」的默认值，不是终局；
+   换模型 = 改 `src/download.rs` 四个常量 + 重跑 `scripts/build-thai-model.sh`。
+   已完成：
    三个 Whisper 系泰语微调（Thonburian medium / Thonburian distil-large-v3 /
    typhoon-whisper-turbo）已转 GGML 并量化，跑在现有 whisper.cpp 上、不引入新运行时。
    FLEURS 泰语 test 上实测 CER（n=80 条录音，含自助法 CI）：Thonburian 两个约
