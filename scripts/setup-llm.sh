@@ -44,6 +44,12 @@ echo "==> 模型 ${HF_REPO}（约 7.7 GB）"
 # huggingface_hub 的交互，和 scripts/build-thai-model.sh 记的是同一件事。
 #
 # 两个端点轮着试：环境里的 HF_ENDPOINT（镜像）优先，官方站兜底。
+#
+# 💡 **2026-09-03 发现了更省事的办法**：`env -u HF_ENDPOINT <命令>`。
+# 本机 huggingface_hub 报 LocalEntryNotFoundError 的根因就是那个镜像变量，
+# 去掉它之后官方的下载路径直接可用（T3.1.2 实测）。
+# 这里保留 curl 逐文件是因为它已经跑通且能续传 8 GB 的分片；
+# **新写的脚本直接用 `env -u HF_ENDPOINT` 就行，不必再抄这一套。**
 ENDPOINTS=("${HF_ENDPOINT:-https://huggingface.co}" "https://huggingface.co")
 
 mkdir -p "$MODEL_DIR"

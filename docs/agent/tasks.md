@@ -167,7 +167,7 @@
 - **验收命令**：`docs/tts-survey.md` 里出现「实测」小节且含具体数字
 - **涉及文件**：`docs/tts-survey.md`
 
-### T3.1.3 出 ADR-0005 草稿  `PR_OPEN`
+### T3.1.3 出 ADR-0005 草稿  `DONE`
 - **优先级**：mid
 - **目标**：给 jason 一份能据以拍板的材料，**不替他拍板**。
 - **开发范围**：按现有 ADR 格式写 `docs/decisions/0005-tts-selection.md`，
@@ -179,3 +179,53 @@
 - **验收命令**：`grep -q '草稿' docs/decisions/0005-tts-selection.md`
 - **涉及文件**：`docs/decisions/0005-tts-selection.md`、`docs/milestones.md`
 - **风险**：这个 task 完成后会产生一个 BLOCKED 项（Q2：M3 怎么走），带着问题清单停下来问，符合无人值守纪律。
+
+---
+
+## F2.3 — 从跟进账本提升上来的正式 task
+
+这几条原本在 `followups.md` 里，但规模已经超出「批量小修」——
+按 pilot 的规矩提升为正式 task，单独走流程。
+
+### T2.3.1 把 HTTP 调用抽象成可注入 transport  `READY`
+- **优先级**：high
+- **目标**：让 `correct` / `label` 的错误分支能被**确定性测试**覆盖。
+- **背景**：FU-4 + FU-11（codex 两次提到）。现在「垃圾 JSON / 缺字段 /
+  HTTP 500 / 空 content / finish_reason=length / 批边界空白 / 中间批失败」
+  这些分支**只能靠真实边车碰运气覆盖**，而它们恰恰是最容易出问题的地方。
+- **开发范围**：定义一个 `Transport` trait（或函数指针），生产实现走 curl，
+  测试实现返回固定响应；为上述每个分支写测试。
+- **明确不做**：不引入 HTTP 客户端依赖（curl 子进程的选择不变）。
+- **验收命令**：`cargo test transport` 全绿，且覆盖列出的每个失败分支
+- **涉及文件**：`src/correct.rs`、`src/label.rs`
+
+### T2.3.2 让基准脚本直接调用生产分类路径  `READY`
+- **优先级**：mid
+- **目标**：消掉「基准 18/18 而生产 17/18」那个未定位的差异（现已同为 18/18，
+  但差异的根因仍未知，两套代码还在各跑各的）。
+- **背景**：FU-6 + FU-14。基准用的解析器更宽松、标签顺序也不同，
+  两边的数字本来就不该拿来互相印证。
+- **开发范围**：让 `spike/m2_bench.py` 调 `agentear` 的某个子命令
+  （或直接跑 `cargo test --ignored`），不再自带一份提示词和解析器。
+- **验收命令**：基准与生产报出同一个分数
+- **涉及文件**：`spike/m2_bench.py`、可能需要给二进制加一个 `--classify` 子命令
+
+### T2.3.3 curl 子进程的父进程墙钟超时  `READY`
+- **优先级**：mid
+- **目标**：`--max-time` 只覆盖传输阶段，卡在 stdin 交互时不保证。
+- **背景**：FU-5（codex Medium）。长录音分批后一次纠错要起 N 个子进程，
+  任何一个卡住都会拖住整段。
+- **开发范围**：父进程侧的 deadline + 到点 kill/wait；stdin 写入与
+  stdout/stderr 排空并发进行（现在是先写完再读，有背压窗口）。
+- **验收命令**：新增测试模拟一个不读 stdin 的子进程，断言父进程在 deadline 后返回
+- **涉及文件**：`src/correct.rs`、`src/label.rs`
+
+### T2.3.4 last-good 持久化  `READY`
+- **优先级**：low
+- **目标**：进程重启后 last-good 缓存为空；若编辑器截断文件后崩溃或断电，
+  启动加载只能退回内置默认表。
+- **背景**：FU-12（codex Low）。
+- **开发范围**：每次成功解析并清洗后，原子更新 `terms.json.bak`；
+  主文件坏且内存缓存为空时，验证并读备份。**解析失败时绝不更新备份**。
+- **验收命令**：`cargo test terms` 新增「主文件坏 + 无内存缓存 → 读备份」用例
+- **涉及文件**：`src/terms.rs`

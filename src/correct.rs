@@ -279,7 +279,25 @@ impl Corrector {
     /// 推理过程）；**分批时不能这么做**——一批里本来就可能含换行
     /// （ASR 的长转写里有），只取最后一行会把前面的内容整段吃掉。
     /// 分批的每批都短，模型吐推理的风险本来就低，`--no-thinking` 也在挡。
+    /// 边车的上下文窗口（`scripts/serve-llm.sh` 里写死 32768）。
+    ///
+    /// 提示词 + 术语表 + 正文 + max_tokens 全都要塞进这里。粗估按
+    /// **1 字 ≈ 1 token**（中文大致如此，英文更省），留一半余量。
+    const CONTEXT_BUDGET_CHARS: usize = 16_000;
+
     fn request(&self, text: &str, single_line_only: bool) -> Result<String> {
+        // 术语表是用户可编辑的，条数和长度都由他定。加得太多会把正文
+        // 挤出上下文窗口——那种失败很难看懂：模型只看到半截话，
+        // 纠出来的东西驴唇不对马嘴，而日志里一切正常。
+        let budget = self.terms_block.chars().count() + text.chars().count();
+        if budget > Self::CONTEXT_BUDGET_CHARS {
+            bail!(
+                "术语表({} 字) + 正文({} 字) 超出上下文预算 {}，按原文处理",
+                self.terms_block.chars().count(),
+                text.chars().count(),
+                Self::CONTEXT_BUDGET_CHARS
+            );
+        }
         let body = serde_json::json!({
             "model": "ornith",
             "messages": [{
