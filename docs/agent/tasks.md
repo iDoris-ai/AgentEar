@@ -128,7 +128,7 @@
 - **验收命令**：`cargo test routes` 全绿
 - **涉及文件**：`src/store.rs`、`src/main.rs`
 
-### T2.2.5 标签基准回归到至少 7/8  `PR_OPEN`
+### T2.2.5 标签基准回归到至少 7/8  `DONE`
 - **优先级**：mid
 - **目标**：证明重新定义边界 + few-shot 确实解决了 M0 那 6/8。
 - **开发范围**：在 T2.2.1 的扩充评测集上跑分，记录结果到 `docs/benchmarks-m2.md`；
@@ -156,7 +156,7 @@
 - **验收命令**：`test -s docs/tts-survey.md && grep -c '闽南\|台语\|Hokkien' docs/tts-survey.md`（至少命中 1 条）
 - **涉及文件**：`docs/tts-survey.md`
 
-### T3.1.2 实测最有希望的候选  `BACKLOG`
+### T3.1.2 实测最有希望的候选  `PR_OPEN`
 - **优先级**：mid
 - **目标**：把「据说支持」变成「实际跑通/跑不通」。
 - **开发范围**：从 T3.1.1 选 1–2 个最有希望的，实际下载并合成一句测试语音；
