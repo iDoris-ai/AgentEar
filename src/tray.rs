@@ -52,6 +52,24 @@ static DATA_ROOT: OnceLock<PathBuf> = OnceLock::new();
 /// 上一次建菜单时枚举到的设备列表。点击回调按下标取名字——必须用建菜单
 /// 那一刻的快照，不能重新枚举，否则期间插拔设备会选错。
 static DEVICE_SNAPSHOT: Mutex<Vec<String>> = Mutex::new(Vec::new());
+/// 「下载完成后要不要自动切到泰语」。
+///
+/// 下载要好几分钟，用户完全可能中途改主意点回 Auto。没有这个标志的话，
+/// 下载线程完成时会无条件把识别语言写成泰语，**把用户后来的选择覆盖掉**。
+/// 点 Auto 就清掉它，点泰语（未安装）就置上。
+static WANT_THAI: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// 泰语模型装好之后调用（由下载器在清单落地后回调）。
+///
+/// **只在用户此刻仍然想要泰语时才切**——见 `WANT_THAI`。
+pub fn on_thai_installed() {
+    if WANT_THAI.load(Ordering::SeqCst) {
+        config::update(|c| c.asr_lang = AsrLang::Thai);
+        log::info!("泰语模型已安装，识别语言切到泰语（下次录音生效）");
+    } else {
+        log::info!("泰语模型已安装；用户期间改选了别的语言，识别语言保持不变");
+    }
+}
 
 // 菜单项的 tag。用一个 action 加 tag 分发，省掉十几个 ObjC 方法。
 /// 开始 / 停止录音。放在菜单第一项——**这是触发键失灵时唯一的出路**，
@@ -418,6 +436,9 @@ fn handle(tag: isize, mtm: MainThreadMarker) {
             log::info!("界面语言改为 {}（下次展开菜单生效）", want.endonym());
         }
         TAG_ASR_LANG_BASE => {
+            // 取消掉「下完自动切泰语」的意图。用户明确选了 Auto，
+            // 几分钟后下载完成不该把这个选择推翻。
+            WANT_THAI.store(false, Ordering::SeqCst);
             config::update(|c| c.asr_lang = AsrLang::Auto);
             log::info!("识别语言改为自动（中/英/日/韩/粤，下次录音生效）");
         }
@@ -427,8 +448,11 @@ fn handle(tag: isize, mtm: MainThreadMarker) {
                     config::update(|c| c.asr_lang = AsrLang::Thai);
                     log::info!("识别语言改为泰语（下次录音生效）");
                 }
-                download::State::Downloading(pct) => {
-                    log::info!("泰语模型正在下载（{pct}%），完成后会自动切过去");
+                download::State::Downloading(_) | download::State::Verifying => {
+                    // 再点一次泰语 = 重新表达「下完就切」的意图
+                    // （用户可能中途点过 Auto 又反悔）
+                    WANT_THAI.store(true, Ordering::SeqCst);
+                    log::info!("泰语模型正在下载/验证中，完成后会自动切过去");
                 }
                 // 没下过、或者上次失败了 —— 两种都是「点一下开始下」。
                 //
@@ -438,8 +462,13 @@ fn handle(tag: isize, mtm: MainThreadMarker) {
                 // 配置在下载完成**并通过加载冒烟之后**才提交，
                 // 见 `asr::finish_thai_install`。
                 _ => {
+                    WANT_THAI.store(true, Ordering::SeqCst);
                     log::info!("开始下载泰语模型（574 MB）");
-                    download::start(&download::THAI, crate::asr::finish_thai_install);
+                    download::start(
+                        &download::THAI,
+                        crate::asr::verify_thai_model,
+                        on_thai_installed,
+                    );
                 }
             }
         }

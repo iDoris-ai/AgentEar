@@ -154,14 +154,27 @@ pub fn get() -> Config {
 }
 
 /// 改配置并立即落盘。写失败只记日志，内存里的改动仍然生效。
+///
+/// ## 为什么落盘在写锁**里面**
+///
+/// 原来是「锁内改、克隆一份、放锁、锁外写」。菜单只在主线程点，这看着没事——
+/// 直到模型下载线程也开始改配置（装完泰语要提交 `asr_lang`）。那时两个写者
+/// 可以这样交错：
+///
+/// ```text
+/// 下载线程: 改成 Thai, 克隆 A, 放锁 ────────────────► 写 A（旧）
+/// 主线程:              改保留期, 克隆 B, 放锁 ──► 写 B（新）
+/// ```
+///
+/// 落盘顺序反过来的话，用户刚改的保留期就被旧快照盖掉了。IO 在锁内虽然
+/// 让 `get()` 多等几毫秒（配置只有几百字节），但换来「改动和落盘是一个
+/// 原子步骤」，值。
 pub fn update(f: impl FnOnce(&mut Config)) {
-    let cfg = {
-        let mut guard = CURRENT.write().unwrap();
-        let cfg = guard.get_or_insert_with(Config::default);
-        f(cfg);
-        cfg.clone()
-    };
-    if let Err(e) = save(&cfg) {
+    let mut guard = CURRENT.write().unwrap();
+    let cfg = guard.get_or_insert_with(Config::default);
+    f(cfg);
+    let snapshot = cfg.clone();
+    if let Err(e) = save(&snapshot) {
         log::error!("保存配置失败: {e:#}");
     }
 }
@@ -170,8 +183,13 @@ fn save(cfg: &Config) -> Result<()> {
     let path = PATH.get().context("配置路径未初始化")?;
     let json = serde_json::to_string_pretty(cfg)?;
     // 先写临时文件再 rename：崩在写一半不会留下半截 JSON,
-    // 否则下次启动会解析失败并静默退回默认值
-    let tmp = path.with_extension("json.tmp");
+    // 否则下次启动会解析失败并静默退回默认值。
+    //
+    // 临时文件名带 pid：同进程的并发已由 `update` 的写锁挡住，但**两个
+    // AgentEar 实例**（终端一个、.app 一个）会用同一个数据目录。
+    // 共享一个 `.tmp` 路径的话，两边的写和 rename 会互相踩，
+    // 甚至把对方写了一半的内容 rename 成正式配置。
+    let tmp = path.with_extension(format!("json.tmp.{}", std::process::id()));
     std::fs::write(&tmp, json).with_context(|| format!("写 {} 失败", tmp.display()))?;
     std::fs::rename(&tmp, path).context("rename 配置文件失败")?;
     Ok(())
@@ -309,5 +327,27 @@ mod tests {
         assert_eq!(back.input_device.as_deref(), Some("MacBook Pro麦克风"));
         assert_eq!(back.trigger, Trigger::CtrlShiftR);
         assert_eq!(back.retention_days, 0);
+    }
+
+    /// 落盘必须发生在持有写锁期间，否则两个写者可以乱序落盘、
+    /// 让先改的覆盖后改的。这条测不了时序，但能钉住「update 之后
+    /// 内存和磁盘一致」这个可观察的后果。
+    #[test]
+    fn update_persists_atomically() {
+        let tmp = std::env::temp_dir().join(format!("agentear-cfg-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        load(&tmp);
+
+        update(|c| c.retention_days = 90);
+        update(|c| c.asr_lang = AsrLang::Thai);
+
+        let on_disk: Config =
+            serde_json::from_str(&std::fs::read_to_string(tmp.join("config.json")).unwrap())
+                .unwrap();
+        assert_eq!(on_disk.retention_days, 90, "先改的那项被后一次写覆盖了");
+        assert_eq!(on_disk.asr_lang, AsrLang::Thai);
+        assert_eq!(get().retention_days, 90, "内存和磁盘不一致");
+
+        std::fs::remove_dir_all(&tmp).ok();
     }
 }

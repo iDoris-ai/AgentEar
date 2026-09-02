@@ -194,10 +194,17 @@ fn clean_whisper(stdout: &str) -> Transcript {
         if t.is_empty() || is_nonspeech_marker(t) {
             continue;
         }
-        // 泰文不用空格分词，段间不补空格；其余情况补一个。
-        // 这里复用和 SenseVoice 一样的判据，行为才一致。
+        // 段间要不要补空格：**两侧都是连写文字才不补**。
+        //
+        // ⚠️ 这条和 SenseVoice 那边的 `join_segments` **故意不一样**，
+        // 别去「统一」它们。那边是「任意一侧连写就不补」，为的是中英混排
+        // （`提交PR人家都review了`——中文夹英文本来就不带空格）。
+        // 泰语场景相反：泰文夹英文**是带空格的**，实测输出就是
+        // `ช่วย review pull request`。用「任意一侧」的判据，
+        // whisper 要是把它切成两段（`ช่วย` / `review …`），
+        // 拼出来就成了 `ช่วยreview` —— 词粘在一起。
         let need_space = match (text.chars().last(), t.chars().next()) {
-            (Some(a), Some(b)) => !is_scriptio_continua(a) && !is_scriptio_continua(b),
+            (Some(a), Some(b)) => !(is_scriptio_continua(a) && is_scriptio_continua(b)),
             _ => false,
         };
         if need_space {
@@ -423,44 +430,36 @@ fn strip_tags(s: &str) -> String {
         .to_string()
 }
 
-/// 泰语模型下载完成后的收尾：**先冒烟，再提交配置**。
+/// 泰语模型的安装校验：**让 whisper 真的加载一次这个文件**。
 ///
-/// 为什么不能下完就把 `asr_lang` 设成 Thai：那样用户会拿到一个
-/// 「菜单显示已选泰语、一录音就报错」的状态，而错误只出现在日志里。
-/// SHA 校验保证文件和我们测过的一致，但保证不了**这个 whisper-cli
-/// 能加载它**——量化格式和 whisper.cpp 的版本是会脱节的。
-/// 所以真的让它加载一次模型，成功了才认。
+/// 由下载器在 **rename 之前**调用，所以传进来的是 `.part` 的路径，
+/// 不是最终路径——冒烟不过就不该产生最终文件。
 ///
-/// （`docs/plan-i18n-thai.md` §4 的状态机把这条写成了硬要求。）
-pub fn finish_thai_install() {
-    match smoke_thai() {
-        Ok(()) => {
-            crate::config::update(|c| c.asr_lang = AsrLang::Thai);
-            log::info!("泰语模型加载冒烟通过，识别语言已切到泰语");
-        }
-        Err(e) => log::error!("泰语模型下载成功但加载失败，识别语言保持不变: {e:#}"),
-    }
-}
-
-/// 让 whisper 真的加载一次模型。
+/// 为什么 SHA 校验之外还要这一步：SHA 保证文件和我们测过的一致，
+/// 但保证不了**这个 whisper-cli 能加载它**——量化格式和 whisper.cpp
+/// 的版本是会脱节的。
 ///
-/// 喂一段**极短的静音**：目的是走通「解析模型头 → 分配张量 → 初始化」，
-/// 不是测识别质量。
+/// ⚠️ **这个函数的契约是「模型能被加载」，不是「端到端转写可用」。**
+/// 它喂的是静音，只走通「解析模型头 → 分配张量 → 初始化」。
+/// 一个能加载、却在真实音频上解码失败的构建**能通过这一关**。
+/// 要覆盖那种情况得随包带一段真人泰语音频并断言输出内容，
+/// 那是另一笔成本，目前没做。
 ///
-/// 顺带还吃掉了一笔一次性开销：**Metal 后端首次运行要准备 shader**，
-/// 实测比之后的每一次多花约 4 秒。放在这里花掉最合适——用户刚等完
-/// 574 MB 的下载，再等几秒无感；要是留到他第一次真正录音时才发生，
-/// 那就是「第一次用泰语特别慢」这种莫名其妙的体验。
-fn smoke_thai() -> Result<()> {
+/// （`docs/plan-i18n-thai.md` §4 的状态机把「装好才提交配置」写成了硬要求；
+/// 「提交配置」这一半现在归 `tray::on_thai_installed`——用户可能在
+/// 这几分钟的下载里改了主意。）
+pub fn verify_thai_model(model: &Path) -> Result<()> {
     let vendor = VENDOR.get().context("vendor 路径未初始化")?;
     let bin = vendor.join("bin/whisper-cli");
-    let model = crate::download::path_of(&crate::download::THAI).context("数据目录未初始化")?;
+    if !bin.exists() {
+        bail!("泰语引擎不在 vendor 里：{}", bin.display());
+    }
 
     let wav = std::env::temp_dir().join(format!("agentear-smoke-{}.wav", std::process::id()));
     write_silence(&wav, 0.5).context("写冒烟用的静音 wav 失败")?;
 
     let out = Command::new(&bin)
-        .arg("-m").arg(&model)
+        .arg("-m").arg(model)
         .arg("-f").arg(&wav)
         .arg("-l").arg("th")
         .arg("-np").arg("-nt")
@@ -688,6 +687,23 @@ mod whisper_tests {
     fn thai_segments_are_not_space_joined() {
         let t = clean_whisper("สวัสดี\nครับ\n");
         assert_eq!(t.text, "สวัสดีครับ");
+    }
+
+    /// **泰文↔拉丁的接缝要补空格。**
+    ///
+    /// 这条是 codex 评审抓出来的：判据原本抄了 SenseVoice 那边的
+    /// 「任意一侧是连写文字就不补」，那是为中英混排设计的。
+    /// 泰语夹英文本来就带空格（实测 `ช่วย review pull request`），
+    /// 用那条判据、且 whisper 恰好在此处切了段，就会粘成 `ช่วยreview`。
+    #[test]
+    fn thai_to_latin_boundary_keeps_the_space() {
+        assert_eq!(clean_whisper("ช่วย\nreview\n").text, "ช่วย review");
+        assert_eq!(clean_whisper("review\nช่วย\n").text, "review ช่วย");
+        // 真实那句被切成两段的情形
+        assert_eq!(
+            clean_whisper("ช่วย\nreview pull request\nของผมหน่อยครับ\n").text,
+            "ช่วย review pull request ของผมหน่อยครับ"
+        );
     }
 
     /// 但拉丁字母之间要补。泰语里夹的英文技术词是真实场景

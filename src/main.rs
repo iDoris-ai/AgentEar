@@ -25,6 +25,13 @@ enum State {
         session: store::Session,
         recorder: audio::Recorder,
         started: Instant,
+        /// 这一段录音用哪个引擎转，**在按下录音键那一刻就定死**。
+        ///
+        /// 菜单说的是「下次录音生效」，那就得说到做到：录到一半时用户
+        /// 改了识别语言、或者泰语模型刚好下载完成自动切了过去，
+        /// 都不该改变**这一段**音频的去向。不快照的话，`finish` 是在
+        /// 录音结束后才读配置的，那时读到的已经是新值了。
+        asr_lang: asr::AsrLang,
     },
 }
 
@@ -47,6 +54,21 @@ fn main() -> Result<()> {
     download::set_data_root(data_root.clone());
     let cfg = config::load(&data_root);
 
+    // **配置和实际安装状态对账。**
+    //
+    // 配置里写着泰语，但模型可能已经被删了、被换过、或者当初压根没装完。
+    // 不对账的话，菜单只是不显示勾，而**每一次录音都会走泰语分支然后失败**，
+    // 错误只出现在日志里——用户看到的是「按了键，什么都没出来」。
+    // 宁可退回自动（那条链路的模型随包走，一定在），并把原因写清楚。
+    let cfg = if cfg.asr_lang == asr::AsrLang::Thai && !download::is_installed(&download::THAI) {
+        log::warn!("配置里选的是泰语，但泰语模型没有装好（缺失或未通过校验）");
+        log::warn!("  已退回自动识别。要用泰语：菜单「识别语言 → ไทย」，或跑 --fetch-thai");
+        config::update(|c| c.asr_lang = asr::AsrLang::Auto);
+        config::get()
+    } else {
+        cfg
+    };
+
     let asr = asr::Asr::new(&vendor)?;
     log::debug!("ASR 依赖检查通过");
 
@@ -55,10 +77,18 @@ fn main() -> Result<()> {
     // `--lang th` 可以在不改配置的情况下试泰语链路——排查「是模型的问题还是
     // 录音的问题」时，不该逼用户先去菜单里改设置再改回来。
     if args.len() >= 3 && args[1] == "--transcribe" {
-        let lang = if args.iter().any(|a| a == "th") && args.iter().any(|a| a == "--lang") {
-            asr::AsrLang::Thai
-        } else {
-            config::get().asr_lang
+        // 取 `--lang` **紧跟着的那个值**，不是「参数里出现过 th 就算」——
+        // 后者会把 `--transcribe th.wav` 里的文件名当成语言选择。
+        // 写错了就报错退出，不静默用配置里的值：排障时最怕的就是
+        // 「我明明指定了泰语」而它其实走了别的引擎。
+        let lang = match args.iter().position(|a| a == "--lang") {
+            Some(i) => match args.get(i + 1).map(String::as_str) {
+                Some("th") | Some("thai") => asr::AsrLang::Thai,
+                Some("auto") => asr::AsrLang::Auto,
+                Some(other) => anyhow::bail!("--lang 只认 th / auto，收到 {other:?}"),
+                None => anyhow::bail!("--lang 后面要跟语言（th 或 auto）"),
+            },
+            None => config::get().asr_lang,
         };
         let t0 = Instant::now();
         let t = asr.transcribe(std::path::Path::new(&args[2]), lang)?;
@@ -78,7 +108,10 @@ fn main() -> Result<()> {
     // 「失败（网络）」五个字，这里能看到 curl 的退出码。
     if args.len() == 2 && args[1] == "--fetch-thai" {
         println!("下载泰语模型（{:.0} MB）…", download::THAI.bytes as f64 / 1e6);
-        download::start(&download::THAI, asr::finish_thai_install);
+        // **只装，不选。** 这条命令的语义是「先把模型下好」，
+        // 不该顺手改掉用户的识别语言——预下载和「我要开始用泰语」
+        // 是两件事。选择留给菜单（或用户自己改配置）。
+        download::start(&download::THAI, asr::verify_thai_model, || {});
         // 下载跑在后台线程上，这里等它。**每秒打一次进度**——
         // 574 MB 在慢网上要十几分钟，一个不动的光标会让人以为卡死了。
         loop {
@@ -89,7 +122,7 @@ fn main() -> Result<()> {
                     std::io::stdout().flush().ok();
                 }
                 download::State::Ready => {
-                    println!("\r  ✅ 完成，识别语言已可切到泰语");
+                    println!("\r  ✅ 已安装。到菜单「识别语言 → ไทย」选用它");
                     return Ok(());
                 }
                 download::State::Failed(f) => {
@@ -286,6 +319,7 @@ fn begin(store: &store::Store) -> Result<State> {
         session,
         recorder,
         started: Instant::now(),
+        asr_lang: config::get().asr_lang,
     })
 }
 
@@ -294,6 +328,7 @@ fn finish(state: State, store: &store::Store, asr: &asr::Asr) -> Result<State> {
         mut session,
         recorder,
         started,
+        asr_lang,
     } = state
     else {
         return Ok(state);
@@ -326,7 +361,7 @@ fn finish(state: State, store: &store::Store, asr: &asr::Asr) -> Result<State> {
     println!("✓ 已保存 {secs:.1}s 录音");
 
     let t_asr = Instant::now();
-    match asr.transcribe(&committed.path, config::get().asr_lang) {
+    match asr.transcribe(&committed.path, asr_lang) {
         Ok(t) if !t.text.is_empty() => {
             log::debug!(
                 "转写耗时 {:.2}s，语种 {}",
@@ -476,14 +511,30 @@ fn diagnose(vendor: &std::path::Path) -> Result<()> {
     );
     match download::path_of(&download::THAI) {
         Some(m) => {
-            let ok = m.exists();
+            // 判据必须是 `is_installed`（清单 + 体积），**不能是 `exists()`**。
+            // 用 exists 的话，删掉清单、清单里 sha 对不上、文件被截断
+            // 这三种坏情况自检全都报 ✅，而实际一录音就失败——
+            // 自检骗人比没有自检更糟。
+            let installed = download::is_installed(&download::THAI);
             let size = m.metadata().map(|x| x.len() / 1048576).unwrap_or(0);
+            let note = if installed {
+                String::new()
+            } else if m.metadata().is_ok_and(|x| x.len() == download::THAI.bytes) {
+                // 体积对上了、只是没有安装记录：多半是手动拷进来的，
+                // 或者上一次装到一半被打断。说清楚是哪种，别让人以为文件坏了。
+                "，⚠️ 体积对得上但没有安装记录（手动放的？装到一半？）——跑 --fetch-thai 校验一次".into()
+            } else if m.exists() {
+                format!("，⚠️ 体积不符（{size} MiB，期望 {} MiB）——重跑 --fetch-thai",
+                        download::THAI.bytes / 1048576)
+            } else {
+                "，未下载——菜单里选「识别语言 → ไทย」，或跑 --fetch-thai".into()
+            };
             println!(
                 "  {} 模型: {} ({} MiB{})",
-                if ok { "✅" } else { "⚪" },
+                if installed { "✅" } else { "⚪" },
                 m.display(),
                 size,
-                if ok { "" } else { "，未下载——菜单里选「识别语言 → ไทย」开始下" }
+                note
             );
         }
         None => println!("  ⚪ 模型: 数据目录未初始化"),
