@@ -156,7 +156,7 @@
 - **验收命令**：`test -s docs/tts-survey.md && grep -c '闽南\|台语\|Hokkien' docs/tts-survey.md`（至少命中 1 条）
 - **涉及文件**：`docs/tts-survey.md`
 
-### T3.1.2 实测最有希望的候选  `PR_OPEN`
+### T3.1.2 实测最有希望的候选  `DONE`
 - **优先级**：mid
 - **目标**：把「据说支持」变成「实际跑通/跑不通」。
 - **开发范围**：从 T3.1.1 选 1–2 个最有希望的，实际下载并合成一句测试语音；
@@ -167,7 +167,7 @@
 - **验收命令**：`docs/tts-survey.md` 里出现「实测」小节且含具体数字
 - **涉及文件**：`docs/tts-survey.md`
 
-### T3.1.3 出 ADR-0005 草稿  `BACKLOG`
+### T3.1.3 出 ADR-0005 草稿  `PR_OPEN`
 - **优先级**：mid
 - **目标**：给 jason 一份能据以拍板的材料，**不替他拍板**。
 - **开发范围**：按现有 ADR 格式写 `docs/decisions/0005-tts-selection.md`，

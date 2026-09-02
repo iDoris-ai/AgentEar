@@ -131,7 +131,15 @@ derived/transcripts/
 
 验收标准直接用 `docs/asr-selection.md` §4 的那张带阈值的表（AEC 自触发率 = 0、打断响应 < 300ms、误打断 < 1次/10分钟、打断后恢复行为一致）。
 
-**TTS 尚未选型。** 选型时有一条**约束以前没写下来**（jason 2026-09-02 口述补充）：
+**TTS 尚未选型，调研见 [ADR-0005](decisions/0005-tts-selection.md)（草稿）。**
+已确定：载体（OmniVoice + mlx-audio）在 M1 Max 上跑通，3–4 秒一句、峰值 1.8 GB；
+**但方言正确性还没验证**（需要人耳听 `~/Desktop/agentear-tts-samples/`，
+见 `docs/agent/progress.md` 的 Q3）。
+
+⚠️ **资源账**：TTS 1.8 GB + M2 常驻 LLM 7.3 GB ≈ 9.1 GB，
+**已贴着 ADR-0002 的 ≤9 GiB 上限**。两者能否同时常驻是个独立于选型的问题。
+
+选型时有一条**约束以前没写下来**（jason 2026-09-02 口述补充）：
 
 > **输出语音要能说方言**：台湾话、广东话、香港话、英语、泰语。
 > 允许分阶段——先做普通话或先做英语都行。
