@@ -8,8 +8,8 @@
 
 ## 此刻状态
 
-**进行中**：T2.1.1 术语表数据结构与默认表（F2.1）
-**分支**：`feat/T2.1.1-terms-table`，worktree `../AgentEar-F2.1`
+**已完成**：T2.1.1（PR #11 已合并）
+**进行中**：T3.1.1 TTS 候选调研（F3.1）—— 纯文档
 
 ## 环境前置（开工前必须确认）
 
@@ -42,9 +42,25 @@ scripts/serve-llm.sh          # 默认 127.0.0.1:8793
 
 | Task | 分支 | PR | 状态 |
 |---|---|---|---|
-| T2.1.1 | `feat/T2.1.1-terms-table` | — | IN_PROGRESS |
+| T2.1.1 | `feat/T2.1.1-terms-table` | #11 | **DONE** |
+| T3.1.1 | `docs/T3.1.1-tts-survey` | 待开 | PR_OPEN |
 
-worktree：`../AgentEar-F2.1`（F2.1 专属）、`../AgentEar-plan`（已合并，待人工清理）
+worktree：`../AgentEar-F2.1`、`../AgentEar-F3.1`、`../AgentEar-plan`（后者已合并，待人工清理）
+
+## 跟进账本
+
+3 条 OPEN（FU-1/2/3，全部来自 T2.1.1 的 codex 评审）。按 pilot 规矩，
+**主线 task 全部做完才批量清**，不提前做。
+
+## 踩过且已钉住的坑（给后面的 task 看）
+
+1. **worktree 里没有 `vendor/`**（不入库）。跑真实转写要
+   `AGENTEAR_VENDOR=/Users/jason/Dev/tools/AgentEar/vendor`。
+2. **提示词的格式歧义会让整个功能失灵**，不是错一条。T2.1.1 踩了五版：
+   写「可能被识别成 X」模型会反向替换；写「遇到左边替换右边」会误伤真实词；
+   光写「由上下文决定」不够，要 few-shot 反例；最后还得把本身是高频普通词的
+   alias（`ID`/`肉`/`日报`）整个去掉。
+3. **改提示词必须真调一次边车验证**，单元测试和真实录音都可能全绿而功能是错的。
 
 ## 变更日志
 
