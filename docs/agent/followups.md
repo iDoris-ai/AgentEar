@@ -10,3 +10,4 @@
 - [ ] FU-4 · B · src=PR#T2.2.2-codex · 2026-09-03 · label/correct 的错误降级缺确定性测试：垃圾 JSON、缺字段、HTTP 500、空 content、finish_reason=length 都没经 HTTP 路径验证过（需 mock server 或可注入 transport）
 - [ ] FU-5 · B · src=PR#T2.2.2-codex · 2026-09-03 · curl 子进程缺父进程强制的墙钟超时：--max-time 只覆盖传输阶段，卡在 stdin 交互时不保证；且 stdin 同步写入发生在排空 stdout/stderr 之前
 - [ ] FU-6 · B · src=PR#T2.2.2-codex · 2026-09-03 · spike/m2_bench.py 与生产用不同的解析器和标签顺序，应让基准直接调用生产分类路径
+- [ ] FU-7 · B · src=PR#T2.2.3-codex · 2026-09-03 · 显式标记只覆盖句首元指令句式，句中的「……，这算是一个 idea 吧」认不出来。有意的取舍（误判代价 > 漏判），但值得记着：若用户实际习惯是句尾标记，需要重新设计

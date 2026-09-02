@@ -147,6 +147,165 @@ unknown：无法归类或内容无意义。以上都不像就选它，宁可 unk
 /// 给到 10 秒是为了容忍模型冷加载。
 const TIMEOUT_SECS: u64 = 10;
 
+/// 标签是怎么来的。
+///
+/// 这个区分不是记账用的，它决定了**下游能不能信这个标签**：
+/// 用户明说的那条是确定的，模型推断的那条随时可能错。
+/// `routes/` 的记录里带着它（spec.md §3）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Source {
+    /// 用户在语音里明说了「这是一个 idea」。**不得被模型推断覆盖**
+    /// （架构边界 B5，README 定的产品行为）。
+    Explicit,
+    /// 模型推断的。
+    Model,
+}
+
+/// 一次分类的结果。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Classified {
+    pub label: Label,
+    pub source: Source,
+}
+
+/// 显式标记的引导词。**只在句首匹配**——见 `detect_explicit` 的说明。
+const LEADERS: [&str; 12] = [
+    "这是一个", "这是个", "这是", "记一个", "记个", "记一条",
+    "标记为", "归到", "算是",
+    "this is a", "this is an", "mark as",
+];
+
+/// 每个标签的中英文说法。
+///
+/// ## 收词标准：只收「不会有别的意思」的词
+///
+/// 去掉过「问题」——它在中文里主要指**缺陷、麻烦**，不是「疑问」。
+/// 「这是一个问题，我们需要修复它」是在报告一个 bug，而按字面它会被
+/// 判成显式的 question 且**模型无法纠正**。想显式标 question 的人会说
+/// 「这是一个疑问」或「这是一个 question」。
+///
+/// 同理去掉「记录」（「这是一个记录」远不如「会议记录」常见）。
+/// 这条标准和术语表那边一样：**误判的代价远大于多收一个词的收益**。
+const SPOKEN: [(&str, Label); 18] = [
+    ("idea", Label::Idea),
+    ("想法", Label::Idea),
+    ("点子", Label::Idea),
+    ("灵感", Label::Idea),
+    ("task", Label::Task),
+    ("任务", Label::Task),
+    ("待办", Label::Task),
+    ("command", Label::Command),
+    ("指令", Label::Command),
+    ("命令", Label::Command),
+    ("note", Label::Note),
+    ("笔记", Label::Note),
+    ("journal", Label::Journal),
+    ("日记", Label::Journal),
+    ("日志", Label::Journal),
+    ("question", Label::Question),
+    ("疑问", Label::Question),
+    ("reference", Label::Reference),
+];
+
+/// 标签词后面必须是这些之一，否则不算匹配。
+///
+/// **这是 codex 抓出来的一条**：没有词尾边界时，「这是一个任务栏截图」
+/// 会命中「任务」、`This is an ideal solution` 会命中 `idea`、
+/// `This is a notebook` 会命中 `note`——三个都是普通名词短语，
+/// 却被永久钉成显式标签。
+fn is_boundary(rest: &str) -> bool {
+    match rest.chars().next() {
+        None => true, // 到句尾了
+        Some(c) => {
+            c.is_whitespace()
+                || c.is_ascii_punctuation()
+                || matches!(
+                    c,
+                    '，' | '。' | '、' | '：' | '；' | '！' | '？'
+                        | '（' | '）' | '「' | '」' | '“' | '”' | '　'
+                )
+        }
+    }
+}
+
+/// 引导词后面出现这些，说明用户是在**问**或在**比较**，不是在标记。
+///
+/// 「这是一个任务还是一个想法？」按字面会命中 task，但他显然是在问。
+/// 显式标记不可被模型纠正，所以这种句子必须让给模型判断。
+const NOT_A_MARKER: [&str; 4] = ["还是", "或者", "呢？", "吗？"];
+
+/// 从文本里找显式标记。**纯字符串匹配，不问模型**——
+/// 「显式」的意思就是不靠猜（spec.md §3）。
+///
+/// ## 为什么只在句首匹配
+///
+/// 「问题」「记录」这些词在正常说话里太常见了：
+/// 「我遇到了一个问题」是在描述困境，不是在给系统打标签。
+/// 只认句首的「这是一个 X」「记一个 X」这类**元指令句式**，
+/// 才能把「给系统下指令」和「说话内容里恰好有这个词」分开。
+///
+/// 代价是漏检：用户在句子中间说「……，这算是一个 idea 吧」不会被认出来。
+/// **这是有意的取舍**——显式标记误判的代价（把用户的内容强行归错类，
+/// 而且不可被模型纠正）比漏判高得多，漏了还有模型兜着。
+///
+/// ## 不剥离标记文本
+///
+/// 「这是一个 idea，给录音笔加 WiFi」识别之后，`text` 仍然是**整句**，
+/// 不会被剥成「给录音笔加 WiFi」。剥离要判断从哪剥到哪，判错就是丢内容，
+/// 而 raw 优先的原则下宁可多留不可少留。
+pub fn detect_explicit(text: &str) -> Option<Label> {
+    // 疑问句一律不算显式标记。「这是一个任务吗？」是在问，不是在标。
+    let trimmed = text.trim_end();
+    if trimmed.ends_with('？') || trimmed.ends_with('?') {
+        return None;
+    }
+
+    // 归一化全角空格：`this　is a task`（U+3000）里的空格不是半角，
+    // 而引导词是按字面匹配的，不归一就认不出来。
+    let normalized = text.replace('\u{3000}', " ");
+
+    // 剥掉前导语气词。**按词剥，不按字符集剥**——
+    // 早先用字符集合 `'那' | '个' | '就'`，那会把「那，这是一个任务还是…」
+    // 的「那，」吃掉，让一个非句首的从句变成句首，进而被误判成显式标记。
+    // 「那」「就」本身是有意义的词（「那篇博客」「就这样」），不是语气词。
+    const FILLERS: [&str; 8] = ["嗯", "呃", "啊", "哦", "那个", "然后", "，", ","];
+    let mut t = normalized.trim_start();
+    loop {
+        let before = t.len();
+        for f in FILLERS {
+            t = t.strip_prefix(f).unwrap_or(t).trim_start();
+        }
+        if t.len() == before {
+            break;
+        }
+    }
+    let lower = t.to_lowercase();
+
+    for lead in LEADERS {
+        let Some(rest) = lower.strip_prefix(lead) else {
+            continue;
+        };
+        // 引导词后面允许有空白（「这是一个 idea」的那个空格）
+        let rest = rest.trim_start();
+        for (word, label) in SPOKEN {
+            let Some(after) = rest.strip_prefix(word) else {
+                continue;
+            };
+            // 词尾必须是边界，否则「任务栏」「ideal」「notebook」都会命中
+            if !is_boundary(after) {
+                continue;
+            }
+            // 「这是一个任务还是一个想法」——在比较，不是在标记
+            if NOT_A_MARKER.iter().any(|m| after.contains(m)) {
+                return None;
+            }
+            return Some(label);
+        }
+    }
+    None
+}
+
 pub struct Classifier {
     url: String,
 }
@@ -158,17 +317,25 @@ impl Classifier {
 
     /// 给一段文字分类。**不返回 Result**——见模块文档：
     /// 任何失败都是 `unknown`，调用方不该被迫处理错误分支。
-    pub fn classify(&self, text: &str) -> Label {
+    ///
+    /// **显式标记优先**：用户明说了「这是一个 idea」就直接采信，
+    /// 连模型都不问（架构边界 B5）。这既是产品要求，也顺带省掉一次推理。
+    pub fn classify(&self, text: &str) -> Classified {
         if text.trim().is_empty() {
-            return Label::Unknown;
+            return Classified { label: Label::Unknown, source: Source::Model };
         }
-        match self.try_classify(text) {
+        if let Some(label) = detect_explicit(text) {
+            log::debug!("显式标记：{}", label.as_str());
+            return Classified { label, source: Source::Explicit };
+        }
+        let label = match self.try_classify(text) {
             Ok(l) => l,
             Err(e) => {
                 log::warn!("标签识别不可用，落 unknown: {e:#}");
                 Label::Unknown
             }
-        }
+        };
+        Classified { label, source: Source::Model }
     }
 
     fn try_classify(&self, text: &str) -> Result<Label> {
@@ -310,15 +477,17 @@ mod tests {
     #[test]
     fn empty_input_is_unknown_without_a_request() {
         let c = Classifier::new("http://127.0.0.1:1");
-        assert_eq!(c.classify(""), Label::Unknown);
-        assert_eq!(c.classify("   \n "), Label::Unknown);
+        assert_eq!(c.classify("").label, Label::Unknown);
+        assert_eq!(c.classify("   \n ").label, Label::Unknown);
     }
 
     /// **边车不可达时落 unknown，不 panic、不返回 Err。**
     #[test]
     fn unreachable_service_yields_unknown() {
         let c = Classifier::new("http://127.0.0.1:1");
-        assert_eq!(c.classify("随便一句话"), Label::Unknown);
+        let r = c.classify("随便一句话");
+        assert_eq!(r.label, Label::Unknown);
+        assert_eq!(r.source, Source::Model, "不是显式标记，来源应该是 model");
     }
 
     /// 序列化名字要稳定——它会写进 `routes/` 的 JSON，改了会让历史记录读不出来。
@@ -411,7 +580,7 @@ mod tests {
         let mut hit = 0;
         let mut misses = Vec::new();
         for (text, want) in cases {
-            let got = c.classify(text);
+            let got = c.classify(text).label;
             if got == want {
                 hit += 1;
             } else {
@@ -431,5 +600,149 @@ mod tests {
             "18 条只对了 {hit} 条（阈值 15）：\n{}",
             misses.join("\n")
         );
+    }
+
+    /// 中英文的各种显式说法都要认出来。
+    #[test]
+    fn explicit_markers_are_recognized() {
+        for (text, want) in [
+            ("这是一个 idea，给录音笔加个 WiFi 模块", Label::Idea),
+            ("这是个想法，可以用语音建任务", Label::Idea),
+            ("这是一个任务，明天把基准跑完", Label::Task),
+            ("记一个任务：给术语表加词", Label::Task),
+            ("记个笔记，SenseVoice 冷启动 0.2 秒", Label::Note),
+            ("标记为 reference，那篇博客在 mushroom.cv", Label::Reference),
+            ("this is a task, finish the benchmark", Label::Task),
+            ("mark as note, the metal shader takes seconds", Label::Note),
+            ("这是一个疑问，泰语能不能在 Intel 上跑", Label::Question),
+            ("这是日记，今天调了一天按键", Label::Journal),
+        ] {
+            assert_eq!(detect_explicit(text), Some(want), "没认出来：{text:?}");
+        }
+    }
+
+    /// 真实口语的前导语气词不能挡住识别。
+    ///
+    /// jason 的录音里几乎每句都以「嗯」「那个」「呃」开头
+    /// （见 spike/audio/sample02.wav 的转写）。
+    #[test]
+    fn leading_fillers_do_not_block_detection() {
+        for text in [
+            "嗯，这是一个 idea，给录音笔加 WiFi",
+            "呃这是个任务",
+            "那个，记一个笔记",
+            "  啊，这是一个想法",
+        ] {
+            assert!(detect_explicit(text).is_some(), "语气词挡住了识别：{text:?}");
+        }
+    }
+
+    /// **codex 抓出来的四类误判，逐条钉住。**
+    ///
+    /// 这些全是「按字面像标记、其实不是」的句子。误判的代价特别高：
+    /// 显式标记不会被模型纠正，一旦认错就永久归错类。
+    #[test]
+    fn adversarial_false_positives_are_rejected() {
+        for (text, why) in [
+            // 1. 在问，不是在标
+            ("这是一个任务还是一个想法？", "疑问句 + 「还是」"),
+            ("这是一个任务吗？", "疑问句"),
+            ("那，这是一个任务还是一个想法？", "前面有连接词「那」，且是疑问"),
+            // 2. 「问题」= 缺陷，不是「疑问」——已从词表移除
+            ("这是一个问题，我们需要修复它", "「问题」指缺陷"),
+            // 3. 没有词尾边界会命中的普通名词
+            ("这是一个任务栏截图", "任务栏 ≠ 任务"),
+            ("this is an ideal solution", "ideal ≠ idea"),
+            ("this is a notebook i bought", "notebook ≠ note"),
+            ("这是一个想法国的故事", "想法国 ≠ 想法"),
+        ] {
+            assert_eq!(detect_explicit(text), None, "误判成显式标记（{why}）：{text:?}");
+        }
+    }
+
+    /// 「那」「就」不是语气词，不能当填充词剥掉。
+    ///
+    /// 剥掉它们会让一个**非句首**的从句变成句首，从而把普通句子变成
+    /// 显式标记——codex 的原话是 `"那，这是一个任务还是一个想法？"`
+    /// 会因此被判成 Task。
+    #[test]
+    fn meaningful_connectives_are_not_stripped_as_fillers() {
+        assert_eq!(detect_explicit("那篇博客在 mushroom.cv"), None);
+        assert_eq!(detect_explicit("就这样吧，先不做了"), None);
+    }
+
+    /// 全角空格（U+3000）里的引导词也要认出来——中文输入法很容易打出它。
+    #[test]
+    fn fullwidth_space_inside_leader_still_matches() {
+        assert_eq!(detect_explicit("this　is a task, finish it"), Some(Label::Task));
+        assert_eq!(detect_explicit("这是一个　idea，加个 WiFi"), Some(Label::Idea));
+    }
+
+    /// **句子中间出现这些词不算显式标记。**
+    ///
+    /// 这是整个设计里最要紧的一条。「问题」「记录」「任务」在正常说话里
+    /// 太常见了——「我遇到了一个问题」是在描述困境，不是给系统打标签。
+    /// 认错的代价特别高：显式标记**不会被模型推断覆盖**，
+    /// 一旦误判就是把用户的内容强行归错类且无法纠正。
+    #[test]
+    fn mid_sentence_words_are_not_explicit_markers() {
+        for text in [
+            "我遇到了一个问题，麦克风没声音",
+            "昨天的会议记录在共享盘上",
+            "这个任务比我想的难",
+            "他有很多想法但没落地",
+            "我觉得这算个想法吧",          // 「算个」不在引导词表里
+            "帮我查一下有没有新的 task",
+            "note 这个词在英文里有很多意思",
+        ] {
+            assert_eq!(detect_explicit(text), None, "误判成显式标记了：{text:?}");
+        }
+    }
+
+    /// 显式标记优先于模型：**连边车都不问**。
+    ///
+    /// 这里故意把地址指到一个不可能有服务的端口——如果实现去问了模型，
+    /// 会拿到 Unknown；只有真的走了显式分支才会得到 Idea。
+    #[test]
+    fn explicit_wins_without_asking_the_model() {
+        let c = Classifier::new("http://127.0.0.1:1");
+        let r = c.classify("这是一个 idea，给录音笔加个 WiFi 模块");
+        assert_eq!(r.label, Label::Idea);
+        assert_eq!(r.source, Source::Explicit);
+    }
+
+    /// **词表里不许有一个词是另一个词的前缀。**
+    ///
+    /// 有的话，短的会先命中、长的永远轮不到（匹配是按表顺序线性扫的）。
+    /// 现在没有这种情况，但加词时很容易引入——所以钉一条测试，
+    /// 而不是在注释里写一句「长的在前」然后指望后来的人记得
+    /// （那句注释本来就是假的，codex 指出了）。
+    #[test]
+    fn no_spoken_word_is_a_prefix_of_another() {
+        for (a, _) in SPOKEN {
+            for (b, _) in SPOKEN {
+                if a != b {
+                    assert!(
+                        !b.starts_with(a),
+                        "{a:?} 是 {b:?} 的前缀，加词时会让 {b:?} 永远匹配不到"
+                    );
+                }
+            }
+        }
+    }
+
+    /// `Source` 的序列化名字要稳定——它会写进 routes 的 JSON。
+    #[test]
+    fn source_serde_names_are_stable() {
+        assert_eq!(serde_json::to_string(&Source::Explicit).unwrap(), "\"explicit\"");
+        assert_eq!(serde_json::to_string(&Source::Model).unwrap(), "\"model\"");
+    }
+
+    /// 引导词后面必须真的跟着一个标签词，否则不算。
+    #[test]
+    fn leader_without_a_label_word_is_not_a_marker() {
+        assert_eq!(detect_explicit("这是一个很长的故事"), None);
+        assert_eq!(detect_explicit("这是我昨天说的那件事"), None);
+        assert_eq!(detect_explicit("this is a good point"), None);
     }
 }
