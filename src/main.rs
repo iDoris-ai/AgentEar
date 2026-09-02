@@ -14,6 +14,7 @@ mod hotkey;
 mod i18n;
 mod label;
 mod paste;
+mod route;
 mod store;
 mod terms;
 mod tray;
@@ -456,6 +457,44 @@ fn finish(state: State, store: &store::Store, asr: &asr::Asr) -> Result<State> {
                     Ok(p) => log::debug!("纠错前的原始转写已存 {}", p.display()),
                     Err(e) => log::error!("写原始转写失败: {e:#}"),
                 }
+            }
+
+            // —— 标签识别 + routes 落盘 ——
+            //
+            // **无条件写一条 routes 记录**，即使标签是 unknown、即使边车没起。
+            // routes 是「这段话被判成了什么」的本地权威记录（架构边界 B6），
+            // 它的价值不取决于判得准不准——判成 unknown 也是一条有用的记录，
+            // 而缺一条记录会让这段音频在下游彻底消失。
+            //
+            // 和纠错一样：这一层的任何失败都不能挡住上屏，所以它在
+            // 剪贴板与上屏**之前**做完，失败只记日志。
+            let classified = if cfg.correct_terms {
+                // 复用纠错的开关：两者都要边车，分开设两个开关只会让
+                // 「为什么没生效」多一种可能。边车没起时 classify 自己会落 unknown。
+                let url = cfg.llm_url.as_deref().unwrap_or(correct::DEFAULT_URL);
+                label::Classifier::new(url).classify(&text)
+            } else {
+                // 没开边车功能时也要落 routes：标签留 unknown，
+                // 记录本身不能少——将来开了功能可以从 transcript 重算。
+                label::Classified { label: label::Label::Unknown, source: label::Source::Model }
+            };
+            let route = route::Route::new(
+                &committed.content_hash,
+                classified.label,
+                classified.source,
+                &text,
+            );
+            match store.write_route(&route) {
+                Ok(p) => log::info!(
+                    "标签 {}（{}）→ {}",
+                    classified.label.as_str(),
+                    match classified.source {
+                        label::Source::Explicit => "用户明说",
+                        label::Source::Model => "模型推断",
+                    },
+                    p.display()
+                ),
+                Err(e) => log::error!("写 routes 记录失败（不影响剪贴板与上屏）: {e:#}"),
             }
             // 先进剪贴板再谈上屏。上屏失败还能手动 ⌘V，顺序反过来就没有退路了。
             match copy_to_clipboard(&text) {
