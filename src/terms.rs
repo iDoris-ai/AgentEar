@@ -77,7 +77,15 @@ fn default_terms() -> Vec<Term> {
         // 靠提示词里的 few-shot 反例（例 2）约束住上下文。
         t("raw", &["road", "row", "ro", "roll"]),
         t("knowledge base", &["闹铃是base", "notice base", "脑力士base", "闹铃是 base"]),
-        t("MacBook", &["macbook", "我的妈book", "妈的book", "我的妈的book", "mac book"]),
+        // ⚠️ **带空格的变体也要收**：SenseVoice 会在中英文之间插空格，
+        // 实测输出的是 `我的妈 book` 而不是 `我的妈book`。
+        // 分批纠错之后每批的上下文更少，模型更依赖表里的精确形式，
+        // 这类空格差异就会漏纠（T2.1.4 实测发现）。
+        t(
+            "MacBook",
+            &["macbook", "我的妈book", "我的妈 book", "妈的book", "妈的 book",
+              "我的妈的book", "mac book"],
+        ),
         t("Mac mini", &["mark mini", "mac mini", "麦克mini", "马克mini"]),
         t("24 小时", &["二四二", "24R", "二十四R", "24 r"]),
         // `ID` / `id` **不能**当 alias：它是极高频的普通词（编号、身份标识），
