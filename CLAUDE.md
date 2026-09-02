@@ -2,17 +2,19 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-## 当前状态：M0 已通过，**M1 开发中**（进度见 `docs/m1-status.md`）
+## 当前状态：M1 已完成（v0.3.1），**M2 未开始**（M1 进度见 `docs/m1-status.md`）
 
 **构建与测试**：
 
 ```bash
 cargo build --release
-cargo test                                    # 8 个测试：提交协议、崩溃语义、token 过滤
+cargo test                                    # 65 个测试：提交协议、崩溃语义、token 过滤、i18n、下载协议
 ./target/release/agentear                     # 守护进程，Ctrl+Shift+R 开始/停止录音
 ./target/release/agentear --transcribe x.wav  # 离线转写，不占麦克风，用于验证 ASR 链路
 ./target/release/agentear --diagnose          # 环境自检：权限、音频设备、ASR 依赖
 ./target/release/agentear --debug-keys        # 打印每个修饰键事件，排查按键问题
+./target/release/agentear --fetch-thai        # 预下载泰语模型（574 MB），只装不改识别语言
+./target/release/agentear --transcribe x.wav --lang th   # 不改配置试泰语链路
 scripts/bundle.sh                             # 打 .app bundle → dist/
 ```
 
