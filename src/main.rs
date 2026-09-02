@@ -184,6 +184,28 @@ fn main() -> Result<()> {
         }
     }
 
+    // 给一段文字分类，输出一级标签。
+    //
+    // 存在的理由不只是排障：`spike/m2_bench.py` 的标签评测**必须走这条路**，
+    // 否则它自带一份提示词和解析器，报出来的分数和产品实际行为对不上。
+    // 那个坑真的踩过——基准报 18/18 而生产 17/18，差异稳定复现却查不出根因
+    // （`docs/benchmarks-m2.md` §9）。评测和产品共用同一段代码，
+    // 这类疑问从根上就不会出现。
+    if args.len() == 3 && args[1] == "--classify" {
+        let url = cfg.llm_url.as_deref().unwrap_or(correct::DEFAULT_URL);
+        let r = label::Classifier::new(url).classify(&args[2]);
+        // 只输出类名，便于脚本消费；来源走 stderr，不污染 stdout
+        println!("{}", r.label.as_str());
+        eprintln!(
+            "（来源：{}）",
+            match r.source {
+                label::Source::Explicit => "用户明说的显式标记",
+                label::Source::Model => "模型推断",
+            }
+        );
+        return Ok(());
+    }
+
     // 环境自检，排查「按了没反应」
     if args.len() == 2 && args[1] == "--diagnose" {
         return diagnose(&vendor);

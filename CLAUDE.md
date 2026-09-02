@@ -15,6 +15,7 @@ cargo test                                    # 65 个测试：提交协议、�
 ./target/release/agentear --debug-keys        # 打印每个修饰键事件，排查按键问题
 ./target/release/agentear --fetch-thai        # 预下载泰语模型（574 MB），只装不改识别语言
 ./target/release/agentear --transcribe x.wav --lang th   # 不改配置试泰语链路
+./target/release/agentear --classify "这是一个 idea"      # 给一段文字分类（评测脚本也走这条）
 scripts/bundle.sh                             # 打 .app bundle → dist/
 ```
 
