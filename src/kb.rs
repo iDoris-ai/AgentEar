@@ -495,6 +495,70 @@ fn slug(text: &str) -> String {
     }
 }
 
+/// 一篇 `kb/` 文档解析回来的样子。**L2 索引从这里重建**
+/// （ADR-0003 §7：L2 必须能从 L1 全量重建）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParsedDoc {
+    pub id: String,
+    pub created: String,
+    pub label: String,
+    pub tags: Vec<String>,
+    pub explicit_label: bool,
+    pub body: String,
+}
+
+/// 解析一篇我们自己写的文档。**不做通用 YAML 解析**——
+/// 格式是 `render` 写出来的，字段固定、值都经过转义，
+/// 引一个 YAML 库来读自己刚写的东西不划算。
+///
+/// 认不出来返回 `None`（比如用户手工往 `kb/` 里放了别的 Markdown）——
+/// 那种文件不该进索引，也不该让重建整体失败。
+pub fn parse_document(doc: &str) -> Option<ParsedDoc> {
+    let rest = doc.strip_prefix("---\n")?;
+    let end = rest.find("\n---")?;
+    let (fm, body) = rest.split_at(end);
+    let body = body.trim_start_matches("\n---").trim_start().to_string();
+
+    let mut get = |key: &str| -> Option<String> {
+        fm.lines()
+            .find_map(|l| l.strip_prefix(&format!("{key}:")))
+            .map(|v| v.trim().to_string())
+    };
+    let id = get("id").filter(|s| !s.is_empty())?;
+    let label = get("label").filter(|s| !s.is_empty())?;
+    Some(ParsedDoc {
+        id,
+        created: get("created").unwrap_or_default(),
+        label,
+        tags: parse_yaml_list(&get("tags").unwrap_or_default()),
+        explicit_label: get("explicit_label").as_deref() == Some("true"),
+        body,
+    })
+}
+
+/// `["a", "b\"c"]` → `["a", "b\"c"]`。`yaml_list` 的逆。
+fn parse_yaml_list(s: &str) -> Vec<String> {
+    let inner = s.trim().strip_prefix('[').and_then(|x| x.strip_suffix(']')).unwrap_or("");
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    let (mut in_q, mut esc) = (false, false);
+    for c in inner.chars() {
+        match () {
+            _ if esc => {
+                cur.push(match c { 'n' => '\n', 'r' => '\r', 't' => '\t', o => o });
+                esc = false;
+            }
+            _ if c == '\\' && in_q => esc = true,
+            _ if c == '"' => {
+                if in_q { out.push(std::mem::take(&mut cur)); }
+                in_q = !in_q;
+            }
+            _ => if in_q { cur.push(c) },
+        }
+    }
+    out
+}
+
 /// 读一篇已有文档 front matter 里的 `id`。用于去重，不做完整 YAML 解析——
 /// 这些文件是我们自己写的，格式已知。
 fn front_matter_id(doc: &str) -> Option<String> {
