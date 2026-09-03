@@ -18,7 +18,7 @@ ADR-0003 的**组织档适配器（memos）还没做**，等真有企业需求�
 
 ```bash
 cargo build --release
-cargo test                                    # 181 个测试：提交协议、崩溃语义、token 过滤、i18n、下载协议、知识库投递
+cargo test                                    # 183 个测试：提交协议、崩溃语义、token 过滤、i18n、下载协议、知识库投递
 ./target/release/agentear                     # 守护进程，Ctrl+Shift+R 开始/停止录音
 ./target/release/agentear --transcribe x.wav  # 离线转写，不占麦克风，用于验证 ASR 链路
 ./target/release/agentear --diagnose          # 环境自检：权限、音频设备、ASR 依赖
