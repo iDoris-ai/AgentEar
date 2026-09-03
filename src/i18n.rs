@@ -72,6 +72,10 @@ pub enum Key {
     CorrectTermsOffline,
     /// 打开术语表文件供用户编辑。
     OpenTerms,
+    /// 边车状态：可用 / 未启动 / 端口被别的程序占了。
+    SidecarUp,
+    SidecarDown,
+    SidecarWrongService,
     OpenDataDir,
     ViewLog,
     Quit,
@@ -157,6 +161,24 @@ pub fn t(lang: Lang, key: Key) -> &'static str {
             "Edit Term List (applies next recording)",
             "编辑术语表（下次录音生效）",
             "แก้ไขรายการคำศัพท์ (มีผลครั้งถัดไป)",
+        ),
+        // 状态行是**给"勾了却没效果"这个困惑准备的**：
+        // 纠错开着而边车没起时，用户看到的只是"没反应"，
+        // 不给状态他无从知道问题在哪。
+        K::SidecarUp => pick(lang, "  ↳ engine: running", "  ↳ 引擎：运行中", "  ↳ เอนจิน: ทำงานอยู่"),
+        K::SidecarDown => pick(
+            lang,
+            "  ↳ engine: not running (click to start)",
+            "  ↳ 引擎：未启动（点击拉起）",
+            "  ↳ เอนจิน: ยังไม่ทำงาน (แตะเพื่อเริ่ม)",
+        ),
+        // 这一档要单列：端口被占和"没起来"的处置完全不同——
+        // 前者再拉起也没用，得先腾出端口或改配置里的地址。
+        K::SidecarWrongService => pick(
+            lang,
+            "  ↳ engine: port taken by another app",
+            "  ↳ 引擎：端口被别的程序占了",
+            "  ↳ เอนจิน: พอร์ตถูกโปรแกรมอื่นใช้",
         ),
         K::OpenDataDir => pick(lang, "Open Data Folder", "打开数据目录", "เปิดโฟลเดอร์ข้อมูล"),
         K::ViewLog => pick(lang, "View Log", "查看日志", "ดูบันทึก"),
@@ -245,7 +267,7 @@ fn fail_reason(lang: Lang, f: crate::download::Fail) -> &'static str {
 mod tests {
     use super::*;
 
-    const ALL_KEYS: [Key; 23] = [
+    const ALL_KEYS: [Key; 26] = [
         Key::StartRecording,
         Key::Transcribing,
         Key::TitleTranscribing,
@@ -266,6 +288,9 @@ mod tests {
         Key::CorrectTerms,
         Key::CorrectTermsOffline,
         Key::OpenTerms,
+        Key::SidecarUp,
+        Key::SidecarDown,
+        Key::SidecarWrongService,
         Key::OpenDataDir,
         Key::ViewLog,
         Key::Quit,

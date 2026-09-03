@@ -120,6 +120,8 @@ fn main() -> Result<()> {
         // 只能靠反复录音来复现。配置关着就跳过，行为和守护进程一致。
         if cfg.correct_terms && !t.text.is_empty() {
             let url = cfg.llm_url.as_deref().unwrap_or(correct::DEFAULT_URL);
+            // 同 --classify：只探不拉，但必须探，否则门控会挡下一切
+            sidecar::probe(url);
             let tb = terms::load(&data_root);
             if let Some(fixed) = correct::Corrector::with_terms(url, &tb).correct(&t.text) {
                 if fixed != t.text {
@@ -193,6 +195,10 @@ fn main() -> Result<()> {
     // 这类疑问从根上就不会出现。
     if args.len() == 3 && args[1] == "--classify" {
         let url = cfg.llm_url.as_deref().unwrap_or(correct::DEFAULT_URL);
+        // 一次性命令**只探不拉**：边车冷启动要几十秒，为一句分类去拉起
+        // 不合理。但必须探一次——门控读的是全局健康状态，
+        // 而这条路径没有守护进程那套 ensure_available 去填它。
+        sidecar::probe(url);
         let r = label::Classifier::new(url).classify(&args[2]);
         // 只输出类名，便于脚本消费；来源走 stderr，不污染 stdout
         println!("{}", r.label.as_str());
@@ -288,9 +294,32 @@ fn main() -> Result<()> {
     std::thread::spawn(move || {
         if let Err(e) = worker(rx, store, asr) {
             log::error!("工作线程退出: {e:#}");
+            // 这条路径也要收拾边车，否则它会活过 AgentEar
+            sidecar::shutdown();
             std::process::exit(1);
         }
     });
+
+    // 让 Ctrl+C / SIGTERM 也能收拾边车。**必须在拉起之前注册**，
+    // 否则启动过程中收到信号会留下孤儿。
+    sidecar::install_signal_handlers();
+
+    // 边车按需拉起。**放后台线程**：拉起要等模型加载（实测冷启动几十秒），
+    // 卡在这里会让菜单栏图标迟迟不出现，用户以为程序没启动。
+    //
+    // 只在纠错开着时才管它——关着的话连探测都省了。
+    if cfg.correct_terms {
+        let url = cfg.llm_url.clone().unwrap_or_else(|| correct::DEFAULT_URL.to_string());
+        let autostart = cfg.llm_autostart;
+        let command = cfg.llm_start_command.clone();
+        std::thread::spawn(move || {
+            if sidecar::ensure_available(&url, autostart, &command) {
+                log::info!("边车可用：{url}");
+            } else {
+                log::warn!("边车不可用，术语纠错和标签识别会降级（文字照常上屏）");
+            }
+        });
+    }
 
     // 菜单栏必须在主线程装，且要在 NSApplication::run() 之前
     let mtm = objc2::MainThreadMarker::new().expect("install 必须在主线程");
@@ -560,6 +589,10 @@ const LAUNCHD_LABEL: &str = "ai.idoris.agentear";
 /// 实例再退出会绕开 launchd 的单实例保证，落得两个进程同时抢热键；
 /// 从终端裸跑时才 re-exec。
 pub fn restart_self() {
+    // 重启也是一条退出路径：不收拾的话，重启后的新实例会发现端口被
+    // 「上一个自己拉起的边车」占着，而那个进程已经没人管了。
+    sidecar::shutdown();
+
     let target = format!("gui/{}/{}", unsafe { libc::getuid() }, LAUNCHD_LABEL);
     let managed = std::process::Command::new("/bin/launchctl")
         .args(["print", &target])

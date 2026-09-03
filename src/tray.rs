@@ -96,6 +96,7 @@ const TAG_UI_LANG_BASE: isize = 300;
 const TAG_ASR_LANG_BASE: isize = 400;
 const TAG_CORRECT_TERMS: isize = 5;
 const TAG_OPEN_TERMS: isize = 6;
+const TAG_START_SIDECAR: isize = 7;
 /// `+0` 是「系统默认」，`+1..` 对应 `DEVICE_SNAPSHOT` 的下标。
 const TAG_DEVICE_BASE: isize = 1000;
 
@@ -364,23 +365,48 @@ fn populate(menu: &NSMenu, mtm: MainThreadMarker, target: &MenuTarget) {
 
     // —— 术语纠错 ——
     //
+    // 开关下面跟一行边车状态：开着纠错但边车没起时，用户看到的是
+    // 「勾了但没效果」——不给状态的话他无从知道问题在哪。
+    //
     // 边车没起时**照样可点**，只是文案改成「服务未启动」。
     // 置灰的话用户没法预先打开它（先勾上、再去起服务是合理顺序），
     // 而且置灰不解释原因比什么都不做更让人困惑。
+    // ⚠️ **不在这里现探**：`menuNeedsUpdate:` 跑在 AppKit 主线程上，
+    // 而一次 curl 探测最多要几秒——每次打开菜单都冻住几秒是不能接受的
+    // （codex Medium 2）。改读生命周期维护的健康状态，那是个内存读。
+    // 代价是状态可能滞后一点，由 0.5s 定时器那边的后台刷新兜住。
+    let reachable = crate::sidecar::is_ready();
     menu.addItem(&item(
         mtm,
         target,
         i18n::t(
             lang,
-            if crate::correct::service_reachable() {
-                Key::CorrectTerms
-            } else {
-                Key::CorrectTermsOffline
-            },
+            if reachable { Key::CorrectTerms } else { Key::CorrectTermsOffline },
         ),
         TAG_CORRECT_TERMS,
         cfg.correct_terms,
     ));
+
+    // 边车状态行。**只在纠错开着时显示**——关着的时候它是噪音。
+    if cfg.correct_terms {
+        let url = cfg.llm_url.clone().unwrap_or_else(|| crate::correct::DEFAULT_URL.to_string());
+        let _ = &url;
+        let (key, tag) = match crate::sidecar::health() {
+            crate::sidecar::Health::Up => (Key::SidecarUp, -1),
+            // 端口被占：再拉起也没用，所以不给「点击拉起」的入口
+            crate::sidecar::Health::WrongService => (Key::SidecarWrongService, -1),
+            // **没有拉起命令时也不给那个入口**——点了必然什么都不发生
+            // （codex Low 2）
+            crate::sidecar::Health::Down => {
+                if cfg.llm_autostart && !cfg.llm_start_command.is_empty() {
+                    (Key::SidecarDown, TAG_START_SIDECAR)
+                } else {
+                    (Key::SidecarDown, -1)
+                }
+            }
+        };
+        menu.addItem(&item(mtm, target, i18n::t(lang, key), tag, false));
+    }
 
     // —— 保留期 ——
     let ret_item = item(mtm, target, i18n::t(lang, Key::RetentionSection), -1, false);
@@ -449,6 +475,21 @@ fn handle(tag: isize, mtm: MainThreadMarker) {
                 log::warn!("  ⚠️ 纠错服务没在跑，先跑 scripts/serve-llm.sh，否则每次录音会白等一次超时");
             }
         }
+        TAG_START_SIDECAR => {
+            let cfg = config::get();
+            let url = cfg.llm_url.clone().unwrap_or_else(|| crate::correct::DEFAULT_URL.to_string());
+            let autostart = cfg.llm_autostart;
+            let command = cfg.llm_start_command.clone();
+            // **后台拉起**：模型要加载几十秒，卡在主线程会冻住整个菜单栏。
+            std::thread::spawn(move || {
+                log::info!("从菜单拉起边车……");
+                if crate::sidecar::ensure_available(&url, autostart, &command) {
+                    log::info!("边车已就绪");
+                } else {
+                    log::error!("边车拉不起来，看日志里的原因");
+                }
+            });
+        }
         TAG_OPEN_TERMS => {
             let Some(root) = DATA_ROOT.get() else {
                 log::error!("数据目录未初始化");
@@ -479,6 +520,9 @@ fn handle(tag: isize, mtm: MainThreadMarker) {
         TAG_OPEN_LOG => open_path(DATA_ROOT.get().map(|r| r.join("agentear.log"))),
         TAG_QUIT => {
             log::info!("从菜单退出");
+            // 收拾**我们自己拉起的**边车。不是我们拉起的一律不动——
+            // 用户可能自己开着终端跑服务，退出时把它杀了是很难排查的越权。
+            crate::sidecar::shutdown();
             NSApplication::sharedApplication(mtm).terminate(None);
         }
         t if (TAG_TRIGGER_BASE..TAG_TRIGGER_BASE + 2).contains(&t) => {
@@ -613,6 +657,27 @@ pub fn install(mtm: MainThreadMarker) -> Option<Tray> {
             0.5,
             true,
             &block2::RcBlock::new(move |_t: core::ptr::NonNull<NSTimer>| {
+                // 顺便在后台刷新一次边车健康状态。**不能在主线程探**
+                // （见 populate 里的说明），所以丢给一个线程去做，
+                // 主线程只读结果。用 CAS 保证同一时刻只有一个探测在飞。
+                {
+                    use std::sync::atomic::{AtomicBool, Ordering};
+                    static PROBING: AtomicBool = AtomicBool::new(false);
+                    if config::get().correct_terms
+                        && PROBING
+                            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+                            .is_ok()
+                    {
+                        std::thread::spawn(move || {
+                            let cfg = config::get();
+                            let url = cfg
+                                .llm_url
+                                .unwrap_or_else(|| crate::correct::DEFAULT_URL.to_string());
+                            crate::sidecar::probe(&url);
+                            PROBING.store(false, Ordering::SeqCst);
+                        });
+                    }
+                }
                 let mtm = MainThreadMarker::new_unchecked();
                 if let Some(button) = item_for_timer.button(mtm) {
                     // 每次都重读语言，这样切换后标题最多 0.5s 就跟上

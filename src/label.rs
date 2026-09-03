@@ -364,8 +364,10 @@ impl Classifier {
         //
         // 复用 correct 的探测：它带 3 秒缓存，而分类和纠错连的是同一个边车，
         // 各做一份只会让缓存失效得更频繁。
-        if !self.skip_probe && !crate::correct::service_reachable() {
-            bail!("边车不可达或对端不是 mlx-dspark");
+        // 同 correct：确认就绪才发。`is_ready` 读的是生命周期维护的
+        // 全局健康状态，比每次现探一遍快，也和拉起流程共用同一个判断。
+        if !self.skip_probe && !crate::sidecar::is_ready() {
+            bail!("边车未就绪（{:?}）", crate::sidecar::health());
         }
         let names: Vec<&str> = Label::ALL.iter().map(|l| l.as_str()).collect();
         let prompt = format!(
@@ -602,6 +604,9 @@ mod tests {
             ("嗯这个那个", Label::Unknown),
             ("啊对对对", Label::Unknown),
         ];
+        // 门控读的是全局健康状态，而测试进程里没人填过它——
+        // 不先探一次，所有请求都会被挡下、全部落 unknown。
+        crate::sidecar::probe(crate::correct::DEFAULT_URL);
         let c = Classifier::new(crate::correct::DEFAULT_URL);
         let mut hit = 0;
         let mut misses = Vec::new();

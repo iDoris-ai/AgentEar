@@ -366,3 +366,492 @@ mod tests {
         assert_eq!(f.call_count(), 3);
     }
 }
+
+// ─────────────────────────────────────────────────────────────────────
+// 边车的生命周期
+// ─────────────────────────────────────────────────────────────────────
+
+use std::sync::atomic::{AtomicI32, Ordering};
+use std::sync::{Condvar, Mutex};
+
+/// **连接优先，拉起是兜底。**
+///
+/// jason 2026-09-03 定的原则，值得原样记下来：
+///
+/// > 未来我们有自己独立的模型调用入口。现在是写死的，希望做成标准的配置。
+/// > 我们约定好服务的访问地址，按配置文件去访问就行。如果没有，
+/// > 再尝试按配置去拉起。
+///
+/// 行为顺序是死的：先按 `llm_url` 连 → 连不上且配置允许才拉起 →
+/// 仍不行就降级。`llm_autostart: false` 得到的就是那个未来：**只连不拉**。
+///
+/// ## 为什么这不违反 ADR-0002 的边界
+///
+/// 那条约束要的是「独立进程 + 明确协议边界，可独立重启、独立崩溃」。
+/// 拉起一个外部进程不改变这三条。**「拉起」和「内嵌」是两回事**——
+/// 内嵌是把 Python 运行时塞进我们的二进制，那才是被排除的东西。
+
+/// 生命周期状态。
+///
+/// ⚠️ **必须是状态机，不能只是 `Option<Child>`**（codex High 1）：
+/// 启动线程和菜单点击线程可以同时探测到「没起来」、同时 spawn，
+/// 后一个赋值会 **drop 掉前一个 `Child` 句柄却不杀那个进程**——
+/// 于是留下一个没人管、占着几 GB 内存、`shutdown()` 也杀不掉的孤儿。
+///
+/// `Starting` 这一档就是为此存在的：**先在锁里占住位子再去 spawn**。
+enum Lifecycle {
+    Idle,
+    /// 有人正在拉起，别的调用者等着就行，不要再起一个。
+    Starting,
+    Running(std::process::Child),
+    /// 正在退出。此时才 spawn 完成的进程要**立刻杀掉**，
+    /// 否则它会活过 AgentEar。
+    ShuttingDown,
+}
+
+static STATE: Mutex<Lifecycle> = Mutex::new(Lifecycle::Idle);
+static STATE_CV: Condvar = Condvar::new();
+
+/// 子进程的 pid，给**信号处理函数**用。
+///
+/// 信号处理函数里能做的事极少（必须 async-signal-safe），
+/// 碰不了 `Mutex`、更碰不了 `Child`。而 `kill(2)` 是安全的，
+/// 所以单独存一个原子 pid。0 表示没有。
+static SPAWNED_PID: AtomicI32 = AtomicI32::new(0);
+
+/// 边车此刻的可用状态。**这是给 correct/label 做门控用的**，
+/// 不只是显示。
+static HEALTH: Mutex<Health> = Mutex::new(Health::Down);
+
+/// 拉起后等它就绪的上限。模型要从磁盘加载 7.8 GB，实测冷启动几十秒。
+const READY_TIMEOUT: Duration = Duration::from_secs(120);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Health {
+    /// 连得上，且确认是我们要的服务。
+    Up,
+    /// 连不上——**没有任何东西在那个地址上**。只有这一档才允许拉起。
+    Down,
+    /// 连得上但**不是**我们的服务，或者身份验不出来。
+    ///
+    /// ⚠️ 这一档要**尽量宽**（codex High 4）：HTTP 4xx/5xx、返回了内容
+    /// 但没有 mlx-dspark 标记、探测超时——全算这一档。
+    /// 因为它的后果是「不拉起」，而误判成 `Down` 的后果是
+    /// **往一个已被占用的端口再起一个服务**，真正的问题会被
+    /// 「启动失败」的日志盖住。保守方向是不拉。
+    WrongService,
+}
+
+/// 现在能不能用。**correct / label 在发请求前必须问这个**。
+///
+/// codex High 3：早先 `ensure_available` 的结果只写进日志，
+/// 而 `correct`/`label` 仍然只看配置开关——于是一个**已经被识别为
+/// 「端口被别人占了」的服务，照样会收到用户的转写文本**。
+pub fn is_ready() -> bool {
+    *HEALTH.lock().unwrap_or_else(|e| e.into_inner()) == Health::Up
+}
+
+pub fn health() -> Health {
+    *HEALTH.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+fn set_health(h: Health) {
+    *HEALTH.lock().unwrap_or_else(|e| e.into_inner()) = h;
+}
+
+/// 探测一次，不拉起。**会更新全局健康状态。**
+///
+/// ## 分类的依据（改过一次，见 Health::WrongService）
+///
+/// 不能用 `curl -f`：那会把 4xx/5xx 变成「失败」，与「连不上」
+/// 混为一谈，于是一个**返回 500 的占用者**会被判成 `Down` 并触发拉起。
+/// 改成不带 `-f`，靠 curl 的退出码区分：
+///
+/// | curl 退出码 | 含义 | 判成 |
+/// |---|---|---|
+/// | 0 | 连上且拿到响应 | 看内容有没有 mlx-dspark |
+/// | 7 | 连接被拒 / 没人监听 | `Down` |
+/// | 其余（28 超时、52 空回复……） | 有东西但不对劲 | `WrongService` |
+pub fn probe(url: &str) -> Health {
+    let out = Command::new("/usr/bin/curl")
+        .args(["-sS", "--max-time", "2", &format!("{url}/v1/models")])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .output();
+    let h = match out {
+        Ok(o) if o.status.success() => {
+            if String::from_utf8_lossy(&o.stdout).contains("mlx-dspark") {
+                Health::Up
+            } else {
+                Health::WrongService
+            }
+        }
+        // 7 = Failed to connect：那个地址上确实没人
+        Ok(o) if o.status.code() == Some(7) => Health::Down,
+        // 其余非零：连上了但不对劲（超时、空回复、协议错）。
+        // 保守判成 WrongService——后果是不拉起，比误拉起安全。
+        Ok(_) => Health::WrongService,
+        // curl 都起不来：算不可用，但不该去拉服务（问题在本机）
+        Err(_) => Health::WrongService,
+    };
+    set_health(h);
+    h
+}
+
+/// 确保边车可用：先连，连不上再按配置拉起。
+///
+/// 返回 `true` 表示现在可用。任何失败都只记日志——调用方据此降级。
+pub fn ensure_available(url: &str, autostart: bool, start_command: &[String]) -> bool {
+    match probe(url) {
+        Health::Up => return true,
+        Health::WrongService => {
+            log::error!("{url} 上有东西但不是 mlx-dspark（或验不出身份）——不会尝试拉起");
+            return false;
+        }
+        Health::Down => {}
+    }
+
+    if !autostart {
+        log::info!("边车不可用，且配置里关掉了自动拉起（llm_autostart=false）");
+        return false;
+    }
+    let Some((prog, args)) = start_command.split_first() else {
+        log::info!("边车不可用，且没有配置拉起命令（llm_start_command 为空）");
+        return false;
+    };
+
+    // —— 在锁里占位，然后才 spawn ——
+    {
+        let mut st = STATE.lock().unwrap_or_else(|e| e.into_inner());
+        loop {
+            match &mut *st {
+                Lifecycle::ShuttingDown => return false,
+                Lifecycle::Starting => {
+                    // 别人正在拉，等它拉完再看结果，**不要再起一个**
+                    let (g, timeout) = STATE_CV
+                        .wait_timeout(st, READY_TIMEOUT)
+                        .unwrap_or_else(|e| e.into_inner());
+                    st = g;
+                    if timeout.timed_out() {
+                        log::warn!("等别的线程拉起边车超时");
+                        return false;
+                    }
+                    continue;
+                }
+                Lifecycle::Running(child) => {
+                    if matches!(child.try_wait(), Ok(None)) {
+                        log::warn!("已经拉起过边车且进程还在，但它没有响应——不重复拉起");
+                        return false;
+                    }
+                    // 之前那个已经退出了
+                    SPAWNED_PID.store(0, Ordering::SeqCst);
+                    *st = Lifecycle::Idle;
+                    continue;
+                }
+                Lifecycle::Idle => {
+                    *st = Lifecycle::Starting;
+                    break;
+                }
+            }
+        }
+    }
+
+    log::info!("边车不可用，按配置拉起：{prog} {}", args.join(" "));
+    let spawned = Command::new(prog)
+        .args(args)
+        // 输出丢弃：边车自己写日志，而把它的 stdout 接进没人读的管道，
+        // 管道写满就会把它卡死（download.rs 踩过同类坑）
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn();
+
+    let mut child = match spawned {
+        Ok(c) => c,
+        Err(e) => {
+            log::error!("拉起边车失败（{prog}）: {e}");
+            let mut st = STATE.lock().unwrap_or_else(|e| e.into_inner());
+            *st = Lifecycle::Idle;
+            STATE_CV.notify_all();
+            return false;
+        }
+    };
+
+    // 拿回锁登记。**如果这期间进入了退出流程，立刻把刚起的杀掉**——
+    // 否则它会活过 AgentEar。
+    {
+        let mut st = STATE.lock().unwrap_or_else(|e| e.into_inner());
+        if matches!(*st, Lifecycle::ShuttingDown) {
+            log::info!("拉起完成时已在退出，立刻收掉刚起的边车");
+            let _ = child.kill();
+            let _ = child.wait();
+            STATE_CV.notify_all();
+            return false;
+        }
+        SPAWNED_PID.store(child.id() as i32, Ordering::SeqCst);
+        *st = Lifecycle::Running(child);
+        STATE_CV.notify_all();
+    }
+
+    // 等就绪
+    let start = std::time::Instant::now();
+    while start.elapsed() < READY_TIMEOUT {
+        std::thread::sleep(Duration::from_secs(2));
+        if probe(url) == Health::Up {
+            log::info!("边车已就绪（等了 {:.0}s）", start.elapsed().as_secs_f32());
+            return true;
+        }
+        let mut st = STATE.lock().unwrap_or_else(|e| e.into_inner());
+        if let Lifecycle::Running(c) = &mut *st {
+            if let Ok(Some(code)) = c.try_wait() {
+                log::error!("边车启动后立刻退出了（{code:?}），检查 {prog} 能不能单独跑通");
+                SPAWNED_PID.store(0, Ordering::SeqCst);
+                *st = Lifecycle::Idle;
+                STATE_CV.notify_all();
+                return false;
+            }
+        } else {
+            // 被别人收走了（退出流程）
+            return false;
+        }
+    }
+    log::error!("边车启动后 {READY_TIMEOUT:?} 内没有就绪");
+    false
+}
+
+/// 退出时收拾**我们自己拉起的**那个进程。
+///
+/// 不是我们拉起的一律不动——用户可能自己开着终端跑服务，
+/// AgentEar 退出把它杀了是很难排查的越权。
+///
+/// **幂等**：多条退出路径都会调它（菜单 Quit、信号、restart、worker 失败）。
+pub fn shutdown() {
+    let child = {
+        let mut st = STATE.lock().unwrap_or_else(|e| e.into_inner());
+        let prev = std::mem::replace(&mut *st, Lifecycle::ShuttingDown);
+        STATE_CV.notify_all();
+        match prev {
+            Lifecycle::Running(c) => Some(c),
+            _ => None,
+        }
+    };
+    // **杀和 wait 都在锁外做**：wait 可能要等一会儿，
+    // 持着全局锁等于把菜单的 Quit 处理和所有可用性检查一起冻住。
+    if let Some(mut c) = child {
+        log::info!("退出：关掉我们拉起的边车");
+        let _ = c.kill();
+        let _ = c.wait();
+    }
+    SPAWNED_PID.store(0, Ordering::SeqCst);
+}
+
+/// 注册 SIGINT / SIGTERM，让它们也能收拾边车。
+///
+/// ## 为什么不能在 handler 里调 `shutdown()`
+///
+/// 信号处理函数必须 **async-signal-safe**：不能锁 `Mutex`、不能分配内存、
+/// 不能碰 `Child`。所以 handler 里只做一件事——对着原子里存的 pid
+/// 调 `kill(2)`，那是明确安全的。
+///
+/// ⚠️ **SIGKILL 覆盖不到**（内核不给机会）。那种情况下边车会变成孤儿，
+/// 下次启动时 `probe` 会发现端口上已经有一个能用的服务、直接复用它，
+/// 所以不会重复起——但那个进程不再受 AgentEar 管理。
+/// 要彻底解决得给边车套一个看门狗（监视父进程 PID），
+/// 那是更大的工程，现在只把限制记在这里。
+pub fn install_signal_handlers() {
+    unsafe extern "C" fn on_signal(sig: i32) {
+        let pid = SPAWNED_PID.load(Ordering::SeqCst);
+        if pid > 0 {
+            // SIGTERM 给它机会自己收尾
+            unsafe { libc::kill(pid, libc::SIGTERM) };
+        }
+        // 恢复默认行为再把信号发给自己，保持正常的退出语义
+        unsafe {
+            libc::signal(sig, libc::SIG_DFL);
+            libc::raise(sig);
+        }
+    }
+    unsafe {
+        libc::signal(libc::SIGINT, on_signal as libc::sighandler_t);
+        libc::signal(libc::SIGTERM, on_signal as libc::sighandler_t);
+    }
+}
+
+#[cfg(test)]
+mod lifecycle_tests {
+    use super::*;
+
+    /// 关掉自动拉起时**只连不拉**——这就是「未来有独立模型入口」的形态。
+    #[test]
+    fn autostart_disabled_never_spawns() {
+        // 1 端口不会有服务；给一个会明显留下痕迹的命令，断言它没被执行
+        let marker = std::env::temp_dir().join(format!("agentear-should-not-exist-{}", std::process::id()));
+        let _ = std::fs::remove_file(&marker);
+        let cmd = vec![
+            "/bin/sh".to_string(),
+            "-c".to_string(),
+            format!("touch {}", marker.display()),
+        ];
+
+        let ok = ensure_available("http://127.0.0.1:1", false, &cmd);
+        assert!(!ok, "连不上时应该返回不可用");
+        assert!(!marker.exists(), "autostart=false 时绝不该执行拉起命令");
+    }
+
+    /// 没有配置拉起命令时也不拉。
+    #[test]
+    fn empty_command_never_spawns() {
+        assert!(!ensure_available("http://127.0.0.1:1", true, &[]));
+    }
+
+    /// **端口被别的服务占着时不拉起**，而且要和「连不上」区分开。
+    ///
+    /// 这一条是 2026-09-02 真实踩到的：8793 被本机另一个 node 服务占用，
+    /// 不区分的话 AgentEar 会把转写文本发给它，而它只要返回一个形状合法的
+    /// 响应就会被采信（实测拿到过一句关于产品配色的话）。
+    #[test]
+    fn wrong_service_is_distinguished_from_down() {
+        let port = 39217;
+        // 用 python 起一个返回合法 HTTP 但不是 mlx-dspark 的服务。
+        // 不用 `nc -l`：macOS 的 nc 在监听模式下行为不稳，连不上就测了个寂寞。
+        let mut server = Command::new("python3")
+            .arg("-c")
+            .arg(format!(
+                r#"
+import http.server
+class H(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        b = b'{{"who":"not-us"}}'
+        self.send_response(200)
+        self.send_header('Content-Length', str(len(b)))
+        self.end_headers()
+        self.wfile.write(b)
+    def log_message(self, *a): pass
+http.server.HTTPServer(('127.0.0.1', {port}), H).serve_forever()
+"#
+            ))
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("起假服务失败");
+
+        let url = format!("http://127.0.0.1:{port}");
+        // **等它真的起来再测**，否则测到的是 Down，这条断言就没意义了
+        let mut ready = false;
+        for _ in 0..40 {
+            std::thread::sleep(Duration::from_millis(100));
+            if probe(&url) != Health::Down {
+                ready = true;
+                break;
+            }
+        }
+
+        let h = probe(&url);
+        let _ = server.kill();
+        let _ = server.wait();
+
+        assert!(ready, "假服务没起来，这条测试无从判断");
+        assert_eq!(h, Health::WrongService, "占着端口的别家服务必须判成 WrongService");
+    }
+
+    /// **返回 HTTP 错误的占用者也必须判成 WrongService，不能判成 Down。**
+    ///
+    /// codex High 4：早先用 `curl -f`，4xx/5xx 会变成「命令失败」，
+    /// 与「连不上」混为一谈——于是一个返回 500 的占用者会被判成 `Down`
+    /// 并触发拉起，而端口其实已经被占着。原来的测试只覆盖了返回 200 的
+    /// 假服务，正好漏掉这一整类。
+    #[test]
+    fn an_http_error_from_an_occupier_is_wrong_service_not_down() {
+        let port = 39218;
+        let mut server = Command::new("python3")
+            .arg("-c")
+            .arg(format!(
+                r#"
+import http.server
+class H(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_error(500, 'boom')
+    def log_message(self, *a): pass
+http.server.HTTPServer(('127.0.0.1', {port}), H).serve_forever()
+"#
+            ))
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("起假服务失败");
+
+        let url = format!("http://127.0.0.1:{port}");
+        let mut ready = false;
+        for _ in 0..40 {
+            std::thread::sleep(Duration::from_millis(100));
+            if probe(&url) != Health::Down {
+                ready = true;
+                break;
+            }
+        }
+        let h = probe(&url);
+        let _ = server.kill();
+        let _ = server.wait();
+
+        assert!(ready, "假服务没起来，这条测试无从判断");
+        assert_eq!(
+            h,
+            Health::WrongService,
+            "返回 500 的占用者被判成了 Down —— 那会触发一次不该发生的拉起"
+        );
+    }
+
+    /// **健康状态是门控用的，不只是显示。**
+    ///
+    /// codex High 3：`ensure_available` 的结果早先只写日志，
+    /// 而 correct/label 只看配置开关——于是已知「端口被别人占了」的服务
+    /// 照样会收到转写文本。
+    #[test]
+    fn health_gates_whether_we_send_anything() {
+        probe("http://127.0.0.1:1"); // 置成 Down
+        assert!(!is_ready(), "Down 时不该判为就绪");
+        set_health(Health::WrongService);
+        assert!(!is_ready(), "WrongService 时更不能发东西过去");
+        set_health(Health::Up);
+        assert!(is_ready());
+        set_health(Health::Down); // 收拾干净，别影响别的测试
+    }
+
+    /// 连不上时是 Down。
+    #[test]
+    fn unreachable_is_down() {
+        assert_eq!(probe("http://127.0.0.1:1"), Health::Down);
+    }
+}
+
+#[cfg(test)]
+mod live_lifecycle_tests {
+    use super::*;
+
+    /// **真的拉起一次边车。**
+    ///
+    /// 前置：边车没在跑（测试会先确认）。它会执行配置里的启动脚本、
+    /// 等模型加载（最多 120 秒）、确认就绪，然后**留着它**——
+    /// 不 shutdown，因为后面的集成测试还要用。
+    ///
+    /// 标 ignore：要下好模型的机器才跑得动。
+    #[test]
+    #[ignore = "会真的拉起边车，需要 ~/.agentear/llm 已备好"]
+    fn really_starts_the_sidecar() {
+        let url = "http://127.0.0.1:8793";
+        // 边车已经在跑时**这条测试验证不了「拉起」**——它需要一个干净的起点。
+        // 明确跳过并说清原因，而不是断言失败：那会让人以为功能坏了，
+        // 而实际上只是环境不满足前置条件。
+        if probe(url) != Health::Down {
+            eprintln!("跳过：边车已在运行。要测拉起，先 pkill -f 'mlx-dspark serve'");
+            return;
+        }
+
+        let cmd = vec!["/Users/jason/Dev/tools/AgentEar/scripts/serve-llm.sh".to_string()];
+        let t0 = std::time::Instant::now();
+        let ok = ensure_available(url, true, &cmd);
+        println!("拉起耗时 {:.0}s", t0.elapsed().as_secs_f32());
+
+        assert!(ok, "应该能拉起并就绪");
+        assert_eq!(probe(url), Health::Up);
+    }
+}
