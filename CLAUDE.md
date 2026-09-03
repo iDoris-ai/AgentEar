@@ -2,7 +2,7 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-## 当前状态：M1 完成；**知识库投递默认开（v0.4.1）**；M2 理解层已发布（v0.4.0）但默认关
+## 当前状态：M1 完成；**知识库投递 + 全文检索默认开（v0.4.2）**；M2 理解层已发布（v0.4.0）但默认关
 
 M2 = 术语纠错 + 一级标签识别 + `routes/` 落盘，需要一个本地 LLM 边车
 （`scripts/setup-llm.sh` / `serve-llm.sh`，模型 7.8 GB **不随包分发**）。
@@ -17,6 +17,12 @@ M2 = 术语纠错 + 一级标签识别 + `routes/` 落盘，需要一个本地 L
 所以「不启用理解层」实际等于「只有明说了标签的话会进知识库」，
 **不要把它描述成「每次转写都会进知识库」**。
 
+**L2 索引（`--search` / `--reindex`）已落地**：`derived/index.sqlite`，
+rusqlite + FTS5。**中文靠「写入前逐字切开」**——FTS5 自带分词器把整句中文
+当一个 token，`trigram` 又要求查询 ≥3 字符。改分词方案要重跑
+`docs/agent/tasks.md` T2.4.4 里那张横比表，别凭印象换。
+**标签也要走 `segment`**，只切正文会让中文标签整个搜不到（栽过）。
+
 **`--replay-kb` 不重新分类**：它按 `routes/` 里已有的标签重放。
 之前落成 `unknown` 的记录，即使后来启用了理解层，重放也捞不回来——
 重新分类是单独的事，还没做（见 `docs/agent/tasks.md` T2.4.6）。
@@ -26,7 +32,7 @@ ADR-0003 的**组织档适配器（memos）还没做**，等真有企业需求�
 
 ```bash
 cargo build --release
-cargo test                                    # 187 个测试：提交协议、崩溃语义、token 过滤、i18n、下载协议、知识库投递
+cargo test                                    # 202 个测试：提交协议、崩溃语义、token 过滤、i18n、下载协议、知识库投递
 ./target/release/agentear                     # 守护进程，Ctrl+Shift+R 开始/停止录音
 ./target/release/agentear --transcribe x.wav  # 离线转写，不占麦克风，用于验证 ASR 链路
 ./target/release/agentear --diagnose          # 环境自检：权限、音频设备、ASR 依赖
