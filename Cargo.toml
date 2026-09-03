@@ -6,6 +6,11 @@ description = "本地语音采集与转写守护进程（快捷键录音 → 本
 license = "Apache-2.0"
 
 [dependencies]
+# L2 全文索引。`bundled` = 把 SQLite 编进二进制，不依赖系统库——
+# 和「单二进制、无运行时」的取向一致。实测随包的是 SQLite 3.50.2，
+# FTS5 / unicode61 / trigram / porter 都在（`docs/agent/tasks.md` T2.4.4）。
+rusqlite = { version = "0.37", features = ["bundled"] }
+
 # 音频采集
 cpal = "0.15"
 hound = "3.5"

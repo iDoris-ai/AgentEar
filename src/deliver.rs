@@ -23,6 +23,7 @@
 //! 入队已经保证了不丢，所以投递可以放心地排在后面。
 
 use anyhow::Context;
+use crate::index::Index;
 use crate::kb::{KbEntry, KbSink};
 use crate::route::{Delivery, DeliveryState, Route};
 use crate::store::Store;
@@ -71,7 +72,7 @@ pub fn enqueue(store: &Store, route: &Route) -> anyhow::Result<()> {
 ///
 /// 失败**只记日志、不向上抛**：调用点都在主链路上，而主链路已经把
 /// 文字交给用户了。
-pub fn attempt(store: &Store, sink: &dyn KbSink, route: &Route) -> bool {
+pub fn attempt(store: &Store, sink: &dyn KbSink, route: &Route, index: Option<&Index>) -> bool {
     if !crate::kb::should_deliver(route.label) {
         return false;
     }
@@ -92,6 +93,7 @@ pub fn attempt(store: &Store, sink: &dyn KbSink, route: &Route) -> bool {
             // **状态没写成就不许出队。** 否则 `routes/` 里还写着 pending、
             // 队列里却已经没有这一条，下次启动既不会重试也看不出真实结果——
             // 队列和权威记录永久失配。多投一次是幂等的，失配不是。
+            index_it(store, index, updated.delivery.location.as_deref());
             if persist(store, &updated) {
                 dequeue(store, &route.content_hash);
             } else {
@@ -124,7 +126,7 @@ pub fn attempt(store: &Store, sink: &dyn KbSink, route: &Route) -> bool {
 /// 启动时补投上次没投成的。返回 `(成功数, 仍待投数)`。
 ///
 /// **不因为单条失败就中断**：一条投不进去不该连累后面几十条。
-pub fn drain(store: &Store, sink: &dyn KbSink) -> (usize, usize) {
+pub fn drain(store: &Store, sink: &dyn KbSink, index: Option<&Index>) -> (usize, usize) {
     let dir = store.pending_dir();
     let entries = match fs::read_dir(&dir) {
         Ok(rd) => rd,
@@ -170,7 +172,7 @@ pub fn drain(store: &Store, sink: &dyn KbSink) -> (usize, usize) {
 
         match store.read_route(&month, hash) {
             Ok(r) => {
-                if attempt(store, sink, &r) {
+                if attempt(store, sink, &r, index) {
                     ok += 1;
                 } else {
                     left += 1;
@@ -213,7 +215,7 @@ pub struct ReplayStats {
 ///
 /// **重放依赖投递的幂等性**（`FileSink` 按 front matter 的 `id` 去重），
 /// 所以重复跑不会堆出重复文档。
-pub fn replay(store: &Store, sink: &dyn KbSink) -> anyhow::Result<ReplayStats> {
+pub fn replay(store: &Store, sink: &dyn KbSink, index: Option<&Index>) -> anyhow::Result<ReplayStats> {
     let mut st = ReplayStats::default();
     let (routes, unreadable) = store.all_routes()?;
     // **读不出来的也算失败。** 「全量重建」如果悄悄漏掉几条却报告成功，
@@ -226,7 +228,7 @@ pub fn replay(store: &Store, sink: &dyn KbSink) -> anyhow::Result<ReplayStats> {
         }
         // 重放不看已有的 delivery 状态：`delivered` 的那些文件可能已经被
         // 用户删了，而重放的意义正是「不管之前如何，让 kb/ 和 routes/ 一致」。
-        if attempt(store, sink, &r) {
+        if attempt(store, sink, &r, index) {
             st.delivered += 1;
         } else {
             st.failed += 1;
@@ -237,6 +239,28 @@ pub fn replay(store: &Store, sink: &dyn KbSink) -> anyhow::Result<ReplayStats> {
 
 /// 回写投递状态，返回是否成功落盘。**调用方要看这个返回值**——
 /// 出队与否取决于它。
+/// 投递成功后更新 L2 索引。
+///
+/// **读刚写好的那个文件再解析**，而不是拿 `KbEntry` 直接建索引：
+/// 这样「索引内容 == 文件内容」是由构造保证的，而不是靠两处代码
+/// 各自算出同样的结果。它走的也正是 `--reindex` 的那条解析路径，
+/// 增量和全量重建不会漂移。
+///
+/// 失败只记日志：**索引是 L2，随时可以 `--reindex` 重建**，
+/// 不值得为它让一次已经成功的投递看起来像失败。
+fn index_it(store: &Store, index: Option<&Index>, location: Option<&str>) {
+    let (Some(ix), Some(loc)) = (index, location) else { return };
+    let path = store.root().join(loc);
+    match std::fs::read_to_string(&path).ok().as_deref().and_then(crate::kb::parse_document) {
+        Some(doc) => {
+            if let Err(e) = ix.upsert(&doc, loc) {
+                log::error!("更新索引失败（可用 --reindex 重建）: {e:#}");
+            }
+        }
+        None => log::warn!("刚投递的文档解析不回来，跳过索引: {}", path.display()),
+    }
+}
+
 fn persist(store: &Store, route: &Route) -> bool {
     match store.write_route(route) {
         Ok(_) => true,
@@ -323,7 +347,7 @@ mod tests {
         enqueue(&store, &r).unwrap();
         assert!(store.pending_dir().join("abc0").exists(), "入队应在投递之前");
 
-        assert!(attempt(&store, &sink, &r));
+        assert!(attempt(&store, &sink, &r, None));
 
         let back = store.read_route("2026-09", "abc0").unwrap();
         assert_eq!(back.delivery.state, DeliveryState::Delivered);
@@ -342,7 +366,7 @@ mod tests {
         store.write_route(&r).unwrap();
         enqueue(&store, &r).unwrap();
 
-        assert!(!attempt(&store, &sink, &r));
+        assert!(!attempt(&store, &sink, &r, None));
         assert!(store.pending_dir().join("bad0").exists(), "失败后 marker 不能删");
 
         let back = store.read_route("2026-09", "bad0").unwrap();
@@ -360,11 +384,11 @@ mod tests {
         let r = route("dd00", Label::Note, "上次没投成");
         store.write_route(&r).unwrap();
         enqueue(&store, &r).unwrap();
-        attempt(&store, &FlakySink::new(true), &r);
+        attempt(&store, &FlakySink::new(true), &r, None);
 
         // 下次启动，这次边车/磁盘正常了
         let sink = FileSink::new(store.root(), store.root().join("kb"));
-        assert_eq!(drain(&store, &sink), (1, 0));
+        assert_eq!(drain(&store, &sink, None), (1, 0));
         assert!(!store.pending_dir().join("dd00").exists());
 
         let back = store.read_route("2026-09", "dd00").unwrap();
@@ -385,7 +409,7 @@ mod tests {
         enqueue(&store, &r).unwrap();
 
         for _ in 0..MAX_ATTEMPTS {
-            attempt(&store, &sink, &r);
+            attempt(&store, &sink, &r, None);
             r = store.read_route("2026-09", "dead").unwrap();
         }
         assert_eq!(r.delivery.attempts, MAX_ATTEMPTS);
@@ -407,7 +431,7 @@ mod tests {
             store.write_route(&r).unwrap();
             enqueue(&store, &r).unwrap();
             assert!(!store.pending_dir().join(h).exists(), "{l:?} 不该入队");
-            assert!(!attempt(&store, &sink, &r), "{l:?} 不该投递");
+            assert!(!attempt(&store, &sink, &r, None), "{l:?} 不该投递");
         }
         assert_eq!(*sink.calls.lock().unwrap(), 0, "适配器根本不该被调到");
         fs::remove_dir_all(&d).ok();
@@ -427,7 +451,7 @@ mod tests {
         }
         let sink = FileSink::new(store.root(), store.root().join("kb"));
 
-        let st = replay(&store, &sink).unwrap();
+        let st = replay(&store, &sink, None).unwrap();
         assert_eq!(st, ReplayStats { delivered: 2, skipped: 1, failed: 0 });
         let count = || {
             fs::read_dir(store.root().join("kb/2026/09/03"))
@@ -438,7 +462,7 @@ mod tests {
         assert_eq!(count(), 2);
 
         // 再跑一遍——重放的常见用法就是反复跑，不能每跑一次翻一倍
-        assert_eq!(replay(&store, &sink).unwrap().delivered, 2);
+        assert_eq!(replay(&store, &sink, None).unwrap().delivered, 2);
         assert_eq!(count(), 2, "重放必须幂等");
         fs::remove_dir_all(&d).ok();
     }
@@ -452,10 +476,10 @@ mod tests {
         let r = route("aa11", Label::Idea, "删了还能回来");
         store.write_route(&r).unwrap();
         let sink = FileSink::new(store.root(), store.root().join("kb"));
-        attempt(&store, &sink, &r);
+        attempt(&store, &sink, &r, None);
 
         fs::remove_dir_all(store.root().join("kb")).unwrap();
-        assert_eq!(replay(&store, &sink).unwrap().delivered, 1);
+        assert_eq!(replay(&store, &sink, None).unwrap().delivered, 1);
         assert!(store.root().join("kb/2026/09/03").exists());
         fs::remove_dir_all(&d).ok();
     }
@@ -476,7 +500,7 @@ mod tests {
         fs::write(store.pending_dir().join("not-a-hash"), "2026-09").unwrap();
         fs::write(store.pending_dir().join("beef"), "../../x").unwrap();
         let sink = FlakySink::new(false);
-        assert_eq!(drain(&store, &sink), (0, 0));
+        assert_eq!(drain(&store, &sink, None), (0, 0));
         assert_eq!(*sink.calls.lock().unwrap(), 0, "垃圾条目不该触发任何投递");
         // 形状不对的月份直接丢弃 marker；名字不对的留着不动（可能是用户的东西）
         assert!(!store.pending_dir().join("beef").exists());
@@ -509,7 +533,7 @@ mod tests {
         let store = Store::open(&d).unwrap();
         fs::write(store.pending_dir().join("dead0"), "2026-09").unwrap();
         let sink = FlakySink::new(false);
-        assert_eq!(drain(&store, &sink), (0, 0));
+        assert_eq!(drain(&store, &sink, None), (0, 0));
         assert!(!store.pending_dir().join("dead0").exists());
         fs::remove_dir_all(&d).ok();
     }

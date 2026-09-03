@@ -13,6 +13,7 @@ mod correct;
 mod deliver;
 mod hotkey;
 mod i18n;
+mod index;
 mod kb;
 mod label;
 mod paste;
@@ -190,7 +191,45 @@ fn main() -> Result<()> {
         }
     }
 
+    // 从 `kb/` 全量重建 L2 索引。
+    //
+    // 索引是**可以随便删的**（ADR-0003 §7：L2 必须能从 L1 全量重建），
+    // 这条命令就是那个「重建」。schema 改了、索引写坏了、
+    // 手工往 `kb/` 里加过文件，跑一次就对上了。
+    if args.iter().any(|a| a == "--reindex") {
+        let kb_root = cfg.kb_root(&data_root);
+        let mut ix = index::Index::open(&data_root)?;
+        let (n, skipped) = ix.rebuild(&data_root, &kb_root)?;
+        println!("已索引 {n} 篇（跳过 {skipped} 个不是 AgentEar 写的 Markdown）→ {}",
+                 data_root.join("derived/index.sqlite").display());
+        return Ok(());
+    }
+
+    // 全文检索。
+    if args.len() >= 3 && args[1] == "--search" {
+        let q = args[2..].join(" ");
+        let ix = index::Index::open(&data_root)?;
+        let hits = ix.search(&q, 20)?;
+        if hits.is_empty() {
+            // 空索引和「真的没有」是两回事，别让用户以为东西丢了
+            let total = ix.count().unwrap_or(0);
+            println!("没有命中。（索引里共 {total} 篇{}）", if total == 0 { "，先跑一次 --reindex" } else { "" });
+            return Ok(());
+        }
+        for h in &hits {
+            // **按字符切，不按字节。** `created` 可能是从磁盘读来的脏数据
+            // （坏时间戳会被原样加引号存进 front matter），里面有多字节字符时
+            // 按字节切会直接 panic —— 「搜索一下」把程序搞崩是最不该有的。
+            let when: String = h.created.chars().take(16).collect();
+            println!("{when}  [{}]  {}", h.label, h.path);
+            println!("    {}", h.snippet);
+        }
+        println!("\n共 {} 条", hits.len());
+        return Ok(());
+    }
+
     // 从 `routes/` 全量重建知识库。
+
     //
     // 这是 ADR-0003 §7「L1 文档层可以从 L0 事实层全量重放」的可执行证明。
     // 三种场景都只有这一条出路：手滑删了 `kb/` 想重来、换了适配器要迁移、
@@ -200,7 +239,12 @@ fn main() -> Result<()> {
         let kb_root = cfg.kb_root(&data_root);
         println!("从 {} 重建 → {}", store.root().join("routes").display(), kb_root.display());
         let sink = kb::FileSink::new(store.root(), &kb_root);
-        let st = deliver::replay(&store, &sink)?;
+        // 重放顺带更新索引——否则重建完 kb/ 还得再跑一次 --reindex，
+        // 而「重建完搜不到」是最容易让人以为功能坏了的那种状态。
+        let ix = index::Index::open(&data_root)
+            .map_err(|e| log::error!("索引打不开，本次重放不更新索引: {e:#}"))
+            .ok();
+        let st = deliver::replay(&store, &sink, ix.as_ref())?;
         println!(
             "完成：投递 {} 条，跳过 {} 条（unknown / command 不进知识库），失败 {} 条",
             st.delivered, st.skipped, st.failed
@@ -269,7 +313,8 @@ fn main() -> Result<()> {
         if let Err(e) = sink.health() {
             log::error!("知识库目录不可用，本次运行只写 routes/: {e:#}");
         } else {
-            deliver::drain(&store, &sink);
+            let ix = index::Index::open(&data_root).ok();
+            deliver::drain(&store, &sink, ix.as_ref());
         }
     }
 
@@ -640,7 +685,13 @@ fn finish(state: State, store: &store::Store, asr: &asr::Asr) -> Result<State> {
 
             // 用户已经拿到文字了，这一步慢一点、失败了都不影响他。
             if let Some(sink) = sink {
-                deliver::attempt(store, &sink, &route);
+                // 索引每次现开：SQLite 连接开销是微秒级，而把一个
+                // `Connection`（非 Sync）一路穿过状态机会让线程模型变复杂。
+                // 打不开就只是没索引——L2 随时可以 `--reindex` 重建。
+                let ix = index::Index::open(store.root())
+                    .map_err(|e| log::error!("索引打不开（可用 --reindex 重建）: {e:#}"))
+                    .ok();
+                deliver::attempt(store, &sink, &route, ix.as_ref());
             }
         }
         Ok(_) => log::warn!("转写结果为空（这段音频可能没有语音）"),
