@@ -47,6 +47,14 @@ pub fn enqueue(store: &Store, route: &Route) -> anyhow::Result<()> {
     if !crate::kb::should_deliver(route.label) {
         return Ok(());
     }
+    // `content_hash` 直接变成 marker 的文件名。今天这个函数只有一个调用点，
+    // 而且被 `write_route` 成功过这件事门住（那里已经验过形状）——
+    // 但那是**调用顺序**给的保证，不是本地保证。多一个调用点就没了。
+    anyhow::ensure!(
+        crate::route::is_content_hash(&route.content_hash),
+        "content_hash 形状不对，拒绝入队: {:?}",
+        route.content_hash
+    );
     let dir = store.pending_dir();
     fs::create_dir_all(&dir).context("建重试队列目录失败")?;
     // 临时文件 + rename：`fs::write` 会先 truncate 再写，进程在中间被杀
@@ -473,6 +481,23 @@ mod tests {
         // 形状不对的月份直接丢弃 marker；名字不对的留着不动（可能是用户的东西）
         assert!(!store.pending_dir().join("beef").exists());
         assert!(store.pending_dir().join("not-a-hash").exists());
+        fs::remove_dir_all(&d).ok();
+    }
+
+    /// 入队的形状校验必须是**本地**的，不能指望调用方先过了 `write_route`。
+    ///
+    /// 验证它承重：删掉 `enqueue` 里的 `ensure!` 后这条必须变红。
+    #[test]
+    fn enqueue_validates_the_hash_itself_not_relying_on_call_order() {
+        let d = tmpdir();
+        let store = Store::open(&d).unwrap();
+        let mut r = route("aaaa", Label::Note, "x");
+        r.content_hash = "../../../escaped".into();
+
+        let err = enqueue(&store, &r).expect_err("坏 hash 必须被拒绝入队");
+        assert!(format!("{err:#}").contains("content_hash 形状不对"), "{err:#}");
+        // 队列目录外面不能凭空多出东西
+        assert!(!d.join("escaped").exists());
         fs::remove_dir_all(&d).ok();
     }
 

@@ -613,6 +613,57 @@ mod tests {
         std::fs::remove_dir_all(&d).ok();
     }
 
+    /// **`write_route` 的哈希守卫是那条路径上最后一道，不是装饰。**
+    ///
+    /// 链路：`all_routes()` 只反序列化 JSON **正文**，不校验正文里的
+    /// `content_hash` 跟文件名对不对得上 → `--replay-kb` 遍历它 →
+    /// `deliver::attempt` → `persist` → `write_route`。所以一条
+    /// **文件名合法、正文里写着 `../../..`** 的记录（手工编辑过的、
+    /// 从别处导入的、写坏的）会一路走到 `write_route`，只有那句
+    /// `ensure!` 挡得住。
+    ///
+    /// 验证这条测试确实承重：把 `write_route` 里的 `ensure!` 整块删掉，
+    /// 它必须变红。
+    #[test]
+    fn a_route_whose_body_lies_about_its_hash_cannot_escape_routes() {
+        let root = tmpdir();
+        let s = Store::open(&root).unwrap();
+        let dir = root.join("routes/2026-09");
+        fs::create_dir_all(&dir).unwrap();
+        // 文件名合法，正文里的 content_hash 指到外面
+        let evil = r#"{"content_hash":"../../../escaped","created_at":"2026-09-03T10:00:00+08:00","label":"note","label_source":"model","text":"t","secondary":[],"delivery":{"state":"pending","attempts":0,"last_error":null,"location":null}}"#;
+        fs::write(dir.join("deadbeef00.json"), evil).unwrap();
+
+        // 这两格**也是承重的**：哪天 `all_routes` 自己开始校验正文，
+        // 它们会先红，提醒你这条测试的前提变了——而不是让它在一个
+        // 空集合上静默通过。
+        let (routes, _) = s.all_routes().unwrap();
+        assert_eq!(routes.len(), 1);
+        assert_eq!(routes[0].content_hash, "../../../escaped");
+
+        // 唯一挡住它的是 write_route。
+        //
+        // **必须断言到错误原因，光断言 `is_err()` 接不住。** 实测：把守卫
+        // 删掉之后 `write_route` 仍然报错，但那是碰巧的——临时文件名
+        // `format!(".{content_hash}.tmp")` 拼出了一个带 `...` 字面量目录的
+        // 路径，`fs::write` 因为那个目录不存在而失败。换一个不带 `..` 前缀的
+        // 恶意 hash（比如绝对路径）就不会有这个巧合。
+        let err = s.write_route(&routes[0]).expect_err("正文里的坏 hash 必须被拒绝");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("content_hash 形状不对"),
+            "必须是守卫拒绝的，而不是碰巧写失败: {msg}"
+        );
+
+        // 绝对路径版：没有 `...` 那个巧合，守卫是唯一拦得住的东西。
+        let mut abs = routes[0].clone();
+        abs.content_hash = format!("{}/pwned", root.display());
+        let err = s.write_route(&abs).expect_err("绝对路径的 hash 必须被拒绝");
+        assert!(format!("{err:#}").contains("content_hash 形状不对"));
+        assert!(!root.join("pwned.json").exists(), "不能写到 routes/ 之外");
+        fs::remove_dir_all(&root).ok();
+    }
+
     /// **同一段音频重跑不产生第二条记录**——文件名是内容哈希，天然幂等。
     ///
     /// 这条要紧：转写失败重试、用户手动重跑 --transcribe，都不该在
