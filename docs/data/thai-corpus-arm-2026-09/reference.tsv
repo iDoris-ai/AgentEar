@@ -1,0 +1,23 @@
+take	category	duration_s	snr_db	en_words	sha256_16	text
+arm-001	control_thai_only	3.63	27.8	0	9cebf36ecdefde55	เมื่อเช้าฝนตกหนักมาก ทำให้รถติดกว่าปกติ
+arm-002	control_thai_only	5.29	30.1	0	5d65da5d08d51ea8	ผมออกจากบ้านตั้งแต่หกโมงครึ่ง แต่ยังไปถึงที่ทำงานสาย
+arm-003	control_thai_only	4.05	25.2	0	4ce074a25461b59d	ช่วงนี้อากาศเปลี่ยนแปลงบ่อย หลายคนในทีมไม่สบาย
+arm-004	control_thai_only	4.91	25.2	0	7e4d6aa54fe8c31e	สัปดาห์หน้าผมจะลาพักร้อนสามวัน ไปเที่ยวกับครอบครัวที่เชียงใหม่
+arm-005	control_thai_only	3.78	27.4	0	fb0642fa50970c1a	ถ้ามีเรื่องด่วนติดต่อผมทางโทรศัพท์ได้ตลอดเวลา
+arm-006	control_thai_only	2.82	33.1	0	f7b30aee53022468	ขอให้ทุกคนดูแลสุขภาพด้วยนะครับ
+arm-001	daily_collaboration	4.86	30.5	3	56961620b9c276b6	เมื่อวานผม review code ของทีมแล้ว เจอ bug อยู่สองสามจุด
+arm-002	daily_collaboration	4.10	26.5	4	dcd402589ee8334d	ช่วย fix แล้ว push ขึ้น branch develop ภายในวันนี้ด้วยนะครับ
+arm-003	daily_collaboration	3.68	25.8	2	7fdfec5017428e25	ผมจะ comment รายละเอียดไว้ใน GitHub ให้ดู
+arm-004	daily_collaboration	4.52	28.3	2	725eefda480ffcd0	เรื่อง performance ตอนนี้ API ตอบกลับช้ากว่า 2 วินาที
+arm-005	daily_collaboration	3.73	20.4	2	5ac2aa2870af4a1d	ต้องหาวิธี optimize query ก่อนที่ลูกค้าจะร้องเรียน
+arm-006	daily_collaboration	3.61	24.6	1	93417e009abde4bf	บ่ายนี้มีประชุมกับทีม design ตอนบ่าย 2 โมง
+arm-007	daily_collaboration	3.58	30.4	2	2d9cdd6bb6e3efa1	อย่าลืมอัปเดต document ใน Notion ด้วยนะครับ
+arm-008	daily_collaboration	3.24	24.2	0	ef22ed0a21b11c1e	ขอบคุณมากครับ ไว้เจอกันสัปดาห์หน้า
+arm-001	devops	5.26	29.9	2	5093c6f005caccfa	สวัสดีครับ วันนี้ผมจะอธิบายวิธี deploy ระบบของเราขึ้น production
+arm-002	devops	5.15	24.5	4	14f3b7c3ffbd7b02	เราใช้ Docker สร้าง container แล้วส่งขึ้น Kubernetes cluster
+arm-003	devops	4.62	27.5	5	6d3561c5d23d6898	ก่อน merge pull request ทุกครั้ง ต้องรัน unit test ให้ผ่านก่อน
+arm-004	devops	3.90	23.9	3	4fc2e545a73e66c4	ถ้า build ไม่ผ่าน ระบบ CI จะแจ้งเตือนใน Slack ทันที
+arm-005	devops	5.04	28.5	3	e9a5dad97d064b30	ฐานข้อมูลเราใช้ PostgreSQL ส่วน cache ใช้ Redis
+arm-006	devops	4.47	28.8	2	49ae96121c55a229	ตอนนี้เรามี server ทั้งหมด 12 เครื่อง แบ่งเป็น 3 zone
+arm-007	devops	4.43	27.9	3	fff7aebbbc570d07	ปัญหาที่เจอบ่อยที่สุดคือ memory leak ใน service ตัวเก่า
+arm-008	devops	3.71	24.9	1	fa051e6791b2c810	พรุ่งนี้เช้าเก้าโมงครึ่ง เราจะปล่อย version ใหม่ครับ

@@ -1,0 +1,82 @@
+# AgentEar recorder export / 录音工具导出
+# time 2026-09-02T15:46:33.902Z
+# speaker Arm
+# filename prefix arm (filenames are ASCII-only)
+# ui language en
+#
+# per take: text / WAV filename / SHA-256 (first 16) / capture settings / quality
+# In `text:` lines, \n is an escaped newline and \\ an escaped backslash (line-oriented file).
+# ⚠️ The requested constraints (mono, AGC/NS off) are not proof the device obeyed;
+#    the `track:` line is what getSettings() actually reported.
+
+## arm-001.wav
+text: เมื่อวานผม review code ของทีมแล้ว เจอ bug อยู่สองสามจุด
+sha256_16: 56961620b9c276b6
+audio: 48000 Hz mono 16-bit · 4.86s · captured at 48000 Hz (audioworklet)
+track: ch=1 rate=48000 aec=false ns=false agc=false
+timeline: got 233472 / expected 233728 · MISSING 0.005s
+quality: peak 0.218 · SNR 30.5 dB · voiced 59%
+ua: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36
+
+## arm-002.wav
+text: ช่วย fix แล้ว push ขึ้น branch develop ภายในวันนี้ด้วยนะครับ
+sha256_16: dcd402589ee8334d
+audio: 48000 Hz mono 16-bit · 4.10s · captured at 48000 Hz (audioworklet)
+track: ch=1 rate=48000 aec=false ns=false agc=false
+timeline: got 196608 / expected 196864 · MISSING 0.005s
+quality: peak 0.168 · SNR 26.5 dB · voiced 62%
+ua: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36
+
+## arm-003.wav
+text: ผมจะ comment รายละเอียดไว้ใน GitHub ให้ดู
+sha256_16: 7fdfec5017428e25
+audio: 48000 Hz mono 16-bit · 3.68s · captured at 48000 Hz (audioworklet)
+track: ch=1 rate=48000 aec=false ns=false agc=false
+timeline: got 176640 / expected 176896 · MISSING 0.005s
+quality: peak 0.160 · SNR 25.8 dB · voiced 51%
+ua: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36
+
+## arm-004.wav
+text: เรื่อง performance ตอนนี้ API ตอบกลับช้ากว่า 2 วินาที
+sha256_16: 725eefda480ffcd0
+audio: 48000 Hz mono 16-bit · 4.52s · captured at 48000 Hz (audioworklet)
+track: ch=1 rate=48000 aec=false ns=false agc=false
+timeline: got 217088 / expected 217088
+quality: peak 0.135 · SNR 28.3 dB · voiced 58%
+ua: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36
+
+## arm-005.wav
+text: ต้องหาวิธี optimize query ก่อนที่ลูกค้าจะร้องเรียน
+sha256_16: 5ac2aa2870af4a1d
+audio: 48000 Hz mono 16-bit · 3.73s · captured at 48000 Hz (audioworklet)
+track: ch=1 rate=48000 aec=false ns=false agc=false
+timeline: got 178944 / expected 179200 · MISSING 0.005s
+quality: peak 0.144 · SNR 20.4 dB · voiced 64%
+ua: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36
+
+## arm-006.wav
+text: บ่ายนี้มีประชุมกับทีม design ตอนบ่าย 2 โมง
+sha256_16: 93417e009abde4bf
+audio: 48000 Hz mono 16-bit · 3.61s · captured at 48000 Hz (audioworklet)
+track: ch=1 rate=48000 aec=false ns=false agc=false
+timeline: got 173312 / expected 173568 · MISSING 0.005s
+quality: peak 0.120 · SNR 24.6 dB · voiced 66%
+ua: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36
+
+## arm-007.wav
+text: อย่าลืมอัปเดต document ใน Notion ด้วยนะครับ
+sha256_16: 2d9cdd6bb6e3efa1
+audio: 48000 Hz mono 16-bit · 3.58s · captured at 48000 Hz (audioworklet)
+track: ch=1 rate=48000 aec=false ns=false agc=false
+timeline: got 171776 / expected 172032 · MISSING 0.005s
+quality: peak 0.146 · SNR 30.4 dB · voiced 56%
+ua: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36
+
+## arm-008.wav
+text: ขอบคุณมากครับ ไว้เจอกันสัปดาห์หน้า
+sha256_16: ef22ed0a21b11c1e
+audio: 48000 Hz mono 16-bit · 3.24s · captured at 48000 Hz (audioworklet)
+track: ch=1 rate=48000 aec=false ns=false agc=false
+timeline: got 155392 / expected 155392
+quality: peak 0.151 · SNR 24.2 dB · voiced 47%
+ua: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36

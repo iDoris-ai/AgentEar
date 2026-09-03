@@ -286,6 +286,36 @@
 - **踩过的坑**：只给正文切分、忘了标签 → 中文标签整个搜不到，
   而英文标签恰好没事，所以只测 `esp32` 时溜过去了。
 
+### T3.3.1 TTS 模块（三语，交给 Arm）  `ASSIGNED`
+- **任务书**：[`docs/tasks/tts-module-arm.md`](../tasks/tts-module-arm.md)（中/英/泰三语）
+- 目标链路的最后一段：拿到文字 → 用声音说出来，**中/英/泰可切换**。
+  「大模型回答问题」那一段依赖外部服务，**本项目不做**。
+- **接口先定死**：独立 HTTP 服务，`POST /speak {text, lang}` → `audio/wav`，
+  加 `/health` 与 `/voices`。形态照 LLM 边车（配置里一行 `tts_url`）。
+  这样 V2 换实现时 V1 的工作不白费。
+- **V1 用 macOS 内置 `say`**：已实测目标机器上三语音色都在 ——
+  `Tingting`(zh) / `Samantha`(en) / **`Kanya`(th)**。零安装、零下载、全离线。
+- V2 再换神经 TTS（`facebook/mms-tts-tha` 有专门泰语模型）。**V1 合并后才开。**
+- 约束：**不许联网**（隐私红线，排除所有云 TTS）；**独立进程**（ADR-0002）。
+
+### T3.2.1 泰语 code-switch：给 whisper 加 initial prompt  `READY`
+- **实测依据**：[`docs/data/thai-corpus-arm-2026-09/RESULTS.md`](../data/thai-corpus-arm-2026-09/RESULTS.md)
+- 用**已经在发的** `terms.json` 当 whisper 的 `--prompt`：
+  夹英文 CER **31.1% → 18.4%**，英文词命中 **8% → 51%**，纯泰语 3.9% → 3.1%。
+  **约 10 行改动，不需要边车，不需要换模型。**
+- ⚠️ **必须带长度护栏**：100 词的通用词表让纯泰语 CER 崩到 53.7%
+  （截断 / 语言漂移 / 重复循环）。`whisper-cli` 的上限是 `n_text_ctx/2` tokens。
+  **拐点没测**——C(37 词) 好、D(54 词) 好、E(100 词) 崩，落地前要找到安全上限。
+- 落地前还要：D 方案按 3 遍复核（目前 1 遍，依据是 A 与 3 遍结果逐位一致）。
+- **不要动 `-bs 1 -bo 1`**：实测换默认 beam search 只值 2 个词、0.3 个百分点。
+
+### T3.2.2 泰语模型复评（三方横比）  `BLOCKED`
+- **卡在模型文件**：ADR-0004 的另两个候选（Thonburian medium /
+  typhoon-whisper-turbo）**已经不在机器上**，要重跑 `scripts/build-thai-model.sh`。
+- 在跑完之前，「换泰语模型也修不了 code-switch」**是推断不是结论**
+  （依据：泰语本身已 3.9%，且失败是这一类模型的共性——训练集都是泰文转写）。
+- 跑的时候必须**分组算 CER**（对照组 vs 两个 code-switch 组），不要给总分。
+
 ### T2.4.8 索引一致性判据补齐  `TODO`
 - PR #34 评审的变异矩阵指出三格没人接住：
   1. `--reindex` 末尾的 FTS5 `'rebuild'`（评审给了可用的测试，红绿两侧都验过）

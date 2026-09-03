@@ -1,0 +1,82 @@
+# AgentEar recorder export / 录音工具导出
+# time 2026-09-02T15:42:44.258Z
+# speaker Arm
+# filename prefix arm (filenames are ASCII-only)
+# ui language en
+#
+# per take: text / WAV filename / SHA-256 (first 16) / capture settings / quality
+# In `text:` lines, \n is an escaped newline and \\ an escaped backslash (line-oriented file).
+# ⚠️ The requested constraints (mono, AGC/NS off) are not proof the device obeyed;
+#    the `track:` line is what getSettings() actually reported.
+
+## arm-001.wav
+text: สวัสดีครับ วันนี้ผมจะอธิบายวิธี deploy ระบบของเราขึ้น production
+sha256_16: 5093c6f005caccfa
+audio: 48000 Hz mono 16-bit · 5.26s · captured at 48000 Hz (audioworklet)
+track: ch=1 rate=48000 aec=false ns=false agc=false
+timeline: got 252672 / expected 252928 · MISSING 0.005s
+quality: peak 0.210 · SNR 29.9 dB · voiced 59%
+ua: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36
+
+## arm-002.wav
+text: เราใช้ Docker สร้าง container แล้วส่งขึ้น Kubernetes cluster
+sha256_16: 14f3b7c3ffbd7b02
+audio: 48000 Hz mono 16-bit · 5.15s · captured at 48000 Hz (audioworklet)
+track: ch=1 rate=48000 aec=false ns=false agc=false
+timeline: got 247040 / expected 247296 · MISSING 0.005s
+quality: peak 0.173 · SNR 24.5 dB · voiced 56%
+ua: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36
+
+## arm-003.wav
+text: ก่อน merge pull request ทุกครั้ง ต้องรัน unit test ให้ผ่านก่อน
+sha256_16: 6d3561c5d23d6898
+audio: 48000 Hz mono 16-bit · 4.62s · captured at 48000 Hz (audioworklet)
+track: ch=1 rate=48000 aec=false ns=false agc=false
+timeline: got 221696 / expected 221952 · MISSING 0.005s
+quality: peak 0.153 · SNR 27.5 dB · voiced 60%
+ua: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36
+
+## arm-004.wav
+text: ถ้า build ไม่ผ่าน ระบบ CI จะแจ้งเตือนใน Slack ทันที
+sha256_16: 4fc2e545a73e66c4
+audio: 48000 Hz mono 16-bit · 3.90s · captured at 48000 Hz (audioworklet)
+track: ch=1 rate=48000 aec=false ns=false agc=false
+timeline: got 187136 / expected 187392 · MISSING 0.005s
+quality: peak 0.139 · SNR 23.9 dB · voiced 55%
+ua: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36
+
+## arm-005.wav
+text: ฐานข้อมูลเราใช้ PostgreSQL ส่วน cache ใช้ Redis
+sha256_16: e9a5dad97d064b30
+audio: 48000 Hz mono 16-bit · 5.04s · captured at 48000 Hz (audioworklet)
+track: ch=1 rate=48000 aec=false ns=false agc=false
+timeline: got 241920 / expected 242176 · MISSING 0.005s
+quality: peak 0.182 · SNR 28.5 dB · voiced 58%
+ua: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36
+
+## arm-006.wav
+text: ตอนนี้เรามี server ทั้งหมด 12 เครื่อง แบ่งเป็น 3 zone
+sha256_16: 49ae96121c55a229
+audio: 48000 Hz mono 16-bit · 4.47s · captured at 48000 Hz (audioworklet)
+track: ch=1 rate=48000 aec=false ns=false agc=false
+timeline: got 214528 / expected 215040 · MISSING 0.011s
+quality: peak 0.164 · SNR 28.8 dB · voiced 66%
+ua: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36
+
+## arm-007.wav
+text: ปัญหาที่เจอบ่อยที่สุดคือ memory leak ใน service ตัวเก่า
+sha256_16: fff7aebbbc570d07
+audio: 48000 Hz mono 16-bit · 4.43s · captured at 48000 Hz (audioworklet)
+track: ch=1 rate=48000 aec=false ns=false agc=false
+timeline: got 212736 / expected 212992 · MISSING 0.005s
+quality: peak 0.132 · SNR 27.9 dB · voiced 66%
+ua: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36
+
+## arm-008.wav
+text: พรุ่งนี้เช้าเก้าโมงครึ่ง เราจะปล่อย version ใหม่ครับ
+sha256_16: fa051e6791b2c810
+audio: 48000 Hz mono 16-bit · 3.71s · captured at 48000 Hz (audioworklet)
+track: ch=1 rate=48000 aec=false ns=false agc=false
+timeline: got 177920 / expected 178176 · MISSING 0.005s
+quality: peak 0.135 · SNR 24.9 dB · voiced 58%
+ua: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36
