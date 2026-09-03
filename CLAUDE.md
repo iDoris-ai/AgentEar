@@ -2,7 +2,14 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-## 当前状态：M1 已完成（v0.3.1），**M2 未开始**（M1 进度见 `docs/m1-status.md`）
+## 当前状态：M1 完成，**M2 代码完成并已发布（v0.4.0），默认关**
+
+M2 = 术语纠错 + 一级标签识别 + `routes/` 落盘，需要一个本地 LLM 边车
+（`scripts/setup-llm.sh` / `serve-llm.sh`，模型 7.8 GB **不随包分发**）。
+边车的生命周期见 ADR-0002 §8：**连接优先、拉起兜底**，
+`llm_autostart: false` 就是「只连不拉」的形态。
+
+`routes/` 目前**只写不读** —— 下游投递（ADR-0003 的双适配器）还没做。
 
 **构建与测试**：
 
