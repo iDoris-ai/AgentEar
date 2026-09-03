@@ -254,7 +254,25 @@
   「最差手动启动或者静默失败继续」，未来适配上下游组件协作。
 - 因此 `llm_start_command` 默认为空 = 只连不拉；用户要自动拉起就自己配路径。
 
-### T2.4.3 routes 的下游  `BLOCKED`
-- **待决**：`routes/` 现在**只写不读**——标签识别的结果落盘了，
-  但下游什么都没有（ADR-0003 的知识库双适配器没做）。
-  先做投递、还是先做别的，取决于他想先看到哪个价值。
+### T2.4.3 routes 的下游投递  `DONE`
+- **jason 2026-09-03 拍板**：先做投递，三件事一起做完；
+  L2 索引（rusqlite + SQLite FTS5）排在这三件之后，不并进来。
+- 落地：
+  1. `KbSink` trait + `FileSink`（`src/kb.rs`）——渲染 ADR-0003 §3.3 的
+     front matter，按 front matter 的 `id` 去重，正文改了也不会堆出第二篇
+  2. 重试队列 `routes/.pending/`（`src/deliver.rs`）——**入队在投递之前**，
+     所以「投递中途被杀」不会留下没人管的记录；`MAX_ATTEMPTS = 10` 后放弃并标 `failed`
+  3. `--replay-kb` 从 `routes/` 全量重建，幂等，可反复跑
+- 两处偏离 ADR-0003 §3.3 的地方已回写进 ADR §7.1：`journal` 走 `kb/private/`
+  独立子树；`unknown` / `command` 不投递；`kb/index/tags.md` 推迟到 L2。
+- **没做的**：组织档（memos）适配器、L2 索引、L3 行动层。
+
+### T2.4.4 L2 索引  `TODO`
+- 在 T2.4.3 之上做全文检索：`rusqlite` + SQLite FTS5，**不上向量库**。
+- 硬约束：索引必须能从 `kb/` 全量重建（ADR-0003 §7），所以它可以随时删掉重来。
+
+### T2.4.5 OpenKnowledge  `DEFERRED`
+- 见 [ADR-0006](../decisions/0006-openknowledge-as-personal-frontend.md)：
+  它是编辑器不是服务，对当前定位没有增量能力，**现阶段不做**。
+- 真要做的时候规则是：可以在文档里推荐，**不 fork、不 vendor、不进 bundle**
+  （GPL-3.0 vs 我们的 Apache-2.0，单向不兼容）。

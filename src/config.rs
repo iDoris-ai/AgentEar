@@ -144,6 +144,57 @@ pub struct Config {
     /// 留空 = 不知道怎么拉，等同于 `llm_autostart: false`。
     #[serde(deserialize_with = "lenient")]
     pub llm_start_command: Vec<String>,
+    /// 转写完是否投递到知识库（`kb/` 的 Markdown 文件树，ADR-0003 §3.3）。
+    ///
+    /// **默认开。** 和 `correct_terms` 不同，它不需要任何外部依赖——
+    /// 就是在本地写几 KB 的 Markdown，不联网、不起进程、失败也不挡上屏。
+    /// 默认关掉只会让「说一句话自动进知识库」这条链路默认是断的。
+    #[serde(deserialize_with = "lenient_kb_enabled")]
+    pub kb_enabled: bool,
+    /// 知识库根目录。`None` = 数据目录下的 `kb/`。
+    ///
+    /// 之所以可配：很多人的笔记库（Obsidian vault 等）早就存在了，
+    /// 让 AgentEar 直接往里写，比让用户在两个目录之间来回搬有用得多。
+    #[serde(deserialize_with = "lenient")]
+    pub kb_dir: Option<String>,
+}
+
+fn default_kb_enabled() -> bool {
+    true
+}
+
+fn lenient_kb_enabled<'de, D: Deserializer<'de>>(d: D) -> Result<bool, D::Error> {
+    let v = serde_json::Value::deserialize(d)?;
+    Ok(serde_json::from_value(v).unwrap_or_else(|_| default_kb_enabled()))
+}
+
+impl Config {
+    /// 知识库根目录的绝对路径。
+    ///
+    /// 相对路径按**数据目录**解释，不按当前工作目录——守护进程的 cwd
+    /// 取决于它是从终端还是 Finder 启动的，拿它当基准会让同一份配置
+    /// 在两种启动方式下指向不同的地方。
+    pub fn kb_root(&self, data_root: &Path) -> PathBuf {
+        match self.kb_dir.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+            Some(d) => {
+                let p = PathBuf::from(shellexpand_tilde(d));
+                if p.is_absolute() { p } else { data_root.join(p) }
+            }
+            None => data_root.join("kb"),
+        }
+    }
+}
+
+/// 只展开开头的 `~`。不引 shellexpand：配置里出现的就是路径，
+/// 不该顺带支持 `$VAR` 那些会让「这个字符串到底指哪」变得不可预测的东西。
+fn shellexpand_tilde(s: &str) -> String {
+    match s.strip_prefix("~/") {
+        Some(rest) => match std::env::var("HOME") {
+            Ok(h) => format!("{h}/{rest}"),
+            Err(_) => s.to_string(),
+        },
+        None => s.to_string(),
+    }
 }
 
 // 这两个字段的「默认」不是 `Default::default()`，坏值要退回文档里写的默认，
@@ -171,6 +222,8 @@ impl Default for Config {
             llm_url: None,
             llm_autostart: default_autostart(),
             llm_start_command: default_start_command(),
+            kb_enabled: default_kb_enabled(),
+            kb_dir: None,
         }
     }
 }
