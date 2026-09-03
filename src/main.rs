@@ -198,7 +198,7 @@ fn main() -> Result<()> {
     // 手工往 `kb/` 里加过文件，跑一次就对上了。
     if args.iter().any(|a| a == "--reindex") {
         let kb_root = cfg.kb_root(&data_root);
-        let ix = index::Index::open(&data_root)?;
+        let mut ix = index::Index::open(&data_root)?;
         let (n, skipped) = ix.rebuild(&data_root, &kb_root)?;
         println!("已索引 {n} 篇（跳过 {skipped} 个不是 AgentEar 写的 Markdown）→ {}",
                  data_root.join("derived/index.sqlite").display());
@@ -217,7 +217,11 @@ fn main() -> Result<()> {
             return Ok(());
         }
         for h in &hits {
-            println!("{}  [{}]  {}", &h.created[..h.created.len().min(16)], h.label, h.path);
+            // **按字符切，不按字节。** `created` 可能是从磁盘读来的脏数据
+            // （坏时间戳会被原样加引号存进 front matter），里面有多字节字符时
+            // 按字节切会直接 panic —— 「搜索一下」把程序搞崩是最不该有的。
+            let when: String = h.created.chars().take(16).collect();
+            println!("{when}  [{}]  {}", h.label, h.path);
             println!("    {}", h.snippet);
         }
         println!("\n共 {} 条", hits.len());

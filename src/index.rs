@@ -34,6 +34,11 @@ use anyhow::{Context, Result};
 use rusqlite::Connection;
 use std::path::{Path, PathBuf};
 
+/// `snippet()` 用来包住命中词的标记。**必须是正文里不会出现的字符**——
+/// 出现了就会让 `unsegment` 的邻接判断错位。
+const HL_OPEN: char = '«';
+const HL_CLOSE: char = '»';
+
 /// 一条命中。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Hit {
@@ -113,28 +118,7 @@ impl Index {
 
     /// 写入一条。按 `id` 幂等——同一条重复索引不会产生第二行。
     pub fn upsert(&self, doc: &crate::kb::ParsedDoc, path: &str) -> Result<()> {
-        let tags = doc.tags.join(" ");
-        self.db
-            .execute(
-                "insert into docs(id, path, created, label, explicit, tags, body, seg)
-                 values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
-                 on conflict(id) do update set
-                   path=excluded.path, created=excluded.created, label=excluded.label,
-                   explicit=excluded.explicit, tags=excluded.tags,
-                   body=excluded.body, seg=excluded.seg",
-                rusqlite::params![
-                    doc.id,
-                    path,
-                    doc.created,
-                    doc.label,
-                    doc.explicit_label as i32,
-                    tags,
-                    doc.body,
-                    segment(&doc.body),
-                ],
-            )
-            .context("写索引失败")?;
-        Ok(())
+        upsert_in(&self.db, doc, path)
     }
 
     pub fn remove(&self, id: &str) -> Result<()> {
@@ -180,14 +164,26 @@ impl Index {
     ///
     /// **这是 L2「可从 L1 重建」的可执行证明。** 先清空再灌，
     /// 这样 `kb/` 里删掉的文档不会在索引里留成幽灵。
-    pub fn rebuild(&self, data_root: &Path, kb_root: &Path) -> Result<(usize, usize)> {
-        self.db.execute("delete from docs", [])?;
-        let (mut n, mut skipped) = (0usize, 0usize);
-        for path in walk_markdown(kb_root) {
-            let Ok(text) = std::fs::read_to_string(&path) else {
-                skipped += 1;
-                continue;
-            };
+    pub fn rebuild(&mut self, data_root: &Path, kb_root: &Path) -> Result<(usize, usize)> {
+        // **和 `FileSink` 抢同一把锁。** 不加的话，`--reindex` 读到的是
+        // 快照、守护进程同时又投递了一条新的并增量写进了索引——
+        // 重建提交时会把那条更新的覆盖成快照里的旧内容（或者干脆没有）。
+        // WAL 只保证 SQL 写入串行，保证不了这个逻辑顺序。
+        let _guard = crate::kb::lock_kb(kb_root)?;
+        // **先把整棵树读完，再动数据库。**
+        //
+        // 反过来（边删边读边写）有两个洞：读到一半出错就留下一个
+        // 残缺的索引，而**完整的那份已经被删了**；而且并发的检索会看到
+        // 中间状态。先读后写意味着「读失败 = 什么都没发生」。
+        let files = walk_markdown(kb_root).context("遍历知识库目录失败")?;
+        let mut parsed = Vec::new();
+        let mut skipped = 0usize;
+        for path in files {
+            // 读失败**不当成跳过**：跳过的语义是「这不是我们的文档」，
+            // 而读不出来是故障。悄悄少索引几篇、还报告成功，
+            // 是最难发现的那种数据缺口。
+            let text = std::fs::read_to_string(&path)
+                .with_context(|| format!("读 {} 失败", path.display()))?;
             match crate::kb::parse_document(&text) {
                 Some(doc) => {
                     let rel = path
@@ -195,32 +191,91 @@ impl Index {
                         .unwrap_or(&path)
                         .to_string_lossy()
                         .to_string();
-                    self.upsert(&doc, &rel)?;
-                    n += 1;
+                    parsed.push((doc, rel));
                 }
                 // 用户自己往 kb/ 里放的别的 Markdown。不是错误，跳过就好。
                 None => skipped += 1,
             }
         }
+
+        let n = parsed.len();
+        let tx = self.db.transaction().context("开启重建事务失败")?;
+        tx.execute("delete from docs", [])?;
+        for (doc, rel) in &parsed {
+            upsert_in(&tx, doc, rel)?;
+        }
+        // **触发器只同步「`docs` 里还在的行」。** 如果 FTS 索引此前就和
+        // `docs` 对不上（旧版本写坏、手工改过库），删表不会清掉那些
+        // 孤儿倒排项，而新插入的行可能复用同一个 rowid——于是搜一个
+        // 早就删掉的词，会命中一篇不相干的新文档。
+        // FTS5 自带的 `'rebuild'` 会照 content 表整个重建，是唯一能修好它的办法。
+        tx.execute("insert into docs_fts(docs_fts) values('rebuild')", [])?;
+        tx.commit().context("提交重建事务失败")?;
         Ok((n, skipped))
     }
 }
 
-/// 递归收集 `*.md`。跳过点开头的目录（`.lock` 所在处、`.git`）。
-fn walk_markdown(root: &Path) -> Vec<PathBuf> {
+/// 真正的写入。抽成自由函数，`rebuild` 才能在**事务里**复用它
+/// —— `Transaction` 和 `Connection` 对 `execute` 是同一套接口。
+///
+/// **标签也要走 `segment`。** 忘了这一步的后果是中文标签整个搜不到：
+/// 存进去的是一个 `unicode61` token「录音笔」，而查询侧会把它切成
+/// 短语 `"录 音 笔"`——两边对不上。英文标签恰好没事，所以这个洞很容易在
+/// 只测了 `esp32` 的时候溜过去（真溜过去了）。
+fn upsert_in(db: &Connection, doc: &crate::kb::ParsedDoc, path: &str) -> Result<()> {
+    let tags = segment(&doc.tags.join(" "));
+    db.execute(
+            "insert into docs(id, path, created, label, explicit, tags, body, seg)
+             values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+             on conflict(id) do update set
+               path=excluded.path, created=excluded.created, label=excluded.label,
+               explicit=excluded.explicit, tags=excluded.tags,
+               body=excluded.body, seg=excluded.seg",
+            rusqlite::params![
+                doc.id,
+                path,
+                doc.created,
+                doc.label,
+                doc.explicit_label as i32,
+                tags,
+                doc.body,
+                segment(&doc.body),
+            ],
+        )
+    .context("写索引失败")?;
+    Ok(())
+}
+
+/// 递归收集 `*.md`。跳过点开头的条目（`.lock`、`.git`）。
+///
+/// **不跟随目录软链**：`kb/loop -> kb` 这样一个软链会让遍历永远转下去。
+/// 用 `file_type()`（`lstat` 语义）而不是 `is_dir()`（`stat`，会跟随软链）。
+/// 软链还能把遍历带到 `kb_root` 外面去。
+///
+/// 读目录失败**向上抛**，不静默跳过——重建报告成功却少了几篇，
+/// 比直接失败难发现得多。
+fn walk_markdown(root: &Path) -> Result<Vec<PathBuf>> {
     let mut out = Vec::new();
     let mut stack = vec![root.to_path_buf()];
     while let Some(dir) = stack.pop() {
-        let Ok(rd) = std::fs::read_dir(&dir) else { continue };
-        for e in rd.flatten() {
+        let rd = match std::fs::read_dir(&dir) {
+            Ok(rd) => rd,
+            // 根目录还不存在 = 还没投递过任何东西，不是错误
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound && dir == root => continue,
+            Err(e) => return Err(e).with_context(|| format!("读 {} 失败", dir.display())),
+        };
+        for e in rd {
+            let e = e.with_context(|| format!("读 {} 的条目失败", dir.display()))?;
             let p = e.path();
-            let hidden = p
-                .file_name()
-                .is_some_and(|n| n.to_string_lossy().starts_with('.'));
-            if hidden {
+            if p.file_name().is_some_and(|n| n.to_string_lossy().starts_with('.')) {
                 continue;
             }
-            if p.is_dir() {
+            let ft = e.file_type().with_context(|| format!("取 {} 的类型失败", p.display()))?;
+            if ft.is_symlink() {
+                log::debug!("跳过软链: {}", p.display());
+                continue;
+            }
+            if ft.is_dir() {
                 stack.push(p);
             } else if p.extension().and_then(|s| s.to_str()) == Some("md") {
                 out.push(p);
@@ -228,7 +283,7 @@ fn walk_markdown(root: &Path) -> Vec<PathBuf> {
         }
     }
     out.sort();
-    out
+    Ok(out)
 }
 
 /// 是不是需要逐字切开的表意文字。
@@ -276,20 +331,28 @@ pub fn segment(s: &str) -> String {
 /// `"录音笔加 WiFi"`，中英文之间那个空格得留着。
 fn unsegment(s: &str) -> String {
     let cs: Vec<char> = s.chars().collect();
+    // 判断相邻性时**跳过高亮标记**。不跳的话，`snippet()` 把单字命中包成
+    // `« 录 » 音 笔`，那两个空格的邻居变成了 `«` 和 `»`（不是表意文字），
+    // 于是删不掉，输出成 `«录» 音笔`——一个字一个字地看着就是坏的。
+    let transparent = |c: char| matches!(c, HL_OPEN | HL_CLOSE);
+    let ideo_around = |mut i: isize, step: isize| -> bool {
+        loop {
+            if i < 0 || i as usize >= cs.len() {
+                return false;
+            }
+            let c = cs[i as usize];
+            if !transparent(c) {
+                return is_ideograph(c);
+            }
+            i += step;
+        }
+    };
     let mut out = String::with_capacity(s.len());
-    let mut i = 0;
-    while i < cs.len() {
-        if cs[i] == ' '
-            && i > 0
-            && i + 1 < cs.len()
-            && is_ideograph(cs[i - 1])
-            && is_ideograph(cs[i + 1])
-        {
-            i += 1;
+    for (i, &c) in cs.iter().enumerate() {
+        if c == ' ' && ideo_around(i as isize - 1, -1) && ideo_around(i as isize + 1, 1) {
             continue;
         }
-        out.push(cs[i]);
-        i += 1;
+        out.push(c);
     }
     out
 }
@@ -360,6 +423,16 @@ mod tests {
             ix.upsert(&doc(&format!("{:016x}", i), b), &format!("kb/{i}.md")).unwrap();
         }
         ix
+    }
+
+    fn tmproot() -> std::path::PathBuf {
+        let p = std::env::temp_dir().join(format!(
+            "agentear-ix-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        std::fs::create_dir_all(&p).unwrap();
+        p
     }
 
     fn hits(ix: &Index, q: &str) -> usize {
@@ -455,6 +528,99 @@ mod tests {
         assert!(h.snippet.contains('«'), "应该带高亮标记: {}", h.snippet);
     }
 
+    /// **中文标签必须搜得到。** 只给正文切分、忘了标签，后果是中文标签
+    /// 整个搜不到——而英文标签恰好没事，所以这个洞很容易在只测了
+    /// `esp32` 的时候溜过去（真溜过去了，Codex 逮到的）。
+    #[test]
+    fn chinese_tags_are_searchable_too() {
+        let ix = Index::in_memory().unwrap();
+        ix.upsert(
+            &ParsedDoc {
+                id: "aabb".into(),
+                created: "2026-09-03T10:00:00+08:00".into(),
+                label: "note".into(),
+                tags: vec!["录音笔".into(), "esp32".into()],
+                explicit_label: false,
+                body: "买菜清单".into(),
+            },
+            "kb/a.md",
+        )
+        .unwrap();
+        assert_eq!(hits(&ix, "录音笔"), 1, "中文标签搜不到");
+        assert_eq!(hits(&ix, "esp32"), 1, "英文标签本来就没事");
+    }
+
+    /// 高亮标记不能把片段还原搞错位。单字命中会被包成 `« 录 » 音 笔`，
+    /// 那两个空格的邻居是标记符而不是汉字——不跳过标记就删不掉，
+    /// 输出成 `«录» 音笔`。
+    #[test]
+    fn highlight_markers_do_not_break_snippet_restoration() {
+        // 真实形态：`snippet()` 把标记贴在 token 两侧，空格在标记外面
+        assert_eq!(unsegment("给 «录» 音 笔"), "给«录»音笔");
+        let ix = seeded();
+        let h = &ix.search("音", 1).unwrap()[0];
+        assert!(!h.snippet.contains("» "), "标记后面不该留空格: {}", h.snippet);
+    }
+
+    /// 目录软链会让遍历永远转下去，而那时**旧索引已经被清掉了**。
+    #[test]
+    fn a_symlink_loop_cannot_hang_the_rebuild() {
+        let root = tmproot();
+        let kb = root.join("kb");
+        std::fs::create_dir_all(kb.join("2026")).unwrap();
+        std::fs::write(kb.join("2026/a.md"), "---\nid: aabb\nlabel: note\n---\n\n正文\n").unwrap();
+        std::os::unix::fs::symlink(&kb, kb.join("loop")).unwrap();
+
+        let mut ix = Index::in_memory().unwrap();
+        assert_eq!(ix.rebuild(&root, &kb).unwrap(), (1, 0), "软链要跳过，不能转圈");
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// **读不出来的文件不能被当成「跳过」然后报告成功。**
+    /// 悄悄少索引几篇是最难发现的那种数据缺口。
+    #[test]
+    fn an_unreadable_file_fails_the_rebuild_instead_of_being_skipped() {
+        let root = tmproot();
+        let kb = root.join("kb");
+        std::fs::create_dir_all(&kb).unwrap();
+        let bad = kb.join("bad.md");
+        std::fs::write(&bad, "---\nid: aabb\nlabel: note\n---\n\n正文\n").unwrap();
+        std::fs::set_permissions(&bad, std::os::unix::fs::PermissionsExt::from_mode(0o000)).unwrap();
+
+        let mut ix = Index::in_memory().unwrap();
+        let r = ix.rebuild(&root, &kb);
+        // root 用户读得动任何文件，那种环境下这条测不了
+        if unsafe { libc::geteuid() } != 0 {
+            assert!(r.is_err(), "读不出来的文件必须让重建失败，而不是静默跳过");
+        }
+        std::fs::set_permissions(&bad, std::os::unix::fs::PermissionsExt::from_mode(0o644)).ok();
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// 重建失败不能毁掉原来那份完整的索引。
+    #[test]
+    fn a_failed_rebuild_leaves_the_previous_index_intact() {
+        let root = tmproot();
+        let kb = root.join("kb");
+        std::fs::create_dir_all(&kb).unwrap();
+        std::fs::write(kb.join("a.md"), "---\nid: aabb\nlabel: note\n---\n\n录音笔\n").unwrap();
+
+        let mut ix = Index::in_memory().unwrap();
+        assert_eq!(ix.rebuild(&root, &kb).unwrap().0, 1);
+        assert_eq!(hits(&ix, "录音笔"), 1);
+
+        // 让下一次重建在读文件时失败
+        let bad = kb.join("bad.md");
+        std::fs::write(&bad, "x").unwrap();
+        std::fs::set_permissions(&bad, std::os::unix::fs::PermissionsExt::from_mode(0o000)).unwrap();
+        if unsafe { libc::geteuid() } != 0 {
+            assert!(ix.rebuild(&root, &kb).is_err());
+            assert_eq!(hits(&ix, "录音笔"), 1, "失败的重建不该把旧索引毁掉");
+        }
+        std::fs::set_permissions(&bad, std::os::unix::fs::PermissionsExt::from_mode(0o644)).ok();
+        std::fs::remove_dir_all(&root).ok();
+    }
+
     /// 韩文有空格分词，**不该**被逐字切开——切了反而破坏原有的词边界。
     #[test]
     fn korean_is_not_split_character_by_character() {
@@ -480,7 +646,7 @@ mod tests {
         // 用户自己放进来的普通 Markdown：跳过，不该让重建失败
         std::fs::write(kb.join("random.md"), "# 我自己的笔记\n随便写的\n").unwrap();
 
-        let ix = Index::in_memory().unwrap();
+        let mut ix = Index::in_memory().unwrap();
         let (n, skipped) = ix.rebuild(&root, &root.join("kb")).unwrap();
         assert_eq!((n, skipped), (1, 1));
         assert_eq!(hits(&ix, "录音笔"), 1);
@@ -503,3 +669,4 @@ mod tests {
         std::fs::remove_dir_all(&root).ok();
     }
 }
+

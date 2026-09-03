@@ -117,7 +117,7 @@ pub struct FileSink {
 ///
 /// 这个 `File` 从不被读写——它存在的唯一目的就是让 fd 活着，
 /// 因为 flock 是绑在 fd 上的，fd 一关锁就没了。
-struct Guard(#[allow(dead_code)] File);
+pub struct Guard(#[allow(dead_code)] File);
 
 impl FileSink {
     pub fn new(data_root: impl AsRef<Path>, kb_root: impl AsRef<Path>) -> Self {
@@ -134,9 +134,17 @@ impl FileSink {
     /// 用 `flock` 而不是自己造锁文件：进程被 kill 时内核自动释放，
     /// 不会留下一把没人解得开的锁。
     fn lock(&self) -> Result<Guard> {
-        fs::create_dir_all(&self.kb_root)
-            .with_context(|| format!("建 {} 失败", self.kb_root.display()))?;
-        let p = self.kb_root.join(".lock");
+        lock_kb(&self.kb_root)
+    }
+}
+
+/// 取知识库的独占锁。`FileSink` 的投递和 L2 的 `--reindex` 都要经过它——
+/// **两边必须是同一把**，否则重建会把并发投递的增量更新覆盖掉。
+pub fn lock_kb(kb_root: &Path) -> Result<Guard> {
+    {
+        fs::create_dir_all(kb_root)
+            .with_context(|| format!("建 {} 失败", kb_root.display()))?;
+        let p = kb_root.join(".lock");
         let f = OpenOptions::new()
             .create(true)
             .truncate(false)
@@ -149,6 +157,9 @@ impl FileSink {
         }
         Ok(Guard(f))
     }
+}
+
+impl FileSink {
 
     /// 一条记录该落在哪个目录。
     ///
@@ -519,7 +530,7 @@ pub fn parse_document(doc: &str) -> Option<ParsedDoc> {
     let (fm, body) = rest.split_at(end);
     let body = body.trim_start_matches("\n---").trim_start().to_string();
 
-    let mut get = |key: &str| -> Option<String> {
+    let get = |key: &str| -> Option<String> {
         fm.lines()
             .find_map(|l| l.strip_prefix(&format!("{key}:")))
             .map(|v| v.trim().to_string())
@@ -528,7 +539,7 @@ pub fn parse_document(doc: &str) -> Option<ParsedDoc> {
     let label = get("label").filter(|s| !s.is_empty())?;
     Some(ParsedDoc {
         id,
-        created: get("created").unwrap_or_default(),
+        created: parse_yaml_scalar(&get("created").unwrap_or_default()),
         label,
         tags: parse_yaml_list(&get("tags").unwrap_or_default()),
         explicit_label: get("explicit_label").as_deref() == Some("true"),
@@ -541,20 +552,61 @@ fn parse_yaml_list(s: &str) -> Vec<String> {
     let inner = s.trim().strip_prefix('[').and_then(|x| x.strip_suffix(']')).unwrap_or("");
     let mut out = Vec::new();
     let mut cur = String::new();
-    let (mut in_q, mut esc) = (false, false);
-    for c in inner.chars() {
-        match () {
-            _ if esc => {
-                cur.push(match c { 'n' => '\n', 'r' => '\r', 't' => '\t', o => o });
-                esc = false;
-            }
-            _ if c == '\\' && in_q => esc = true,
-            _ if c == '"' => {
+    let mut it = inner.chars().peekable();
+    let mut in_q = false;
+    while let Some(c) = it.next() {
+        match c {
+            '\\' if in_q => unescape_one(&mut it, &mut cur),
+            '"' => {
                 if in_q { out.push(std::mem::take(&mut cur)); }
                 in_q = !in_q;
             }
             _ => if in_q { cur.push(c) },
         }
+    }
+    out
+}
+
+/// 解一个反斜杠转义。**必须和 `yaml_quote` 一一对应**——
+/// 它会把控制字符写成 `\xNN`，这里不解就会把 `d\x7fe` 读成 `dx7fe`，
+/// 标签被永久改掉且没人发现。两个函数改一个就得改另一个。
+fn unescape_one(it: &mut std::iter::Peekable<std::str::Chars>, out: &mut String) {
+    match it.next() {
+        Some('n') => out.push('\n'),
+        Some('r') => out.push('\r'),
+        Some('t') => out.push('\t'),
+        Some('x') => {
+            // 恰好两位十六进制。凑不齐就原样保留——宁可留下可见的怪字符，
+            // 也不要吞掉内容。
+            let h: String = it.clone().take(2).collect();
+            match u8::from_str_radix(&h, 16) {
+                Ok(b) if h.len() == 2 => {
+                    it.next();
+                    it.next();
+                    out.push(b as char);
+                }
+                _ => out.push_str("\\x"),
+            }
+        }
+        Some(o) => out.push(o),
+        None => out.push('\\'),
+    }
+}
+
+/// 解一个 YAML 双引号标量：`"a\nb"` → `a<换行>b`。不带引号的原样返回。
+///
+/// `created` 在时间戳形状不对时会被 `yaml_quote` 加引号存起来
+/// （那是为了挡住 front matter 注入）。读回来不解，就会拿到带字面
+/// 反斜杠和引号的字符串。
+fn parse_yaml_scalar(s: &str) -> String {
+    let inner = match s.strip_prefix('"').and_then(|x| x.strip_suffix('"')) {
+        Some(i) => i,
+        None => return s.to_string(),
+    };
+    let mut out = String::with_capacity(inner.len());
+    let mut it = inner.chars().peekable();
+    while let Some(c) = it.next() {
+        if c == '\\' { unescape_one(&mut it, &mut out); } else { out.push(c); }
     }
     out
 }
