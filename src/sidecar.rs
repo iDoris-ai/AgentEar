@@ -224,6 +224,17 @@ pub mod test_support {
         }
     }
 
+    /// 让**同一个** `Fake` 既能传进被测对象、又能事后查调用次数。
+    ///
+    /// 没有这个 impl 的时候，测试只能 `Box::new(Fake::always(..))` 传一个进去、
+    /// 再拿另一个实例查计数——那个断言恒为 0，永远通过，什么都没证明。
+    /// （真发生过，见 `label::tests::explicit_marker_never_touches_the_transport`。）
+    impl Transport for std::sync::Arc<Fake> {
+        fn post_json(&self, url: &str, body: &str, t: u64) -> Result<String> {
+            (**self).post_json(url, body, t)
+        }
+    }
+
     impl Transport for Fake {
         fn post_json(&self, _url: &str, _body: &str, _t: u64) -> Result<String> {
             *self.calls.lock().unwrap() += 1;

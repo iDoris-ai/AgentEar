@@ -565,9 +565,11 @@ fn finish(state: State, store: &store::Store, asr: &asr::Asr) -> Result<State> {
                 let url = cfg.llm_url.as_deref().unwrap_or(correct::DEFAULT_URL);
                 label::Classifier::new(url).classify(&text)
             } else {
-                // 没开边车功能时也要落 routes：标签留 unknown，
-                // 记录本身不能少——将来开了功能可以从 transcript 重算。
-                label::Classified { label: label::Label::Unknown, source: label::Source::Model }
+                // 没开边车功能时**仍然认显式标记**——它是纯本地字符串匹配，
+                // 不需要模型。用户说了「这是一个 idea」就该进知识库，
+                // 不该因为他没装 7.8 GB 的 LLM 就一并丢掉。
+                // 没明说的落 unknown，记录本身仍然要写。
+                label::explicit_only(&text)
             };
             let route = route::Route::new(
                 &committed.content_hash,

@@ -237,7 +237,32 @@ fn is_boundary(rest: &str) -> bool {
 ///
 /// 「这是一个任务还是一个想法？」按字面会命中 task，但他显然是在问。
 /// 显式标记不可被模型纠正，所以这种句子必须让给模型判断。
-const NOT_A_MARKER: [&str; 4] = ["还是", "或者", "呢？", "吗？"];
+///
+/// **英文的 `" or "` 与 `"?"` 是后补的**：早先这张表只有中文，于是
+/// `This is a task or an idea, I haven't decided.` 会被判成
+/// `Source::Explicit` 的 task —— 显式标记不可被模型纠正，
+/// 所以那是一条**投进知识库就改不回来**的误判。
+const NOT_A_MARKER: [&str; 6] = ["还是", "或者", "呢？", "吗？", " or ", "?"];
+
+/// 从标签词后面截到**第一个分句标点为止**（含那个标点）。
+///
+/// `NOT_A_MARKER` 只在这个窗口里找，**不扫整段正文**。
+/// 早先是 `after.contains(m)`，后果是正文里随便哪儿冒出一个「还是」
+/// 就把真实的显式标记吃掉：`这是一个任务，明天还是要买菜` 会判成
+/// `unknown`（然后不投递），而开着理解层时同一句话模型会判成 task
+/// ——**同一句话在两条路径上结果不同**，那是最难查的一类差异。
+///
+/// 为什么以标点为界：比较句式里的「还是」紧贴着标签词
+/// （「任务还是想法」），跨过一个逗号的那个「还是」属于**下一个分句**，
+/// 和标签没关系。
+fn first_clause(after: &str) -> &str {
+    const SEPARATORS: [char; 12] =
+        ['，', ',', '。', '.', '！', '!', '？', '?', '；', ';', '、', '\n'];
+    match after.char_indices().find(|(_, c)| SEPARATORS.contains(c)) {
+        Some((i, c)) => &after[..i + c.len_utf8()],
+        None => after,
+    }
+}
 
 /// 从文本里找显式标记。**纯字符串匹配，不问模型**——
 /// 「显式」的意思就是不靠猜（spec.md §3）。
@@ -300,14 +325,31 @@ pub fn detect_explicit(text: &str) -> Option<Label> {
             if !is_boundary(after) {
                 continue;
             }
-            // 「这是一个任务还是一个想法」——在比较，不是在标记
-            if NOT_A_MARKER.iter().any(|m| after.contains(m)) {
+            // 「这是一个任务还是一个想法」——在比较，不是在标记。
+            // 只看**第一个分句**，见 `first_clause` 的说明。
+            let clause = first_clause(after);
+            if NOT_A_MARKER.iter().any(|m| clause.contains(m)) {
                 return None;
             }
             return Some(label);
         }
     }
     None
+}
+
+/// 不问模型的分类：**只认显式标记**。
+///
+/// 边车没启用时走这条。`detect_explicit` 是纯本地字符串匹配
+/// （见 `LEADERS`），不需要任何模型、不联网、零延迟——
+/// 所以「没装 LLM」不该等于「一条都判不出来」。
+///
+/// 早先这里是硬编码 `unknown`，后果是**不开理解层的用户，知识库永远是空的**，
+/// 哪怕他老老实实说了「这是一个 idea」。那不是降级，那是把功能关掉了。
+pub fn explicit_only(text: &str) -> Classified {
+    match detect_explicit(text) {
+        Some(label) => Classified { label, source: Source::Explicit },
+        None => Classified { label: Label::Unknown, source: Source::Model },
+    }
 }
 
 pub struct Classifier {
@@ -401,6 +443,31 @@ impl Classifier {
 
 #[cfg(test)]
 mod tests {
+    /// **没有边车也要认显式标记。** 这条守的是「装上就能用」：
+    /// 不开理解层的用户说「这是一个 idea」，知识库里必须真的多一篇。
+    #[test]
+    fn explicit_marks_are_recognised_without_any_model() {
+        for (text, want) in [
+            ("这是一个 idea：给录音笔加 WiFi", Label::Idea),
+            ("记一个任务，明天买菜", Label::Task),
+            ("this is a note about the meeting", Label::Note),
+        ] {
+            let c = explicit_only(text);
+            assert_eq!(c.label, want, "{text:?} 应判成 {want:?}");
+            assert_eq!(c.source, Source::Explicit, "{text:?} 是用户明说的");
+        }
+    }
+
+    /// 没明说就是 unknown——**不猜**。没有模型的时候尤其不能猜。
+    #[test]
+    fn without_a_model_anything_unmarked_stays_unknown() {
+        for text in ["今天天气不错", "嗯这个那个", ""] {
+            let c = explicit_only(text);
+            assert_eq!(c.label, Label::Unknown, "{text:?}");
+            assert_eq!(c.source, Source::Model);
+        }
+    }
+
     use super::*;
 
     /// 认得出全部八个类名。
@@ -565,15 +632,56 @@ mod tests {
     }
 
     /// **显式标记不发请求**——连传输层都不该被调用。
+    ///
+    /// ⚠️ 这条测试原来是坏的：它 new 了一个 `fake`，却把**另一个**新实例
+    /// 传给分类器，最后查的是那个没被用过的 `fake`。断言恒为 0，
+    /// 哪怕分类器真的发了请求也照样通过。现在用 `Arc` 共享同一个实例。
     #[test]
     fn explicit_marker_never_touches_the_transport() {
-        let fake = Fake::always(&Fake::ok_body("note"));
-        // 用 Arc 共享以便事后查调用次数
-        let c = Classifier::with_transport("http://fake", Box::new(Fake::always(&Fake::ok_body("note"))));
+        let fake = std::sync::Arc::new(Fake::always(&Fake::ok_body("note")));
+        let c = Classifier::with_transport("http://fake", Box::new(fake.clone()));
         let r = c.classify("这是一个 idea，给录音笔加 WiFi");
         assert_eq!(r.label, Label::Idea, "显式标记应该直接采信");
         assert_eq!(r.source, Source::Explicit);
         assert_eq!(fake.call_count(), 0, "显式标记时不该发任何请求");
+    }
+
+    /// **正文里偶然出现的「还是」不该吃掉真实的显式标记。**
+    ///
+    /// 这条同时钉住「两条路径判一样」：不开理解层走 `explicit_only`，
+    /// 开了走 `Classifier::classify`，同一句话必须都是 Task/Explicit。
+    #[test]
+    fn a_comparison_word_in_a_later_clause_does_not_kill_the_mark() {
+        let text = "这是一个任务，明天还是要买菜";
+        assert_eq!(detect_explicit(text), Some(Label::Task), "跨逗号的「还是」属于下一个分句");
+
+        let a = explicit_only(text);
+        let fake = std::sync::Arc::new(Fake::always(&Fake::ok_body("idea")));
+        let b = Classifier::with_transport("http://fake", Box::new(fake.clone())).classify(text);
+        assert_eq!(a, b, "同一句话在两条路径上必须判成一样");
+        assert_eq!(a.label, Label::Task);
+        assert_eq!(fake.call_count(), 0, "命中显式标记就不该问模型");
+
+        // 紧挨着标签词的比较句式仍然要让给模型
+        assert_eq!(detect_explicit("这是一个任务还是一个想法？"), None);
+        assert_eq!(detect_explicit("这是一个任务吗？"), None);
+    }
+
+    /// 英文的比较句式同样不能被当成显式标记。
+    ///
+    /// 显式标记**不可被模型纠正**，所以这里误判一次就是一条永久错标、
+    /// 而且会被投进知识库。
+    #[test]
+    fn english_comparisons_are_not_explicit_marks() {
+        for text in [
+            "this is a task or an idea, i haven't decided.",
+            "This is a task or an idea",
+            "this is a note?",
+        ] {
+            assert_eq!(detect_explicit(text), None, "{text:?} 是在比较/发问，不是标记");
+        }
+        // 正常的英文标记照旧
+        assert_eq!(detect_explicit("this is a note about the meeting"), Some(Label::Note));
     }
 
     /// 真调边车，跑 label-taxonomy.md 的全部 18 条用例。
@@ -777,3 +885,4 @@ mod tests {
         assert_eq!(detect_explicit("this is a good point"), None);
     }
 }
+
