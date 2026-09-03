@@ -866,4 +866,69 @@ mod tests {
 
         fs::remove_dir_all(&tmp).ok();
     }
+
+    /// **`url` 和 `bytes` 必须同时与外部世界一致。**
+    ///
+    /// 这条不是「断言字符串等于它自己」——`url` 和 `bytes` 是**两个各自
+    /// 维护的常量**，它要求 `url` 指向的东西确实是我们以为的那个。
+    /// 域名改错、tag 拼错、资产被换掉，都会让它红。
+    ///
+    /// 仓库迁到 `iDoris-ai` 时，这个 URL 改动**没有任何判据**
+    /// 守着（sha256 没变，因为还是同一个文件），这条测试补的就是那个洞。
+    ///
+    /// **它抓不住什么**：抓的是「URL 现在指对了」，不是「已装机的旧版本
+    /// 还能下」——后者依赖 GitHub 的转移重定向，任何仓内判据都钉不住。
+    #[test]
+    #[ignore = "要联网：HEAD 一次模型 URL"]
+    fn the_model_url_still_serves_exactly_the_bytes_we_expect() {
+        let out = std::process::Command::new("/usr/bin/curl")
+            .args(["-fLsI", "--max-time", "60", THAI.url])
+            .output()
+            .expect("跑 curl 失败");
+        assert!(out.status.success(), "HEAD {} 失败", THAI.url);
+        let head = String::from_utf8_lossy(&out.stdout).to_lowercase();
+        // **取最后一个。** `curl -I -L` 会把整条重定向链的响应头都打出来，
+        // 而 GitHub 的 release 资产是 302 到 CDN——第一个 `content-length`
+        // 是那个 302 的 `0`。取第一个的话，这条测试**两侧都红**，
+        // 什么都证明不了（第一版就是这么写的，跑红绿两侧才发现）。
+        let len: u64 = head
+            .lines()
+            .filter_map(|l| l.strip_prefix("content-length:"))
+            .filter_map(|v| v.trim().parse::<u64>().ok())
+            .filter(|n| *n > 0)
+            .next_back()
+            .unwrap_or_else(|| panic!("响应链里没有非零的 content-length:\n{head}"));
+        assert_eq!(
+            len, THAI.bytes,
+            "URL 指向的文件大小和 ModelSpec.bytes 对不上——URL 或 bytes 有一个是错的"
+        );
+    }
+
+    /// 旧的仓库 owner **不该再出现在源码里**。
+    ///
+    /// 迁仓时漏改一处 URL 是很容易发生的事，而它不会让任何别的测试变红。
+    /// 这条几乎免费，而且能进默认那一轮（不打网络）。
+    ///
+    /// ⚠️ **它只禁旧名字，拦不住把新名字拼错**——那种情况要靠上面那条
+    /// 联网测试。两条合起来才覆盖迁仓的两种失败形态。
+    #[test]
+    fn the_old_repository_owner_is_gone_from_the_source() {
+        let mut offenders = Vec::new();
+        for entry in fs::read_dir(concat!(env!("CARGO_MANIFEST_DIR"), "/src")).unwrap() {
+            let path = entry.unwrap().path();
+            if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+                continue;
+            }
+            let text = fs::read_to_string(&path).unwrap();
+            // 拼起来写，免得这行自己命中自己
+            let old = concat!("jhf", "netboy");
+            if text.contains(old) {
+                offenders.push(path.display().to_string());
+            }
+        }
+        assert!(
+            offenders.is_empty(),
+            "源码里还有旧 owner，迁仓漏改了: {offenders:?}"
+        );
+    }
 }
