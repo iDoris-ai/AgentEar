@@ -57,7 +57,7 @@ scripts/bundle.sh                             # 打 .app bundle → dist/
 
 文档阅读顺序：`docs/milestones.md`（里程碑）→ `docs/decisions/`（决策记录，**选型结论以此为准**）→ `docs/benchmarks.md`（实测数据）→ `docs/ingest-design.md`（接入层设计）。`docs/asr-selection.md` 是初版调研，其中的选型结论**已被 ADR-0001 推翻**，仅作历史参考。
 
-仓库在 GitHub 上（`git@github.com:jhfnetboy/AgentEar.git`，分支 `main`）。
+仓库在 GitHub 上（`git@github.com:iDoris-ai/AgentEar.git`，分支 `main`）。
 
 ### 已拍板（jason 2026-07-29 确认，不要重开讨论）
 

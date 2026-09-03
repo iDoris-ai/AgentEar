@@ -50,7 +50,7 @@
 
 ### 用发布版
 
-到 [Releases](https://github.com/jhfnetboy/AgentEar/releases) 下载 `AgentEar-*-macos-arm64.zip`,解压后把 `AgentEar.app` 拖进「应用程序」。
+到 [Releases](https://github.com/iDoris-ai/AgentEar/releases) 下载 `AgentEar-*-macos-arm64.zip`,解压后把 `AgentEar.app` 拖进「应用程序」。
 
 **首次运行要授权两项权限**(两者是独立的,各授权一次):
 
@@ -69,7 +69,7 @@
 ### 从源码构建
 
 ```bash
-git clone git@github.com:jhfnetboy/AgentEar.git && cd AgentEar
+git clone git@github.com:iDoris-ai/AgentEar.git && cd AgentEar
 
 # ASR 运行时与模型不入库,需要单独下载到 vendor/
 mkdir -p vendor/bin vendor/models

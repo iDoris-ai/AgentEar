@@ -80,7 +80,7 @@ pub struct ModelSpec {
 /// 换模型的成本就是改这四个常量，见 `scripts/build-thai-model.sh`。
 pub const THAI: ModelSpec = ModelSpec {
     file: "ggml-distill-whisper-th-large-v3-q5_0.bin",
-    url: "https://github.com/jhfnetboy/AgentEar/releases/download/models-th-v1/ggml-distill-whisper-th-large-v3-q5_0.bin",
+    url: "https://github.com/iDoris-ai/AgentEar/releases/download/models-th-v1/ggml-distill-whisper-th-large-v3-q5_0.bin",
     sha256: "5bfc04f1931a1bb9af9f6c7942b4a63b8d8f956377fe6b9827c6b286420a9c6d",
     bytes: 574041195,
 };

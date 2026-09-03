@@ -42,7 +42,7 @@ please don't force a native-English pronunciation).
 
 ### A. 网页录音工具(有电平表,自动出 16 kHz WAV)
 
-<https://jhfnetboy.github.io/AgentEar/thai-recorder.html>
+<https://idoris-ai.github.io/AgentEar/thai-recorder.html>
 
 在手机或电脑的浏览器里打开,按页面提示走。它会在你录完之后自己检查音量、
 时长、有没有丢帧,并把「你实际念的文本」和录音绑在一起 ——
