@@ -128,6 +128,10 @@ pub struct Corrector {
     /// 传输层。生产是 curl，测试塞假的——
     /// 见 `sidecar` 模块文档：那些静默出错的分支只有这样才测得到。
     transport: Box<dyn crate::sidecar::Transport>,
+    /// 跳过就绪门控。**只在测试里置 true**——注入假传输层时没有真实的
+    /// 边车，而门控会让所有请求在发出前就被挡下，于是那些分支一条也测不到
+    /// （和 `label::Classifier::skip_probe` 同一个道理）。
+    skip_ready_check: bool,
     /// 渲染好的术语清单。
     ///
     /// **每次纠错前重新加载**（见 `main` 的调用点），不缓存到进程生命周期——
@@ -141,6 +145,7 @@ impl Corrector {
         Self {
             url: url.into(),
             transport: Box::new(crate::sidecar::Curl),
+            skip_ready_check: false,
             terms_block: String::new(),
         }
     }
@@ -150,6 +155,7 @@ impl Corrector {
         Self {
             url: url.into(),
             transport: Box::new(crate::sidecar::Curl),
+            skip_ready_check: false,
             terms_block: terms.to_prompt_block(),
         }
     }
@@ -161,7 +167,12 @@ impl Corrector {
         terms: &crate::terms::Terms,
         t: Box<dyn crate::sidecar::Transport>,
     ) -> Self {
-        Self { url: url.into(), transport: t, terms_block: terms.to_prompt_block() }
+        Self {
+            url: url.into(),
+            transport: t,
+            skip_ready_check: true,
+            terms_block: terms.to_prompt_block(),
+        }
     }
 
     /// 确认对端**确实是我们的模型服务**。
@@ -306,6 +317,15 @@ impl Corrector {
     const CONTEXT_BUDGET_CHARS: usize = 16_000;
 
     fn request(&self, text: &str, single_line_only: bool) -> Result<String> {
+        // **发请求前必须确认对端是我们的服务。**
+        //
+        // codex High 3：早先 `ensure_available` 的结果只写进日志，
+        // 而这里只看配置开关——于是一个**已经被识别为「端口被别人占了」
+        // 的服务，照样会收到用户的转写文本**。那正是 8793 被本机另一个
+        // node 服务占用时会发生的事。
+        if !self.skip_ready_check && !crate::sidecar::is_ready() {
+            bail!("边车未就绪（{:?}），不发送转写内容", crate::sidecar::health());
+        }
         // 术语表是用户可编辑的，条数和长度都由他定。加得太多会把正文
         // 挤出上下文窗口——那种失败很难看懂：模型只看到半截话，
         // 纠出来的东西驴唇不对马嘴，而日志里一切正常。
@@ -558,6 +578,7 @@ mod tests {
     #[test]
     #[ignore = "需要 LLM 边车在跑：scripts/serve-llm.sh"]
     fn real_road_and_id_survive() {
+        crate::sidecar::probe(DEFAULT_URL);
         let terms = crate::terms::Terms::default();
         let c = Corrector::with_terms(DEFAULT_URL, &terms);
 
@@ -682,6 +703,7 @@ mod tests {
         // fixture 得真的含有那个触发条件，否则这条测试是空转
         assert!(input.contains("ro的目录"), "fixture 里应该有触发这次回归的原始错误");
 
+        crate::sidecar::probe(DEFAULT_URL);
         let terms = crate::terms::Terms::default();
         let out = Corrector::with_terms(DEFAULT_URL, &terms)
             .correct(input)

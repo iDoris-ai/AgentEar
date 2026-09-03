@@ -64,6 +64,28 @@ fn default_auto_paste() -> bool {
     true
 }
 
+fn default_autostart() -> bool {
+    true
+}
+
+/// 默认的拉起命令：**空**。
+///
+/// ⚠️ 曾经默认成 `env!("CARGO_MANIFEST_DIR")/scripts/serve-llm.sh`，
+/// 那是**编译时**的仓库路径——分发到别人机器上指向一个不存在的目录，
+/// 而且一旦被写进用户的 config.json 就固化下来了（codex Medium 1）。
+///
+/// 空的含义是「不知道怎么拉，只连不拉」，这恰好也是 jason 说的
+/// 那个未来的默认形态：模型服务由外部管理，AgentEar 只按 `llm_url` 连。
+/// 开发时要自动拉起，在配置里显式写路径。
+fn default_start_command() -> Vec<String> {
+    Vec::new()
+}
+
+fn lenient_autostart<'de, D: Deserializer<'de>>(d: D) -> Result<bool, D::Error> {
+    let v = serde_json::Value::deserialize(d)?;
+    Ok(serde_json::from_value(v).unwrap_or_else(|_| default_autostart()))
+}
+
 /// 每个字段都走 `lenient`：一个字段坏掉不该连累其他设置。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -107,6 +129,21 @@ pub struct Config {
     /// 而换端口不该要求用户重新编译。
     #[serde(deserialize_with = "lenient")]
     pub llm_url: Option<String>,
+    /// 连不上边车时，要不要**尝试**按 `llm_start_command` 把它拉起来。
+    ///
+    /// 默认 `true`，但这只是兜底——**正常路径永远是「按 `llm_url` 去连」**。
+    /// jason 2026-09-03 定的原则：将来会有独立的模型服务入口，那时
+    /// AgentEar 只管按配置连，谁把它起起来的不关它的事。
+    /// 把它设成 `false` 就是那个未来：只连不拉，连不上就降级。
+    #[serde(deserialize_with = "lenient_autostart")]
+    pub llm_autostart: bool,
+    /// 拉起边车用的命令，argv 形式（第一项是程序，其余是参数）。
+    ///
+    /// **刻意不写死成 `scripts/serve-llm.sh`。** 换模型、换推理框架、
+    /// 换成别的机器上的服务，都只该改这个配置，不该改代码。
+    /// 留空 = 不知道怎么拉，等同于 `llm_autostart: false`。
+    #[serde(deserialize_with = "lenient")]
+    pub llm_start_command: Vec<String>,
 }
 
 // 这两个字段的「默认」不是 `Default::default()`，坏值要退回文档里写的默认，
@@ -132,6 +169,8 @@ impl Default for Config {
             asr_lang: AsrLang::default(),
             correct_terms: false,
             llm_url: None,
+            llm_autostart: default_autostart(),
+            llm_start_command: default_start_command(),
         }
     }
 }
@@ -254,6 +293,7 @@ mod tests {
         assert_eq!(c.retention_days, 30);
         assert_eq!(c.ui_lang, Lang::En, "没有 ui_lang 字段时应取默认英文");
         assert_eq!(c.asr_lang, AsrLang::Auto, "没有 asr_lang 字段时应取默认 Auto");
+        assert!(c.llm_autostart, "老配置没有这个字段时应取默认 true");
         assert!(!c.correct_terms, "术语纠错默认关——它要一个额外的边车进程");
     }
 
