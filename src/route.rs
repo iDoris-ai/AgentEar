@@ -41,11 +41,18 @@ pub struct Delivery {
     /// 最后一次失败的原因。**留着不清空**——投递成功后它仍然是
     /// 「这条曾经失败过几次、为什么」的证据，排查时有用。
     pub last_error: Option<String>,
+    /// 投递落点，相对数据根，例如 `kb/2026/09/03/103022-idea-xxx.md`。
+    ///
+    /// 光有 `state: delivered` 说不清「投到哪了」。而适配器是可换的
+    /// （ADR-0003 §3.2），换掉之后这个字段就是唯一能回答
+    /// 「上一个适配器把它放在哪」的记录。
+    #[serde(default)]
+    pub location: Option<String>,
 }
 
 impl Default for Delivery {
     fn default() -> Self {
-        Self { state: DeliveryState::Pending, attempts: 0, last_error: None }
+        Self { state: DeliveryState::Pending, attempts: 0, last_error: None, location: None }
     }
 }
 
@@ -93,9 +100,28 @@ impl Route {
     /// 从 `created_at` 的前 7 个字符取。**不重新算当前时间**——
     /// 记录的归属月份必须和它自己的时间戳一致，否则跨月的那一刻
     /// 会出现「文件在 9 月目录、时间戳是 8 月」的错位。
+    ///
+    /// **形状不对一律归到 `unknown/`。** 这个返回值会被拼进文件路径，
+    /// 而 `created_at` 是从磁盘上的 JSON 读进来的——手工编辑过、导入的、
+    /// 或者写坏了的记录都可能带着 `../..` 之类的东西。`PathBuf::join`
+    /// 不会帮你把它挡在 `routes/` 里面。
     pub fn month(&self) -> String {
-        self.created_at.chars().take(7).collect()
+        let m: String = self.created_at.chars().take(7).collect();
+        if is_month(&m) { m } else { "unknown".into() }
     }
+}
+
+/// `2026-09` 的形状。
+pub fn is_month(s: &str) -> bool {
+    let b = s.as_bytes();
+    b.len() == 7 && b[4] == b'-' && b.iter().enumerate().all(|(i, c)| i == 4 || c.is_ascii_digit())
+}
+
+/// 内容哈希的形状：非空、纯十六进制、不超过一个 sha256 的长度。
+///
+/// 和 `is_month` 同一个理由——它会变成文件名，也会被拼进路径。
+pub fn is_content_hash(s: &str) -> bool {
+    !s.is_empty() && s.len() <= 64 && s.chars().all(|c| c.is_ascii_hexdigit())
 }
 
 /// 本地时区的 RFC 3339 时间戳。
@@ -116,6 +142,22 @@ fn now_rfc3339() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **月份会被拼进文件路径**，而 `created_at` 是从磁盘读来的。
+    /// 形状不对必须归到 `unknown/`，不能让 `../..` 走出 `routes/`。
+    #[test]
+    fn a_malformed_timestamp_cannot_escape_the_routes_directory() {
+        for bad in ["../../x", "垃圾", "", "2026-9-1", "/etc/pa"] {
+            let mut r = Route::new("h", Label::Note, Source::Model, "t");
+            r.created_at = bad.into();
+            assert_eq!(r.month(), "unknown", "坏时间戳 {bad:?} 必须归到 unknown");
+        }
+        assert!(is_month("2026-09"));
+        assert!(!is_month("2026-9"));
+        assert!(is_content_hash("deadbeef00"));
+        assert!(!is_content_hash("../etc"));
+        assert!(!is_content_hash(""));
+    }
 
     #[test]
     fn month_comes_from_the_records_own_timestamp() {

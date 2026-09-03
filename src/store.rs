@@ -31,7 +31,7 @@ pub struct Committed {
 impl Store {
     pub fn open(root: impl AsRef<Path>) -> Result<Self> {
         let root = root.as_ref().to_path_buf();
-        for d in ["raw/audio", "raw/.tmp", "derived/transcripts"] {
+        for d in ["raw/audio", "raw/.tmp", "derived/transcripts", "routes/.pending"] {
             fs::create_dir_all(root.join(d))
                 .with_context(|| format!("创建目录失败: {}", root.join(d).display()))?;
         }
@@ -141,6 +141,14 @@ impl Store {
     /// 写入走「临时文件 + rename」，和本模块其他写入一致：
     /// 崩在写一半不会留下半截 JSON 让下次读取失败。
     pub fn write_route(&self, record: &crate::route::Route) -> Result<PathBuf> {
+        // `content_hash` 会直接变成文件名。正常路径下它来自 sha256，
+        // 但这个函数也被投递状态回写调用，而那条 route 是从磁盘读进来的
+        // ——手工编辑过的记录不该能让我们往 `routes/` 外面写。
+        anyhow::ensure!(
+            crate::route::is_content_hash(&record.content_hash),
+            "content_hash 形状不对，拒绝写入: {:?}",
+            record.content_hash
+        );
         let dir = self.root.join("routes").join(record.month());
         fs::create_dir_all(&dir).with_context(|| format!("建 {} 失败", dir.display()))?;
         let path = dir.join(format!("{}.json", record.content_hash));
@@ -149,6 +157,95 @@ impl Store {
         fs::write(&tmp, json).with_context(|| format!("写 {} 失败", tmp.display()))?;
         fs::rename(&tmp, &path).context("rename route 文件失败")?;
         Ok(path)
+    }
+
+    /// 投递重试队列所在目录（ADR-0003 §4.2）。
+    ///
+    /// 放在 `routes/` **里面**是有意的：待投递是 route 的一个状态，
+    /// 不是另一份数据。放外面会多出一个「两个目录不同步」的失败模式。
+    /// 用 `.` 开头，Obsidian / Finder 都不会把它当成内容。
+    pub fn pending_dir(&self) -> PathBuf {
+        self.root.join("routes/.pending")
+    }
+
+    /// 读回一条 route 记录。两个参数都会被拼进路径，所以都要先验形状。
+    pub fn read_route(&self, month: &str, content_hash: &str) -> Result<crate::route::Route> {
+        anyhow::ensure!(crate::route::is_month(month), "月份形状不对: {month:?}");
+        anyhow::ensure!(
+            crate::route::is_content_hash(content_hash),
+            "content_hash 形状不对: {content_hash:?}"
+        );
+        let p = self.root.join("routes").join(month).join(format!("{content_hash}.json"));
+        let s = fs::read_to_string(&p).with_context(|| format!("读 {} 失败", p.display()))?;
+        serde_json::from_str(&s).with_context(|| format!("解析 {} 失败", p.display()))
+    }
+
+    /// 一条 route 现在在哪个月份目录里。
+    ///
+    /// 重试队列的 marker 里存了月份，但那是**提示**不是权威：marker 可能
+    /// 在写入途中被杀而留下空文件。所以还要能反查——月份目录一年 12 个，
+    /// 扫一遍的代价可以忽略，换来的是「marker 内容坏了也不丢这条」。
+    pub fn find_route_month(&self, content_hash: &str) -> Option<String> {
+        if !crate::route::is_content_hash(content_hash) {
+            return None;
+        }
+        let routes = self.root.join("routes");
+        let mut months: Vec<String> = fs::read_dir(&routes)
+            .ok()?
+            .flatten()
+            .filter(|e| e.path().is_dir())
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .filter(|n| crate::route::is_month(n) || n == "unknown")
+            .collect();
+        // 新的更可能命中，从后往前找
+        months.sort();
+        months.reverse();
+        months.into_iter().find(|m| {
+            routes.join(m).join(format!("{content_hash}.json")).is_file()
+        })
+    }
+
+    /// 全量列出 route 记录，按月份目录名排序。
+    ///
+    /// 返回 `(记录, 读不出来的条数)`。单条解析失败**只跳过它**，不让整轮
+    /// 失败——一个坏文件不该挡住其余上万条的重放。**但跳过的数量必须报出去**：
+    /// 「全量重建」如果悄悄漏掉了几条却报告成功，自动化就发现不了数据缺口。
+    pub fn all_routes(&self) -> Result<(Vec<crate::route::Route>, usize)> {
+        let routes = self.root.join("routes");
+        let mut months: Vec<PathBuf> = match fs::read_dir(&routes) {
+            Ok(rd) => rd
+                .flatten()
+                .map(|e| e.path())
+                .filter(|p| p.is_dir() && !p.file_name().is_some_and(|n| n.to_string_lossy().starts_with('.')))
+                .collect(),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok((Vec::new(), 0)),
+            Err(e) => return Err(e).context("读 routes/ 失败"),
+        };
+        months.sort();
+
+        let mut out = Vec::new();
+        let mut unreadable = 0usize;
+        for m in months {
+            let mut files: Vec<PathBuf> = fs::read_dir(&m)
+                .with_context(|| format!("读 {} 失败", m.display()))?
+                .flatten()
+                .map(|e| e.path())
+                .filter(|p| p.extension().and_then(|s| s.to_str()) == Some("json"))
+                .collect();
+            files.sort();
+            for f in files {
+                match fs::read_to_string(&f).map_err(anyhow::Error::from).and_then(|s| {
+                    serde_json::from_str::<crate::route::Route>(&s).map_err(anyhow::Error::from)
+                }) {
+                    Ok(r) => out.push(r),
+                    Err(e) => {
+                        unreadable += 1;
+                        log::error!("跳过无法解析的 route {}: {e:#}", f.display());
+                    }
+                }
+            }
+        }
+        Ok((out, unreadable))
     }
 
     /// 删除 `raw/audio/` 下超过 `days` 天未修改的音频，返回删除数量。
@@ -525,7 +622,7 @@ mod tests {
         let d = tmpdir();
         let s = Store::open(&d).unwrap();
         let r = crate::route::Route::new(
-            "same",
+            "5a3e",
             crate::label::Label::Note,
             crate::label::Source::Model,
             "第一次",
@@ -555,7 +652,7 @@ mod tests {
         let d = tmpdir();
         let s = Store::open(&d).unwrap();
         let r = crate::route::Route::new(
-            "unk",
+            "4e6b",
             crate::label::Label::Unknown,
             crate::label::Source::Model,
             "嗯这个那个",
@@ -571,7 +668,7 @@ mod tests {
     fn no_temp_file_is_left_behind() {
         let d = tmpdir();
         let s = Store::open(&d).unwrap();
-        let r = crate::route::Route::new("t", crate::label::Label::Task, crate::label::Source::Model, "x");
+        let r = crate::route::Route::new("7a", crate::label::Label::Task, crate::label::Source::Model, "x");
         s.write_route(&r).unwrap();
 
         let dir = d.join("routes").join(r.month());

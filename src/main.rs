@@ -10,8 +10,10 @@ mod download;
 mod audio;
 mod config;
 mod correct;
+mod deliver;
 mod hotkey;
 mod i18n;
+mod kb;
 mod label;
 mod paste;
 mod route;
@@ -19,6 +21,8 @@ mod sidecar;
 mod store;
 mod terms;
 mod tray;
+
+use crate::kb::KbSink;
 
 use anyhow::{Context, Result};
 use std::path::PathBuf;
@@ -186,6 +190,28 @@ fn main() -> Result<()> {
         }
     }
 
+    // 从 `routes/` 全量重建知识库。
+    //
+    // 这是 ADR-0003 §7「L1 文档层可以从 L0 事实层全量重放」的可执行证明。
+    // 三种场景都只有这一条出路：手滑删了 `kb/` 想重来、换了适配器要迁移、
+    // 修好 bug 要补投之前失败的。**投递是幂等的，所以反复跑是安全的。**
+    if args.iter().any(|a| a == "--replay-kb") {
+        let store = store::Store::open(&data_root)?;
+        let kb_root = cfg.kb_root(&data_root);
+        println!("从 {} 重建 → {}", store.root().join("routes").display(), kb_root.display());
+        let sink = kb::FileSink::new(store.root(), &kb_root);
+        let st = deliver::replay(&store, &sink)?;
+        println!(
+            "完成：投递 {} 条，跳过 {} 条（unknown / command 不进知识库），失败 {} 条",
+            st.delivered, st.skipped, st.failed
+        );
+        // 有失败就用非零退出码，脚本里能判
+        if st.failed > 0 {
+            std::process::exit(1);
+        }
+        return Ok(());
+    }
+
     // 给一段文字分类，输出一级标签。
     //
     // 存在的理由不只是排障：`spike/m2_bench.py` 的标签评测**必须走这条路**，
@@ -232,6 +258,19 @@ fn main() -> Result<()> {
     // 一开就是几周，只在启动时清等于对常开的机器不生效。
     if let Err(e) = store.purge_older_than(cfg.retention_days) {
         log::error!("清理过期 raw 音频失败: {e:#}");
+    }
+
+    // 上次没投成的，这次启动补上（ADR-0003 §4.2）。
+    //
+    // 放在这里而不是工作线程里：补投只读写本地文件，几毫秒的事，
+    // 而放到线程里会和第一次录音抢同一批 route 文件。
+    if cfg.kb_enabled {
+        let sink = kb::FileSink::new(store.root(), cfg.kb_root(&data_root));
+        if let Err(e) = sink.health() {
+            log::error!("知识库目录不可用，本次运行只写 routes/: {e:#}");
+        } else {
+            deliver::drain(&store, &sink);
+        }
     }
 
     // 权限引导：想用右 Command 就必须有辅助功能权限。
@@ -536,17 +575,44 @@ fn finish(state: State, store: &store::Store, asr: &asr::Asr) -> Result<State> {
                 classified.source,
                 &text,
             );
-            match store.write_route(&route) {
-                Ok(p) => log::info!(
-                    "标签 {}（{}）→ {}",
-                    classified.label.as_str(),
-                    match classified.source {
-                        label::Source::Explicit => "用户明说",
-                        label::Source::Model => "模型推断",
-                    },
-                    p.display()
-                ),
-                Err(e) => log::error!("写 routes 记录失败（不影响剪贴板与上屏）: {e:#}"),
+            let route_written = match store.write_route(&route) {
+                Ok(p) => {
+                    log::info!(
+                        "标签 {}（{}）→ {}",
+                        classified.label.as_str(),
+                        match classified.source {
+                            label::Source::Explicit => "用户明说",
+                            label::Source::Model => "模型推断",
+                        },
+                        p.display()
+                    );
+                    true
+                }
+                Err(e) => {
+                    log::error!("写 routes 记录失败（不影响剪贴板与上屏）: {e:#}");
+                    false
+                }
+            };
+
+            // —— 知识库投递 ——
+            //
+            // **入队在投递之前**：进程要是在投递中途被杀，marker 还在，
+            // 下次启动会补上。反过来（失败了才入队）就有一个「既没成功
+            // 也没入队」的洞（`deliver` 的模块文档展开说了）。
+            //
+            // 真正的投递排在剪贴板/上屏**之后**——任何下游都不能挡住上屏。
+            //
+            // `routes/` 没写成就整段跳过：投递状态要回写到那份记录里，
+            // 记录不存在的话投出去的东西无从追溯，队列里的 marker 也会
+            // 指向一条读不出来的 route。
+            let sink = (cfg.kb_enabled && route_written)
+                .then(|| kb::FileSink::new(store.root(), cfg.kb_root(store.root())));
+            if sink.is_some() {
+                if let Err(e) = deliver::enqueue(store, &route) {
+                    // 入队失败 = 这条投递失败后不会被自动补投。用户得知道，
+                    // 否则他会以为链路是通的。`--replay-kb` 能补回来。
+                    log::error!("加入投递队列失败，这条不会自动重试（可跑 --replay-kb 补投）: {e:#}");
+                }
             }
             // 先进剪贴板再谈上屏。上屏失败还能手动 ⌘V，顺序反过来就没有退路了。
             match copy_to_clipboard(&text) {
@@ -568,6 +634,11 @@ fn finish(state: State, store: &store::Store, asr: &asr::Asr) -> Result<State> {
                     );
                 }
                 Err(e) => log::error!("写剪贴板失败: {e:#}"),
+            }
+
+            // 用户已经拿到文字了，这一步慢一点、失败了都不影响他。
+            if let Some(sink) = sink {
+                deliver::attempt(store, &sink, &route);
             }
         }
         Ok(_) => log::warn!("转写结果为空（这段音频可能没有语音）"),

@@ -9,13 +9,16 @@ M2 = 术语纠错 + 一级标签识别 + `routes/` 落盘，需要一个本地 L
 边车的生命周期见 ADR-0002 §8：**连接优先、拉起兜底**，
 `llm_autostart: false` 就是「只连不拉」的形态。
 
-`routes/` 目前**只写不读** —— 下游投递（ADR-0003 的双适配器）还没做。
+`routes/` 已经接上下游：**文件适配器**把每条记录渲染成 `kb/**/*.md`
+（ADR-0003 §3.3 的 front matter），失败进 `routes/.pending/` 重试队列，
+`--replay-kb` 可从 `routes/` 全量重建。**默认开**（`kb_enabled`，不需要任何外部依赖）。
+ADR-0003 的**组织档适配器（memos）还没做**，等真有企业需求再定（ADR-0003 §6）。
 
 **构建与测试**：
 
 ```bash
 cargo build --release
-cargo test                                    # 65 个测试：提交协议、崩溃语义、token 过滤、i18n、下载协议
+cargo test                                    # 181 个测试：提交协议、崩溃语义、token 过滤、i18n、下载协议、知识库投递
 ./target/release/agentear                     # 守护进程，Ctrl+Shift+R 开始/停止录音
 ./target/release/agentear --transcribe x.wav  # 离线转写，不占麦克风，用于验证 ASR 链路
 ./target/release/agentear --diagnose          # 环境自检：权限、音频设备、ASR 依赖
@@ -23,6 +26,7 @@ cargo test                                    # 65 个测试：提交协议、�
 ./target/release/agentear --fetch-thai        # 预下载泰语模型（574 MB），只装不改识别语言
 ./target/release/agentear --transcribe x.wav --lang th   # 不改配置试泰语链路
 ./target/release/agentear --classify "这是一个 idea"      # 给一段文字分类（评测脚本也走这条）
+./target/release/agentear --replay-kb                    # 从 routes/ 全量重建 kb/，幂等，可反复跑
 scripts/bundle.sh                             # 打 .app bundle → dist/
 ```
 
@@ -107,7 +111,9 @@ scripts/bundle.sh                             # 打 .app bundle → dist/
 
 ### 存储语义（已定，不要在实现时重新解释）
 
-`raw/audio/` = **ASR 之前**的原始字节，丢了不可重建；`derived/transcripts/` = 模型输出，可重算；`routes/` = 下游决策，可重算。**原始音频的持久化不得依赖任何下游步骤成功**——这是 README「先存后分流」的执行点。
+`raw/audio/` = **ASR 之前**的原始字节，丢了不可重建；`derived/transcripts/` = 模型输出，可重算；`routes/` = 下游决策，可重算；`kb/` = 人读的 Markdown 文档层，**可从 `routes/` 全量重放**（`--replay-kb`）。
+
+**分层的分界线是「能不能从语音重算」，不是「存在哪」**（ADR-0003 §7）：L0 事实层（raw+derived+routes，音频不可重建）→ L1 文档层（`kb/`，可重放）→ L2 索引层（还没做，可重建）→ **L3 行动层（任务/日程，带用户后来改的状态，不可重放）**。L3 不能塞进 Markdown 文件树，否则重放会覆盖用户改过的状态。**原始音频的持久化不得依赖任何下游步骤成功**——这是 README「先存后分流」的执行点。
 
 **两条接入路径的持久化保证等级不同，措辞上不要混用**：文件导入（路径 A）是**零丢失**，走完整提交协议后才 ACK；实时流（路径 B）是**有界丢失**——音频以 tee 同时喂 ASR 和落盘，崩溃会丢掉最后一次 fsync 之后的部分，raw 对象按定长时间片（非 VAD 边界）切分。**下游路由只消费 committed 的转写，不消费 provisional 的。** 详见 `docs/ingest-design.md` §3.7。
 
