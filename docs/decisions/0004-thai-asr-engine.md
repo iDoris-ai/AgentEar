@@ -647,7 +647,7 @@ HF HEAD 必须以 `62df42cecab9` 开头；f16 中间产物必须大于 1 GB
 ### 模型托管
 
 转换后的 GGML 放在 AgentEar 仓库的 `models-th-v1` tag 下
-（[Release](https://github.com/jhfnetboy/AgentEar/releases/tag/models-th-v1)），
+（[Release](https://github.com/iDoris-ai/AgentEar/releases/tag/models-th-v1)），
 URL 与 SHA-256 在 `src/download.rs` 里固化。
 
 **许可**：上游 `biodatlab/distill-whisper-th-large-v3` 是 **MIT**，

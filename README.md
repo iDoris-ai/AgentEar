@@ -8,7 +8,7 @@
 
 ---
 
-## 当前状态:M1 完成,知识库投递默认开(v0.4.1),M2 理解层可选启用
+## 当前状态:M1 完成,知识库 + 全文检索默认开(v0.4.2),M2 理解层可选启用
 
 按一下右 Command 开始录音,再按一下停止,几百毫秒后转写文字就在剪贴板里。
 
@@ -31,6 +31,7 @@
 | **M1+** 三语界面 + 泰语识别 | ✅ v0.3.0 / v0.3.1 |
 | **M2** 理解与标签路由 | ✅ v0.4.0,**默认关**,要自己备一个本地 LLM(见下) |
 | **M2** 知识库投递(`kb/` Markdown 树) | ✅ v0.4.1,**默认开**;判出标签的才生成 Markdown |
+| **M2** 全文检索(`--search`) | ✅ v0.4.2,中文按子串搜,索引可随时重建 |
 | M3 语音输出与打断 | |
 | M3.5 录音笔能力刻画 | 机器未到手 |
 | M4 录音笔接入 | |
@@ -49,7 +50,7 @@
 
 ### 用发布版
 
-到 [Releases](https://github.com/jhfnetboy/AgentEar/releases) 下载 `AgentEar-*-macos-arm64.zip`,解压后把 `AgentEar.app` 拖进「应用程序」。
+到 [Releases](https://github.com/iDoris-ai/AgentEar/releases) 下载 `AgentEar-*-macos-arm64.zip`,解压后把 `AgentEar.app` 拖进「应用程序」。
 
 **首次运行要授权两项权限**(两者是独立的,各授权一次):
 
@@ -68,7 +69,7 @@
 ### 从源码构建
 
 ```bash
-git clone git@github.com:jhfnetboy/AgentEar.git && cd AgentEar
+git clone git@github.com:iDoris-ai/AgentEar.git && cd AgentEar
 
 # ASR 运行时与模型不入库,需要单独下载到 vendor/
 mkdir -p vendor/bin vendor/models
@@ -101,6 +102,8 @@ agentear --diagnose           # 环境自检:权限、音频设备、ASR 依赖
 agentear --transcribe x.wav   # 离线转写,不占麦克风
 agentear --debug-keys         # 打印每个修饰键事件,排查按键问题
 agentear --replay-kb          # 从 routes/ 全量重建 kb/,幂等,可反复跑
+agentear --search 录音笔       # 全文检索(中文按子串搜)
+agentear --reindex            # 从 kb/ 全量重建索引
 ```
 
 菜单栏状态:`🎙` 空闲 / `● 7s` 录音中 / `◌ 转写中`
@@ -142,6 +145,27 @@ explicit_label: true                              # 你明说的「这是一个 
 **用什么打开都行。** 它是纯 Markdown 目录,Obsidian / Logseq / foam /
 silverbullet / OpenKnowledge 都能直接读 —— 选文件就等于不被任何一个锁定。
 想让它写进你已有的笔记库,改一个配置就行。
+
+### 检索
+
+```bash
+$ agentear --search 录音
+2026-09-04T14:00  [reference]  kb/2026/09/04/…挂载录音设备-aabbcc000004.md
+    …Docker 容器里怎么挂载 «录音» 设备
+2026-09-01T11:00  [idea]  kb/2026/09/01/…给录音笔加-wifi-…md
+    这是一个 idea,给 «录音» 笔加 WiFi,自…
+```
+
+**中文按子串搜**——「录音」这种两字词、甚至单字都搜得到,查询词不必对应
+原文里的「词」(「录音 设备」能命中「挂载录音设备」)。空格 = AND,
+结尾 `*` = 前缀(`know*` 匹配 knowledge)。
+
+索引在 `derived/index.sqlite`,**可以随时整个删掉**,`--reindex` 从 `kb/`
+重建。它不含任何别处没有的信息。
+
+> 为什么中文要特别处理:SQLite FTS5 自带的分词器把**一整句中文当成一个
+> token**,搜「录音笔」一条都搜不到;换 `trigram` 的话两字词又搜不了、
+> 索引还大 3.5 倍。所以写入前把汉字逐字切开,代价是索引约 1.55 倍。
 
 ### 配置
 
