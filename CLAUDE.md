@@ -28,11 +28,18 @@ rusqlite + FTS5。**中文靠「写入前逐字切开」**——FTS5 自带分�
 重新分类是单独的事，还没做（见 `docs/agent/tasks.md` T2.4.6）。
 ADR-0003 的**组织档适配器（memos）还没做**，等真有企业需求再定（ADR-0003 §6）。
 
+**CI**：`.github/workflows/ci.yml` 每次 push/PR 跑 build+clippy+test，
+**必须用 macOS runner**（CGEventTap/CoreAudio/`say`，Linux 编译都过不了）；
+`external-links.yml` 每周跑那条联网判据（模型 URL 指向的资产还在不在）——
+**它守的是外部世界变了，push 永远触发不了它**。
+clippy **刻意不加 `-D warnings`**（既有 13 条警告，加了会让 CI 长期红，
+而长期红的 CI 等于没有 CI）。CI **不需要 `vendor/`**（实测移走后 203 全绿）。
+
 **构建与测试**：
 
 ```bash
 cargo build --release
-cargo test                                    # 202 个测试：提交协议、崩溃语义、token 过滤、i18n、下载协议、知识库投递
+cargo test                                    # 203 个测试：提交协议、崩溃语义、token 过滤、i18n、下载协议、知识库投递
 ./target/release/agentear                     # 守护进程，Ctrl+Shift+R 开始/停止录音
 ./target/release/agentear --transcribe x.wav  # 离线转写，不占麦克风，用于验证 ASR 链路
 ./target/release/agentear --diagnose          # 环境自检：权限、音频设备、ASR 依赖
