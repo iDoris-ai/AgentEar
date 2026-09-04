@@ -1,0 +1,64 @@
+# AgentEar recorder export / 录音工具导出
+# time 2026-09-02T15:49:17.105Z
+# speaker Arm
+# filename prefix arm (filenames are ASCII-only)
+# ui language en
+#
+# per take: text / WAV filename / SHA-256 (first 16) / capture settings / quality
+# In `text:` lines, \n is an escaped newline and \\ an escaped backslash (line-oriented file).
+# ⚠️ The requested constraints (mono, AGC/NS off) are not proof the device obeyed;
+#    the `track:` line is what getSettings() actually reported.
+
+## arm-001.wav
+text: เมื่อเช้าฝนตกหนักมาก ทำให้รถติดกว่าปกติ
+sha256_16: 9cebf36ecdefde55
+audio: 48000 Hz mono 16-bit · 3.63s · captured at 48000 Hz (audioworklet)
+track: ch=1 rate=48000 aec=false ns=false agc=false
+timeline: got 174336 / expected 174592 · MISSING 0.005s
+quality: peak 0.183 · SNR 27.8 dB · voiced 56%
+ua: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36
+
+## arm-002.wav
+text: ผมออกจากบ้านตั้งแต่หกโมงครึ่ง แต่ยังไปถึงที่ทำงานสาย
+sha256_16: 5d65da5d08d51ea8
+audio: 48000 Hz mono 16-bit · 5.29s · captured at 48000 Hz (audioworklet)
+track: ch=1 rate=48000 aec=false ns=false agc=false
+timeline: got 253696 / expected 253952 · MISSING 0.005s
+quality: peak 0.205 · SNR 30.1 dB · voiced 57%
+ua: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36
+
+## arm-003.wav
+text: ช่วงนี้อากาศเปลี่ยนแปลงบ่อย หลายคนในทีมไม่สบาย
+sha256_16: 4ce074a25461b59d
+audio: 48000 Hz mono 16-bit · 4.05s · captured at 48000 Hz (audioworklet)
+track: ch=1 rate=48000 aec=false ns=false agc=false
+timeline: got 194560 / expected 194816 · MISSING 0.005s
+quality: peak 0.135 · SNR 25.2 dB · voiced 62%
+ua: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36
+
+## arm-004.wav
+text: สัปดาห์หน้าผมจะลาพักร้อนสามวัน ไปเที่ยวกับครอบครัวที่เชียงใหม่
+sha256_16: 7e4d6aa54fe8c31e
+audio: 48000 Hz mono 16-bit · 4.91s · captured at 48000 Hz (audioworklet)
+track: ch=1 rate=48000 aec=false ns=false agc=false
+timeline: got 235520 / expected 235776 · MISSING 0.005s
+quality: peak 0.153 · SNR 25.2 dB · voiced 53%
+ua: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36
+
+## arm-005.wav
+text: ถ้ามีเรื่องด่วนติดต่อผมทางโทรศัพท์ได้ตลอดเวลา
+sha256_16: fb0642fa50970c1a
+audio: 48000 Hz mono 16-bit · 3.78s · captured at 48000 Hz (audioworklet)
+track: ch=1 rate=48000 aec=false ns=false agc=false
+timeline: got 181504 / expected 181760 · MISSING 0.005s
+quality: peak 0.156 · SNR 27.4 dB · voiced 63%
+ua: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36
+
+## arm-006.wav
+text: ขอให้ทุกคนดูแลสุขภาพด้วยนะครับ
+sha256_16: f7b30aee53022468
+audio: 48000 Hz mono 16-bit · 2.82s · captured at 48000 Hz (audioworklet)
+track: ch=1 rate=48000 aec=false ns=false agc=false
+timeline: got 135168 / expected 135168
+quality: peak 0.120 · SNR 33.1 dB · voiced 59%
+ua: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36
