@@ -1,0 +1,32 @@
+# 定期跑那些**要联网**的判据。
+#
+# 它们平时被 `#[ignore]` 挡在默认轮之外（没网时红会让人去查一个
+# 不存在的回归），但它们守的东西恰恰会**在我们没动代码的时候坏掉**：
+#
+#   - 泰语模型的下载 URL 指向的资产被删、被换、长度变了
+#   - 仓库再次转移之后 URL 没跟着改
+#
+# 这类失效不会被任何一次 push 触发，所以只能靠定时跑。
+name: External links
+
+on:
+  schedule:
+    # 每周一 UTC 03:00
+    - cron: '0 3 * * 1'
+  workflow_dispatch:        # 也可以手动点
+
+jobs:
+  ignored-tests:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      # **点名跑，不用模式匹配。** 被 `#[ignore]` 标记的测试里，有些要联网、
+      # 有些要本地起 LLM 边车（`correct::` 和 `sidecar::` 那几条），
+      # 后者在 CI 上必红。试过 `--skip llm --skip sidecar`，但那两条边车测试的
+      # **名字里没有这些词**，过滤不掉——只会让这个 job 从第一天起就是红的。
+      #
+      # ⚠️ 以后新增只依赖网络的 `#[ignore]` 测试，**要手动加到这里**。
+      - name: 跑联网判据
+        run: |
+          cargo test --locked -- --ignored --exact \
+            download::tests::the_model_url_still_serves_exactly_the_bytes_we_expect

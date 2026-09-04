@@ -1,0 +1,48 @@
+# 每次 push / PR 跑测试。
+#
+# **为什么必须是 macOS runner**：这个项目大量用 macOS 专有的东西
+# （CGEventTap 监听热键、CoreAudio 采集、`say`、TCC 权限），
+# 在 Linux 上连编译都过不了。ubuntu 便宜十倍，但跑不了。
+#
+# **为什么不需要 vendor/**：ASR 二进制与模型不入库（见 CLAUDE.md），
+# 但它们是**运行时**依赖。已实测：把 vendor/ 移走，203 个测试照样全绿。
+# 需要它们的测试都标了 `#[ignore]`。
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# 同一个 PR 连推几次时，取消上一次还没跑完的
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 缓存 cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      - name: 编译检查
+        run: cargo build --locked
+
+      # 新代码不许引入警告。既有的那几条（sidecar.rs 的函数指针转换）
+      # 先不拦，否则这个 job 从第一天起就是红的，而一个长期红的 CI
+      # 等于没有 CI。
+      - name: clippy
+        run: cargo clippy --all-targets
+
+      - name: 测试
+        run: cargo test --locked
