@@ -81,6 +81,26 @@ average or a timing guarantee. Individual sequential concurrency baselines
 in this run ranged from 1.561733 to 4.097064 s. The cause of that variation
 was not investigated; do not infer a general parallel speedup from this run.
 
+## User-Reported Offline Verification (2026-09-07)
+
+Arm reported running `python3 services/tts/check_macos.py` with Wi-Fi turned
+off and confirmed that no other internet connection remained. The reported
+result was:
+
+```json
+{"automated_checks": "passed"}
+```
+
+This supports offline operation for the script's tested cases on this Mac
+with the voices already installed. Network disconnection was confirmed by
+Arm, not detected by the script; no packet capture or network-interface
+audit was performed. It does not establish offline installation or prove
+that every possible code path makes no external connection attempts.
+
+No full report, new timings, WAV hashes, or separate listening result were
+provided for this run. The September 5 and 6 measurements above remain
+separate and must not be presented as this offline run's measurements.
+
 ## Limits And Open Clarification
 
 - The process cold-start measurement does not represent a reboot-cold macOS
@@ -92,5 +112,7 @@ was not investigated; do not infer a general parallel speedup from this run.
 - Tests on this machine needed execution outside the sandbox: loopback
   binding was denied inside it, and earlier sandboxed synthesis returned
   zero-frame audio despite successful command exit codes.
-- No RAM benchmark, post-reboot timing, other macOS version, long-running
-  load test, or Rust-side integration was performed.
+- The acceptance script does not measure RAM. Separate scratch memory
+  observations were collected on September 6 and are not included here.
+- No post-reboot timing, other macOS version, long-running load test, or
+  Rust-side integration was performed.
