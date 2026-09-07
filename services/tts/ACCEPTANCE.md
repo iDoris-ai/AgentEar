@@ -97,9 +97,36 @@ Arm, not detected by the script; no packet capture or network-interface
 audit was performed. It does not establish offline installation or prove
 that every possible code path makes no external connection attempts.
 
-No full report, new timings, WAV hashes, or separate listening result were
-provided for this run. The September 5 and 6 measurements above remain
-separate and must not be presented as this offline run's measurements.
+Arm subsequently supplied the full artifact directory
+`agentear-tts-http-80b6fogk`. All 16 WAV files were read and checked against
+the report: complete non-empty mono 22050 Hz, 16-bit PCM, matching frame
+counts and PCM SHA-256 values. The saved health, voices, and error JSON
+responses also matched their expected values. All five concurrent WAVs
+matched their own distinct individual baselines.
+
+| Task check | Observed result in the supplied offline-run report |
+| --- | --- |
+| Three languages | All `200 audio/wav`. Thai: 1.356074 s; English: 0.881551 s; Chinese: 0.870486 s. |
+| Unsupported `jp` | 400 with the language explanation; 0.000819 s. |
+| Empty text | 400 with the non-empty-string explanation; 0.000603 s. |
+| 500 characters | 200 in 1.051455 s; audio duration 28.209 s. |
+| Five simultaneous requests | All five returned 200 and matched their individual PCM baselines. Batch wall time: 2.752886 s; individual HTTP times: 2.731728-2.736572 s. |
+| Ctrl+C / SIGINT | Reported exit code 0 in 0.018948 s; observed owned `say` PID 82657 was absent afterward. |
+| Process start to health | 0.114350 s, including the first curl invocation. Not a post-reboot voice cold start. |
+| English sentence, 20 words | HTTP time 0.886736 s; generated audio duration 5.782 s. |
+| Chinese sentence, 20 characters | HTTP time 0.882261 s; generated audio duration 4.660 s. |
+
+The three language PCM hashes match the previously confirmed samples in
+the listening-evidence table. No separate listening session was reported
+for these new files; the script's listening status remains pending.
+
+All 22 original artifact files were preserved byte-for-byte in a local
+evidence directory outside the repository and outside temporary storage.
+They are not included in this Git change. Original paths inside the raw
+JSON were retained, rather than rewriting the report after copying it.
+These are single-run measurements, separate from September 5 and 6. This
+was verification of existing artifacts, not a new offline test run or an
+independent observation of the network state.
 
 ## Limits And Open Clarification
 
