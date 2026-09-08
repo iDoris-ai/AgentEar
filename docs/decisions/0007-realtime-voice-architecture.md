@@ -161,6 +161,21 @@ jason 的原话：
 只有模型推理后端（R0）跨进程。** 若将来确实要把 AEC 挪出去，
 ADR 必须先给出帧协议、时钟对齐方案和延迟预算，并用实测证明达标。
 
+#### 4.3.0 AEC 用 CoreAudio VPIO，不用 speech-swift（T3.4.0 实测定案）
+
+`speech` CLI 与 `speech-server` **都没有 AEC 出口**（实测相关端点全部 404；
+只有 `denoise`/`restore` 两个降噪命令，不是 AEC）。LocalVQE v1.4-AEC
+**只存在于 Swift 库**（`import SpeechEnhancement`）。
+
+→ 采用 **macOS Voice Processing I/O**
+（`AVAudioEngine.inputNode.setVoiceProcessingEnabled(true)`）：
+它是系统能力、不引入任何依赖，且天然与音频 I/O 共置，正合 §4.3 的要求。
+
+**实测（benchmarks-m3.md §7.2）**：VPIO 关时 4/4 完整复现 TTS 内容；
+VPIO 开时 4/4 都不再复现，**但仍残留 1–5 字幻觉，自触发率未到 0**。
+补救靠最小语音时长 + 能量门限 + 播放期 gating，属 T3.4.2。
+⚠️ VPIO 的抑制量**方差很大**（一轮里出现过开启后反而更高），不要用单次测量下结论。
+
 ### 4.3.1 VAD 与轮次判定是两件事，不是两个实现
 
 ~~初稿把 Silero 和 Smart Turn 并列成 `VadEngine` 的两个可选实现，这是错的。~~
