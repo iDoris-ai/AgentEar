@@ -141,7 +141,7 @@ scripts/bundle.sh                             # 打 .app bundle → dist/
 ### 「双工」的正确理解
 
 jason 要的「边说边理解、可互相打断」是全双工 speech-to-speech（Moshi 一类）的能力。
-**产品形态已分成两档（jason 2026-09-08 拍板，见 [ADR-0006](docs/decisions/0006-realtime-voice-architecture.md)）：
+**产品形态已分成两档（jason 2026-09-08 拍板，见 [ADR-0007](docs/decisions/0007-realtime-voice-architecture.md)）：
 V1 = 打断式半双工，内存门槛 ≤10 GB；V2 = 实时全双工，放宽到 64 GB 级。**
 V1 不是 V2 的临时替代品，是**长期保留的低配档位**——不是所有人都有 64 GB。
 V1 的做法：VAD 检测到开口就掐掉 TTS。
