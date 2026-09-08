@@ -86,6 +86,7 @@ pub struct Asr {
 }
 
 /// 一次转写的产物。
+#[derive(Debug)]
 pub struct Transcript {
     /// 去掉全部标记后的正文。
     pub text: String,
