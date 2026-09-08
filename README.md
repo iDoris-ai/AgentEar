@@ -32,7 +32,7 @@
 | **M2** 理解与标签路由 | ✅ v0.4.0,**默认关**,要自己备一个本地 LLM(见下) |
 | **M2** 知识库投递(`kb/` Markdown 树) | ✅ v0.4.1,**默认开**;判出标签的才生成 Markdown |
 | **M2** 全文检索(`--search`) | ✅ v0.4.2,中文按子串搜,索引可随时重建 |
-| M3 语音输出与打断 | |
+| **M3** 实时语音对话(V1 半双工) | 📐 规划已定 + 引擎实测完成,**尚未实现**,见 [ADR-0007](docs/decisions/0007-realtime-voice-architecture.md) |
 | M3.5 录音笔能力刻画 | 机器未到手 |
 | M4 录音笔接入 | |
 | M5 独立硬件 | |
@@ -352,6 +352,7 @@ scripts\recorder.bat         # Windows（⚠️ 见下）
 | [milestones.md](docs/milestones.md) | 里程碑与验收标准 |
 | [decisions/](docs/decisions/) | 架构决策记录(ADR) |
 | [benchmarks.md](docs/benchmarks.md) | ASR 实测数据与四模型横比 |
+| [benchmarks-m3.md](docs/benchmarks-m3.md) | M3 引擎实测:泰语 ASR 横比、TTS 情感与方言 |
 | [m1-status.md](docs/m1-status.md) | M1 实现细节与 macOS 踩坑记录 |
 | [ingest-design.md](docs/ingest-design.md) | 音频接入层设计(硬件改造、传输协议) |
 

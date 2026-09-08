@@ -233,7 +233,7 @@ kb/**/*.md  ──(读 front matter)──→  memos REST API
   所以 SiYuan 不重开评估。
   **但红线的位置要说准**：禁的是 fork / vendor / 打进 bundle，
   **不禁「用户自己装、和我们共享一个 `kb/` 目录」**——那不是衍生作品，
-  也不是聚合分发。见 [ADR-0006](0006-openknowledge-as-personal-frontend.md) §3。
+  也不是聚合分发。见 [ADR-0007](0006-openknowledge-as-personal-frontend.md) §3。
 - **长文档需求 —— 现在不构成选型压力，组织档整体推迟。**
   `report` 类长产出属于 §7 分层里的 **L3 行动层**，而 L3 要等真有下游系统才开工。
   在那之前把组织档定成 memos 还是 `suitenumerique/docs` 是**空转**——
