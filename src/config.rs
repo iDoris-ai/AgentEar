@@ -11,6 +11,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{OnceLock, RwLock};
 
 use crate::asr::AsrLang;
+use crate::engine::AsrBackend;
 use crate::i18n::Lang;
 
 /// 单个字段解析失败时退回默认值，**而不是让整份配置解析失败**。
@@ -114,6 +115,13 @@ pub struct Config {
     /// 英语用户，界面要英文，识别要泰语。
     #[serde(deserialize_with = "lenient")]
     pub asr_lang: AsrLang,
+    /// 用哪个 ASR 后端。**默认 `builtin`**——已发布用户升级上来行为不变。
+    ///
+    /// `speech_swift` 需要用户自己 `brew install speech`，不随包分发。
+    /// 换默认值这件事**需要 jason 单独拍板**（`CLAUDE.md`：「放宽只针对
+    /// LLM 这一项，ASR 侧仍按原标准要求」），不是改个默认值那么简单。
+    #[serde(deserialize_with = "lenient")]
+    pub asr_backend: AsrBackend,
     /// 转写后是否送本地 LLM 纠正技术术语。
     ///
     /// **默认关。** 它需要一个额外的边车进程（`scripts/serve-llm.sh`），
@@ -218,6 +226,7 @@ impl Default for Config {
             retention_days: default_retention_days(),
             ui_lang: Lang::default(),
             asr_lang: AsrLang::default(),
+            asr_backend: AsrBackend::default(),
             correct_terms: false,
             llm_url: None,
             llm_autostart: default_autostart(),

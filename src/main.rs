@@ -7,6 +7,7 @@
 
 mod asr;
 mod download;
+mod engine;
 mod audio;
 mod config;
 mod correct;
@@ -82,11 +83,36 @@ fn main() -> Result<()> {
 
     // **配置和实际安装状态对账。**
     //
+    // 后端选择：命令行 `--asr-backend` 优先于配置，配置优先于默认。
+    //
+    // 命令行能覆盖是为了排障——「换个引擎试试」不该逼用户先改配置再改回来，
+    // 和 `--lang` 是同一个理由。
+    let backend = if args.iter().any(|a| a == "--asr-backend") {
+        let v = flag_value(&args, "--asr-backend").ok_or_else(|| {
+            anyhow::anyhow!(
+                "--asr-backend 后面要跟后端名（{}）",
+                engine::AsrBackend::NAMES.join(" / ")
+            )
+        })?;
+        engine::AsrBackend::parse_cli(v)?
+    } else {
+        cfg.asr_backend
+    };
+
     // 配置里写着泰语，但模型可能已经被删了、被换过、或者当初压根没装完。
     // 不对账的话，菜单只是不显示勾，而**每一次录音都会走泰语分支然后失败**，
     // 错误只出现在日志里——用户看到的是「按了键，什么都没出来」。
     // 宁可退回自动（那条链路的模型随包走，一定在），并把原因写清楚。
-    let cfg = if cfg.asr_lang == asr::AsrLang::Thai && !download::is_installed(&download::THAI) {
+    //
+    // ⚠️ **这条对账只对 builtin 成立。** speech_swift 的泰语走 Qwen3-ASR，
+    // 根本不用 `download::THAI` 那个 whisper 模型——如果不加这个前置判断，
+    // 用 speech_swift + 泰语的用户会在每次启动时被**持久化地**改回自动识别，
+    // 而原因（"泰语模型不可用"）跟他选的后端毫无关系。
+    let backend_needs_thai_model = backend == engine::AsrBackend::Builtin;
+    let cfg = if backend_needs_thai_model
+        && cfg.asr_lang == asr::AsrLang::Thai
+        && !download::is_installed(&download::THAI)
+    {
         // 「没装好」涵盖三种：模型不在、模型坏了、**以及引擎换了**——
         // 升级把 whisper-cli 换成不兼容的版本时，旧的冒烟结果不再作数
         // （安装记录绑定了引擎指纹）。三种的处置一样：退回自动。
@@ -98,14 +124,31 @@ fn main() -> Result<()> {
         cfg
     };
 
-    let asr = asr::Asr::new(&vendor)?;
-    log::debug!("ASR 依赖检查通过");
+    let asr = engine::build(backend, &vendor, Some(&data_root))?;
+    // **构造成功 ≠ 依赖齐全。** `build` 只是造对象，
+    // speech_swift 甚至根本不碰 vendor——不跑 preflight 的话，
+    // `speech` 没装也能把守护进程起起来，直到第一次录完音才失败，
+    // 而那时候用户已经对着麦克风说完话了。
+    asr.preflight(cfg.asr_lang)
+        .with_context(|| format!("ASR 后端 {} 依赖检查失败", asr.name()))?;
+    log::debug!("ASR 后端 = {}，依赖检查通过", asr.name());
 
     // 离线转写一个已有的 wav，不占麦克风，用于验证 ASR 链路。
     //
     // `--lang th` 可以在不改配置的情况下试泰语链路——排查「是模型的问题还是
     // 录音的问题」时，不该逼用户先去菜单里改设置再改回来。
-    if args.len() >= 3 && args[1] == "--transcribe" {
+    // ⚠️ 用 position 找，**不要写 `args[1] == "--transcribe"`**。
+    //
+    // 这是踩出来的：加了 `--asr-backend` 之后，
+    // `--asr-backend speech_swift --transcribe x.wav` 这种写法会让
+    // `args[1]` 变成 `--asr-backend`，于是**整个分支被跳过、程序静默变成守护进程**——
+    // 用户看到的是菜单栏帮助，而不是转写结果，也没有任何报错。
+    // 静默降级比报错难查得多，所以子命令的识别必须与参数顺序无关。
+    if let Some(ti) = args.iter().position(|a| a == "--transcribe") {
+        let wav = flag_value(&args, "--transcribe")
+            .ok_or_else(|| anyhow::anyhow!("--transcribe 后面要跟 wav 路径"))?
+            .to_string();
+        let _ = ti;
         // 取 `--lang` **紧跟着的那个值**，不是「参数里出现过 th 就算」——
         // 后者会把 `--transcribe th.wav` 里的文件名当成语言选择。
         // 写错了就报错退出，不静默用配置里的值：排障时最怕的就是
@@ -120,7 +163,7 @@ fn main() -> Result<()> {
             None => config::get().asr_lang,
         };
         let t0 = Instant::now();
-        let t = asr.transcribe(std::path::Path::new(&args[2]), lang)?;
+        let t = asr.transcribe(std::path::Path::new(&wav), lang)?;
         // 离线转写也走一遍纠错，否则「开了纠错但效果不对」这类问题
         // 只能靠反复录音来复现。配置关着就跳过，行为和守护进程一致。
         if cfg.correct_terms && !t.text.is_empty() {
@@ -155,7 +198,7 @@ fn main() -> Result<()> {
     // 存在的理由有三个：想在有网的时候提前下好；菜单那条路出问题时的
     // 备用入口；以及排障时能看到完整的失败原因——菜单里只显示
     // 「失败（网络）」五个字，这里能看到 curl 的退出码。
-    if args.len() == 2 && args[1] == "--fetch-thai" {
+    if args.iter().any(|a| a == "--fetch-thai") {
         println!("下载泰语模型（{:.0} MB）…", download::THAI.bytes as f64 / 1e6);
         // **只装，不选。** 这条命令的语义是「先把模型下好」，
         // 不该顺手改掉用户的识别语言——预下载和「我要开始用泰语」
@@ -206,8 +249,8 @@ fn main() -> Result<()> {
     }
 
     // 全文检索。
-    if args.len() >= 3 && args[1] == "--search" {
-        let q = args[2..].join(" ");
+    if args.iter().any(|a| a == "--search") {
+        let q = args_after(&args, "--search").join(" ");
         let ix = index::Index::open(&data_root)?;
         let hits = ix.search(&q, 20)?;
         if hits.is_empty() {
@@ -263,13 +306,18 @@ fn main() -> Result<()> {
     // 那个坑真的踩过——基准报 18/18 而生产 17/18，差异稳定复现却查不出根因
     // （`docs/benchmarks-m2.md` §9）。评测和产品共用同一段代码，
     // 这类疑问从根上就不会出现。
-    if args.len() == 3 && args[1] == "--classify" {
+    if args.iter().any(|a| a == "--classify") {
         let url = cfg.llm_url.as_deref().unwrap_or(correct::DEFAULT_URL);
         // 一次性命令**只探不拉**：边车冷启动要几十秒，为一句分类去拉起
         // 不合理。但必须探一次——门控读的是全局健康状态，
         // 而这条路径没有守护进程那套 ensure_available 去填它。
         sidecar::probe(url);
-        let r = label::Classifier::new(url).classify(&args[2]);
+        let text = args_after(&args, "--classify")
+            .first()
+            .copied()
+            .ok_or_else(|| anyhow::anyhow!("--classify 后面要跟一段文字"))?
+            .to_string();
+        let r = label::Classifier::new(url).classify(&text);
         // 只输出类名，便于脚本消费；来源走 stderr，不污染 stdout
         println!("{}", r.label.as_str());
         eprintln!(
@@ -283,7 +331,7 @@ fn main() -> Result<()> {
     }
 
     // 环境自检，排查「按了没反应」
-    if args.len() == 2 && args[1] == "--diagnose" {
+    if args.iter().any(|a| a == "--diagnose") {
         return diagnose(&vendor);
     }
 
@@ -417,7 +465,9 @@ fn main() -> Result<()> {
 fn worker(
     rx: std::sync::mpsc::Receiver<()>,
     store: store::Store,
-    asr: asr::Asr,
+    // 收 trait 对象而不是具体类型：后端是运行时按配置选的，
+    // 这个函数不该知道自己在跑哪一个。
+    asr: Box<dyn engine::AsrEngine>,
 ) -> Result<()> {
     let mut state = State::Idle;
     let mut last_heartbeat = Instant::now();
@@ -457,7 +507,7 @@ fn worker(
                     "录音超过 {:.0} 秒上限，自动停止（见 ADR-0001 §5）",
                     asr::MAX_SEGMENT_SECS
                 );
-                state = finish(state, &store, &asr)?;
+                state = finish(state, &store, asr.as_ref())?;
                 continue;
             }
         }
@@ -475,7 +525,7 @@ fn worker(
                         State::Idle
                     }
                 },
-                s @ State::Recording { .. } => finish(s, &store, &asr)?,
+                s @ State::Recording { .. } => finish(s, &store, asr.as_ref())?,
             };
         } else {
             std::thread::sleep(Duration::from_millis(20));
@@ -507,7 +557,7 @@ fn begin(store: &store::Store) -> Result<State> {
     })
 }
 
-fn finish(state: State, store: &store::Store, asr: &asr::Asr) -> Result<State> {
+fn finish(state: State, store: &store::Store, asr: &dyn engine::AsrEngine) -> Result<State> {
     let State::Recording {
         mut session,
         recorder,
@@ -896,6 +946,52 @@ fn copy_to_clipboard(text: &str) -> Result<()> {
     Ok(())
 }
 
+/// 取 `--flag` **紧跟着的那个值**，与参数顺序无关。
+///
+/// ## 为什么不能用 `args[1] == "--xxx"`
+///
+/// 加 `--asr-backend` 时踩到过：`--asr-backend speech_swift --transcribe x.wav`
+/// 会让 `args[1]` 变成 `--asr-backend`，于是 `--transcribe` 分支被整个跳过，
+/// **程序静默变成守护进程** —— 用户看到菜单栏帮助而不是转写结果，且没有任何报错。
+/// 静默降级比报错难查得多。
+fn flag_value<'a>(args: &'a [String], flag: &str) -> Option<&'a str> {
+    let i = args.iter().position(|a| a == flag)?;
+    args.get(i + 1).map(String::as_str)
+}
+
+/// 全局选项（不属于任何子命令，可以出现在任意位置）。
+///
+/// 集中列出来是为了让 `args_after` 能把它们从子命令的参数里剔掉——
+/// 否则 `--asr-backend x --search 关键词` 会把 `--asr-backend x`
+/// 一起拼进搜索词。
+const GLOBAL_FLAGS_WITH_VALUE: &[&str] = &["--asr-backend", "--lang"];
+
+/// 取子命令 `flag` 之后的参数，**剔除全局选项及其值**。
+///
+/// ⚠️ 这仍然是个简化的解析器，不是完整的 CLI 解析。
+/// 它挡不住「值恰好等于另一个选项名」这类情况（`--classify --search`）。
+/// 真正的修法是换 `clap`，那是独立的一次重构（见 `docs/agent/tasks.md` T3.4.5），
+/// 不该混在引擎适配层这个改动里。
+fn args_after<'a>(args: &'a [String], flag: &str) -> Vec<&'a str> {
+    let Some(i) = args.iter().position(|a| a == flag) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    let mut skip_next = false;
+    for a in &args[i + 1..] {
+        if skip_next {
+            skip_next = false;
+            continue;
+        }
+        if GLOBAL_FLAGS_WITH_VALUE.contains(&a.as_str()) {
+            skip_next = true;
+            continue;
+        }
+        out.push(a.as_str());
+    }
+    out
+}
+
 fn data_root() -> Result<PathBuf> {
     if let Ok(p) = std::env::var("AGENTEAR_DATA") {
         return Ok(PathBuf::from(p));
@@ -924,4 +1020,46 @@ fn vendor_root() -> Result<PathBuf> {
         }
     }
     Ok(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("vendor"))
+}
+
+#[cfg(test)]
+mod cli_tests {
+    use super::flag_value;
+
+    fn args(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// 钉住那个真踩到的 bug：子命令的识别**不能依赖参数位置**。
+    ///
+    /// 事故形态：`--asr-backend speech_swift --transcribe x.wav` 里
+    /// `args[1]` 是 `--asr-backend`，旧写法 `args[1] == "--transcribe"`
+    /// 会跳过整个分支，程序**静默变成守护进程**——没有报错，
+    /// 用户只看到菜单栏帮助。
+    #[test]
+    fn subcommand_is_found_regardless_of_position() {
+        let a = args(&["agentear", "--asr-backend", "speech_swift", "--transcribe", "x.wav"]);
+        assert_eq!(flag_value(&a, "--transcribe"), Some("x.wav"));
+        assert_eq!(flag_value(&a, "--asr-backend"), Some("speech_swift"));
+
+        // 反过来放也要一样
+        let b = args(&["agentear", "--transcribe", "x.wav", "--asr-backend", "builtin"]);
+        assert_eq!(flag_value(&b, "--transcribe"), Some("x.wav"));
+        assert_eq!(flag_value(&b, "--asr-backend"), Some("builtin"));
+    }
+
+    /// 取的是「紧跟着的那个值」，不是「出现过就算」——
+    /// 否则 `--transcribe th.wav` 里的文件名会被当成语言选择。
+    #[test]
+    fn takes_the_value_right_after_the_flag() {
+        let a = args(&["agentear", "--transcribe", "th.wav", "--lang", "auto"]);
+        assert_eq!(flag_value(&a, "--lang"), Some("auto"), "不能被文件名 th.wav 干扰");
+    }
+
+    #[test]
+    fn missing_value_is_none_not_panic() {
+        let a = args(&["agentear", "--transcribe"]);
+        assert_eq!(flag_value(&a, "--transcribe"), None);
+        assert_eq!(flag_value(&a, "--nonexistent"), None);
+    }
 }
