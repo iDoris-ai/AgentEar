@@ -8,7 +8,7 @@
 
 ---
 
-## 当前状态:M1 完成,知识库 + 全文检索默认开(v0.4.2),M2 理解层可选启用
+## 当前状态:M1 完成,知识库 + 全文检索默认开,ASR 引擎可切换(v0.5.0),M2 理解层可选启用
 
 按一下右 Command 开始录音,再按一下停止,几百毫秒后转写文字就在剪贴板里。
 
@@ -288,6 +288,59 @@ agentear --transcribe x.wav --lang th   # 不改配置试一下泰语链路
 | `raw/audio/` | **ASR 之前**的原始音频,内容寻址 | ❌ 丢了就没了 |
 | `derived/transcripts/` | 转写结果 | ✅ 可从 raw 重算 |
 | `agentear.log` | 日志 | |
+
+## ASR 引擎切换(v0.5.0 新增,可选)
+
+默认走随包分发的 `builtin`(SenseVoice 中英 + whisper 泰语),**不装任何东西就能用**。
+v0.5.0 起可以切到 `speech_swift`,它用一个 Qwen3-ASR 模型同时覆盖中/英/泰。
+
+### 什么时候值得切
+
+**主要是中英混杂的技术术语。** 同一条泰语录音:
+
+```
+builtin       ก่อน เมิร์ช ภูริเคส ทุกครั้ง ต้อง รัน ยูนิต เทส ให้ ผ่าน ก่อน
+speech_swift  ก่อน merge pull request ทุกครั้งต้อง run unit test ให้ผ่านก่อน
+```
+
+前者把 merge / pull request / run / unit / test 全部音译成了泰文,后者保留了拉丁拼写。
+纯泰语的对照组上 `speech_swift` 也更好(CER 0.0% vs 3.1%,6 条逐字全对)。
+
+⚠️ **但夹英文那一格并没有胜出**:两个指标都方向性偏向现有链路,
+样本量不足以量化。完整数据见 [benchmarks-m3.md](docs/benchmarks-m3.md)。
+**所以它不是默认值。**
+
+### 怎么用
+
+先装(**不随包分发**,要 macOS + Apple Silicon):
+
+```bash
+brew install speech        # soniqo/speech-swift,Apache-2.0
+```
+
+然后二选一:
+
+```bash
+# 临时试一次,不改配置
+agentear --asr-backend speech_swift --transcribe x.wav
+
+# 或写进 ~/.agentear/config.json 长期生效
+{ "asr_backend": "speech_swift" }
+```
+
+### 代价
+
+| | builtin | speech_swift |
+|---|---|---|
+| 随包分发 | ✅ | ❌ 要自己装 |
+| 峰值内存 | ≤2 GiB | **2.43 GiB** |
+| 首次运行 | 立即 | 要下 ~3.4 GB 模型 |
+| 冷启动 | 0.2s | 首次约 2 分钟,之后 RTF 0.074 |
+
+内存那一栏是有讲究的:AgentEar 的默认档预算是 **≤2 GiB**,
+`speech_swift` 走的是**高资源档 ≤4 GiB**——这一档只对
+「用户显式启用 + 不随包分发 + 峰值实测入库」的可选后端开放。
+**没切的话内存占用和 v0.4.2 完全一样。**
 
 ## 附带的小工具:浏览器录音器
 
