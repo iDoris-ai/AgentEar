@@ -19,3 +19,4 @@
 - [x] FU-13 · B · src=T2.2.5 · 2026-09-03 · 标签分类唯一稳定判错:「要是能用语音直接建任务就好了」被句中「建任务」三字带走判成 task。定义已说清「承诺要做了吗」,是模型能力问题——修法是 few-shot 补一条虚拟语气的反例,不要改定义去迁就 · done=PR#23
 - [x] FU-14 · B · src=T2.2.5 · 2026-09-03 · spike/m2_bench.py 报 18/18 而生产路径 17/18,差异稳定复现但根因未定位(已排除标签顺序、期望值、规则语义)。让基准直接调用生产分类路径可一并消掉这个疑点(与 FU-6 同源) · done=PR#23
 - [x] FU-15 · B · src=T3.1.2 · 2026-09-03 · env -u HF_ENDPOINT 是本机 huggingface_hub 报 LocalEntryNotFoundError 的通用绕法(第三次遇到)。build-thai-model.sh 和 setup-llm.sh 现在用的是 curl 逐文件,可以简化成这个 · done=PR#23
+- [ ] FU-16 · B · src=2026-09-09 文档同步 preflight · **测试套件里有一条不稳定的用例，身份未知**：`cargo test` 一次报 `218 passed; 1 failed`，紧接着同一 worktree 连跑 6 次全是 `219 passed; 0 failed`。当时只 grep 了 `^test result`，**没抓到失败用例名**，事后无法回溯。**这条不许当成「偶发、算了」**——一次不明失败 + 六次通过**既不能证明某条用例不稳定，也不能证明它稳定**；但如果真是 flake，CI 会随机变红，而长期随机红的 CI 等于没有 CI。下次触发时立刻用 `cargo test -- --nocapture 2>&1 | tee` 存全量输出；或者主动用 `cargo test -- --test-threads=1` 与并发两种模式各连跑 20 次定位（怀疑方向：共享临时目录 / 端口 / 时间敏感的断言）
