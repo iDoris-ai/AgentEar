@@ -14,9 +14,12 @@ ignored 的 5 条：**4 条要 LLM 边车**（3 条要边车在跑 + 1 条会真
 
 ## 此刻状态：M2 已发布可用；**M3 实时对话在实现阶段，可行性 spike 判定「不通过」**
 
-- 无 open PR。**本地**已无未合并分支；**远程还有两个**：
-  `origin/arm/agentear-dev`（Arm 的 TTS 分支，3 个 commit 未进 main，对应 T3.3.1 仍 `ASSIGNED`）
-  和 `origin/c1-thai-asr-baseline`。
+- 本地已无未合并分支。**远程只剩 `origin/c1-thai-asr-baseline` 未合**（ahead=13）。
+  `origin/arm/agentear-dev` **ahead=0 / behind=5 —— 已经合进 main 了**
+  （PR #41 `feat(tts): add local macOS TTS service`，merge `5fe1302`，2026-09-09T11:09:46Z）。
+  ⚠️ **量具用 `git rev-list --count origin/main..<branch>`，不要用 `git branch -r --no-merged`**：
+  后者读的是**可能过期的 remote-tracking ref**，我就是没 `git fetch` 就下了结论，
+  把一个 79 分钟前已合并的分支报成「3 个 commit 未进 main」。
 - 跟进账本（`followups.md`）：**FU-1…15 已 done，FU-16 开着**（测试套件的不明失败，见下）。
 - 已清理：9 个 squash-merged 的本地分支 + 5 个失效 worktree（2026-09-09）。
   ⚠️ 这两个数字是当时的操作记录，**git 里不留删除痕迹，事后无法从仓库自证**。
@@ -32,7 +35,7 @@ ignored 的 5 条：**4 条要 LLM 边车**（3 条要边车在跑 + 1 条会真
 | L2 全文检索（`--search`） | ✅ v0.4.2 | **能** |
 | ASR 后端可切换（`--asr-backend speech_swift`） | ✅ v0.5.0 | **能，但要自己装 speech CLI**；默认仍是 builtin |
 | **M3 实时通话（打电话式、可打断）** | 只有 spike + 引擎层 | ❌ **还没有** |
-| TTS 说话 | 只有任务书 + 选型 | ❌ 未实现（T3.3.1 派给 Arm） |
+| TTS 说话 | **V1 HTTP 服务已在 main**（`services/tts/`，PR #41） | ⚠️ **能单独跑，但 Rust 侧没接** |
 
 **措辞纪律**：不启用理解层时，只有**明说了标签**的中英文句子会进知识库
 （`label::explicit_only`，纯本地字符串匹配，**没有泰语**）。
@@ -74,8 +77,12 @@ T3.4.4 serve / mcp 集成接口    BLOCKED（等 T3.4.2）
 ## 下一步（按优先级）
 
 1. **T3.4.2 通话会话层** —— M3 的重心。⚠️ **但它不是唯一的门**：M3 要能发，
-   还得有 **TTS（T3.3.1，派给 Arm，仍 `ASSIGNED`，进度不在本仓库手上）**、
-   T3.4.3 mock LLM、T3.4.4 集成接口。没有 TTS 就只有「听懂」，没有「对话」。
+   还得有 **TTS 的 Rust 集成**、T3.4.3 mock LLM、T3.4.4 集成接口。
+   ✅ **TTS 的 V1 HTTP 服务已经合进 main 了**（`services/tts/`，PR #41，2026-09-09）：
+   `POST /speak {text,lang}` → `audio/wav`，中英泰三语走 macOS `say`，
+   带 `/health` 与 `/voices`，16 条测试。
+   **但 `services/tts/ACCEPTANCE.md` 开头明写「No Rust integration performed」** ——
+   守护进程一行都没调它，所以 T3.3.1 仍是 `ASSIGNED`（理由见 `tasks.md`）。
    开工第一件事是还两笔债：
    ADR-0007 §4.4 的**编排职责二选一**（ADR 倾向 A 自主编排，但明写了不能默认已定），
    和 T3.4.0 留下的 **AEC 事件级自触发**（最小语音时长 + 能量门限 + 播放期 gating）。
@@ -132,4 +139,5 @@ scripts/serve-llm.sh          # 每次：起服务，默认 127.0.0.1:8793
 - 2026-09-03 v0.4.0（M2 理解层）→ v0.4.1（知识库投递默认开）→ v0.4.2（全文检索）
 - 2026-09-04 CI 落地（macOS runner）、泰语语料归档、initial prompt 长度拐点实测
 - 2026-09-08 ADR-0007 定稿草案；T3.4.0 可行性 spike；T3.4.1 引擎适配层 → **v0.5.0**
+- 2026-09-09 **PR #41 合入 Arm 的 TTS V1 HTTP 服务**（`services/tts/`，macOS `say`，中英泰）
 - 2026-09-09 补记本文与 tasks.md（漏记了 4 个版本）；清理 9 分支 + 5 worktree

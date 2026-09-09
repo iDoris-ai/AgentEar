@@ -289,6 +289,16 @@
   而英文标签恰好没事，所以只测 `esp32` 时溜过去了。
 
 ### T3.3.1 TTS 模块（三语，交给 Arm）  `ASSIGNED`
+> ✅ **V1 HTTP 服务已合入 main**：`services/tts/{server.py,check_macos.py,test_server.py,
+> ACCEPTANCE.md,README.md}`，PR #41 `feat(tts): add local macOS TTS service`
+> （merge `5fe1302`，2026-09-09）。形状与下面写死的验收一致：
+> `POST /speak {text,lang}` → `audio/wav`、`/health`、`/voices`、中英泰走 macOS `say`，
+> 16 条测试通过，三语实测 200 + 22050 Hz 单声道。
+> ⚠️ **为什么仍是 `ASSIGNED` 而不是 `DONE`**（体例照 T3.4.1 那段）：
+> `ACCEPTANCE.md` 开头明写 **「No Rust integration or GitHub submission performed」** ——
+> 守护进程里没有任何一行调用这个服务，用户装上 AgentEar 也听不到声音。
+> **剩下的是 Rust 侧集成**：配置项 `tts_url`、调用时机、失败降级。
+> 不要因为「代码在 main 上」就把它读成已交付。
 - **任务书**：[`docs/tasks/tts-module-arm.md`](../tasks/tts-module-arm.md)（中/英/泰三语）
 - 目标链路的最后一段：拿到文字 → 用声音说出来，**中/英/泰可切换**。
   「大模型回答问题」那一段依赖外部服务，**本项目不做**。
@@ -383,6 +393,9 @@
   引擎层做的是原子调用，会话编排一行没写。**这笔债转由 T3.4.2 偿还，不能再往后拖。**
 
 ### T3.4.2 通话会话层  `READY`（T3.4.1 已完成解除阻塞）
+> ⬅️ **承接 T3.4.1 的未偿验收项**：ADR-0007 §4.4 的编排职责二选一
+> （自主编排 vs 委托 `/v1/realtime`）。T3.4.1 标了 `DONE` 但**没做这件事**，
+> 债记在那条的注脚里，**实际要在这里还**。
 - 打电话式入口（起/停一次通话）、VAD 打断、语言随时切。
 - **持久化走 `StreamCheckpointPolicy`（有界丢失），不是零丢失** ——
   见 ADR-0007 §4.5，别把文件导入的语义套到实时流上。
