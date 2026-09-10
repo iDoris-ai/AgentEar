@@ -2,7 +2,11 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-## 当前状态：M1 完成；**知识库投递 + 全文检索默认开（v0.4.2）**；M2 理解层已发布（v0.4.0）但默认关
+## 当前状态：**v0.5.0 —— ASR 引擎可切换**；M1/M2 已发布；M3 实时对话在实现中
+
+M1 完成；**知识库投递 + 全文检索默认开（v0.4.2）**；M2 理解层已发布（v0.4.0）但默认关；
+**v0.5.0 加了可切换的 ASR 后端**（`--asr-backend` / `config.json` 的 `asr_backend`，
+**默认仍是 `builtin`**，`speech_swift` 要用户自己装 `speech` CLI，且**菜单栏里没有这一项**）。
 
 M2 = 术语纠错 + 一级标签识别 + `routes/` 落盘，需要一个本地 LLM 边车
 （`scripts/setup-llm.sh` / `serve-llm.sh`，模型 7.8 GB **不随包分发**）。
@@ -39,7 +43,7 @@ clippy **刻意不加 `-D warnings`**（既有 13 条警告，加了会让 CI �
 
 ```bash
 cargo build --release
-cargo test                                    # 203 个测试：提交协议、崩溃语义、token 过滤、i18n、下载协议、知识库投递
+cargo test                                    # 219 个测试（源码 224，5 条 ignored：4 条要边车、1 条要联网）：提交协议、崩溃语义、token 过滤、i18n、下载协议、知识库投递
 ./target/release/agentear                     # 守护进程，Ctrl+Shift+R 开始/停止录音
 ./target/release/agentear --transcribe x.wav  # 离线转写，不占麦克风，用于验证 ASR 链路
 ./target/release/agentear --diagnose          # 环境自检：权限、音频设备、ASR 依赖
