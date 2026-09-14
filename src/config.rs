@@ -13,6 +13,7 @@ use std::sync::{OnceLock, RwLock};
 use crate::asr::AsrLang;
 use crate::engine::AsrBackend;
 use crate::i18n::Lang;
+use crate::talk::TalkLang;
 
 /// 单个字段解析失败时退回默认值，**而不是让整份配置解析失败**。
 ///
@@ -165,6 +166,87 @@ pub struct Config {
     /// 让 AgentEar 直接往里写，比让用户在两个目录之间来回搬有用得多。
     #[serde(deserialize_with = "lenient")]
     pub kb_dir: Option<String>,
+
+    // ------------------------------------------------------------------
+    // 通话（M3 / ADR-0007）。下列字段**全部默认关或者指向本机默认端口**，
+    // 已发布用户升级上来行为与 v0.5.0 完全一致——不开 `talk_enabled`
+    // 的话，这一整块代码一行都不会走到。
+    // ------------------------------------------------------------------
+    /// 按下录音键之后，是不是「说一句、答一句」的通话形态。
+    ///
+    /// **默认关。** 打开之后这一轮录音除了照常上屏，还会把文字交给
+    /// LLM，把回答合成语音播出来。它需要两个边车
+    /// （`scripts/serve-talk-llm.sh` + `scripts/serve-tts.sh`），
+    /// 没起的时候开着它只会让每次录音都白等一次超时——
+    /// 和 `correct_terms` 同一个道理。
+    #[serde(deserialize_with = "lenient")]
+    pub talk_enabled: bool,
+    /// 通话用哪个语言。**默认中文**，因为 `asr_lang` 的默认是 Auto，
+    /// 而「回答用什么语言」必须显式说清——模型不会替用户决定这件事
+    /// （jason 2026-09-08：沟通前确认用什么语言，过程中可以随时切）。
+    #[serde(deserialize_with = "lenient")]
+    pub talk_lang: TalkLang,
+    /// 通话用的 LLM 引擎：`openai_compat`（默认）或 `mock`。
+    ///
+    /// **mock 必须显式选。** 它是 ADR-0007 §4.6 那个「证明链路通」的
+    /// 写死实现，不是产品能力；默认成 mock 会让人以为模型在跑。
+    #[serde(deserialize_with = "lenient")]
+    pub talk_llm_engine: String,
+    /// 通话 LLM 的地址。**换模型只改这里**（或改边车那边的
+    /// `AGENTEAR_TALK_LLM_MODEL`），Rust 侧不关心对面是 2B 还是 9B。
+    #[serde(deserialize_with = "lenient")]
+    pub talk_llm_url: Option<String>,
+    /// 通话 TTS 引擎：`http`（默认，指 `services/tts` 的 VoxCPM2 边车）
+    /// 或 `say`（零依赖兜底）。
+    #[serde(deserialize_with = "lenient")]
+    pub talk_tts_engine: String,
+    /// TTS 边车地址。留空 = `http://127.0.0.1:8765`。
+    ///
+    /// 端口写死在这里而不是从边车读：`sidecar.rs` 记过那个教训——
+    /// **连错对端比连不上更糟**，客户端必须知道自己该连谁。
+    #[serde(deserialize_with = "lenient")]
+    pub tts_url: Option<String>,
+    /// 单次 LLM / TTS 请求的超时（秒）。默认 60。
+    ///
+    /// 实测（`docs/benchmarks-talk.md`）：VoxCPM2-4bit 合成一句 2.6–5.1s，
+    /// LLM 一句 0.66–0.85s。60s 是给「回答更长」和「机器更慢」留的余量，
+    /// **不是实测值的近似**——卡着 4s 设超时会让稍长的回答直接失败。
+    #[serde(deserialize_with = "lenient_u64")]
+    pub talk_timeout_secs: u64,
+    /// 「本地天气事实」的城市名。**这不是天气接口**（ADR-0007 §4.6）。
+    #[serde(deserialize_with = "lenient")]
+    pub talk_city: String,
+    /// 「本地天气事实」原文。留空 = 用内置那句。
+    ///
+    /// ⚠️ **写死的场景，不是实时天气。** 它的唯一用途是让 2B 模型
+    /// 有东西可说，从而证明 ASR→LLM→TTS 整条链路通。
+    /// 接真实天气源属于集成方（R3 外壳层），不在本项目职责内。
+    #[serde(deserialize_with = "lenient")]
+    pub talk_weather_note: Option<String>,
+}
+
+fn default_talk_timeout_secs() -> u64 {
+    60
+}
+
+fn lenient_u64<'de, D: Deserializer<'de>>(d: D) -> Result<u64, D::Error> {
+    let v = serde_json::Value::deserialize(d)?;
+    Ok(serde_json::from_value(v)
+        .ok()
+        .filter(|n| *n > 0)
+        .unwrap_or_else(default_talk_timeout_secs))
+}
+
+fn default_talk_city() -> String {
+    "清迈".to_string()
+}
+
+fn default_talk_llm_engine() -> String {
+    "openai_compat".to_string()
+}
+
+fn default_talk_tts_engine() -> String {
+    "http".to_string()
 }
 
 fn default_kb_enabled() -> bool {
@@ -189,6 +271,25 @@ impl Config {
                 if p.is_absolute() { p } else { data_root.join(p) }
             }
             None => data_root.join("kb"),
+        }
+    }
+
+    /// 通话里那句「本地事实」。
+    ///
+    /// ⚠️ **写死的场景，不是实时天气**（ADR-0007 §4.6）。默认那句和
+    /// 项目文档里的例子保持一致，用户改成自己的城市即可。
+    pub fn weather_fact(&self) -> String {
+        match self
+            .talk_weather_note
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            Some(note) => note.to_string(),
+            None => format!(
+                "今天{}多云转晴，最高 32 度，傍晚有阵雨，风不大。",
+                self.talk_city
+            ),
         }
     }
 }
@@ -233,6 +334,15 @@ impl Default for Config {
             llm_start_command: default_start_command(),
             kb_enabled: default_kb_enabled(),
             kb_dir: None,
+            talk_enabled: false,
+            talk_lang: TalkLang::default(),
+            talk_llm_engine: default_talk_llm_engine(),
+            talk_llm_url: None,
+            talk_tts_engine: default_talk_tts_engine(),
+            tts_url: None,
+            talk_timeout_secs: default_talk_timeout_secs(),
+            talk_city: default_talk_city(),
+            talk_weather_note: None,
         }
     }
 }

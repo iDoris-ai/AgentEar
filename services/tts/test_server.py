@@ -16,6 +16,7 @@ from unittest.mock import patch
 import wave
 
 import server
+import backends
 
 
 def make_wav(marker=b"test"):
@@ -76,11 +77,17 @@ class HTTPTests(unittest.TestCase):
             connection.close()
 
     def test_health_and_voices(self):
-        for path, expected in [("/health", {"ok": True}), ("/voices", server.VOICES)]:
-            with self.subTest(path=path):
-                status, content_type, body = self.request("GET", path)
-                self.assertEqual((status, content_type), (200, "application/json"))
-                self.assertEqual(json.loads(body), expected)
+        # /health reports which backend is live; /voices is the per-language
+        # target. Extra keys are additive: an old client reads what it knows.
+        status, content_type, body = self.request("GET", "/health")
+        self.assertEqual((status, content_type), (200, "application/json"))
+        health = json.loads(body)
+        self.assertTrue(health["ok"])
+        self.assertEqual(health["backend"], "say")
+
+        status, content_type, body = self.request("GET", "/voices")
+        self.assertEqual((status, content_type), (200, "application/json"))
+        self.assertEqual(json.loads(body), server.VOICES)
 
     def test_all_languages_return_their_own_wav(self):
         cases = [("zh", "Tingting", "\u660e\u5929"), ("en", "Samantha", "Hello"),
@@ -211,7 +218,7 @@ class AudioTests(unittest.TestCase):
                     raise server.TTSError(500, "failed")
             with self.subTest(tool=failed_tool), patch.object(engine, "_run", side_effect=fail):
                 with self.assertRaises(server.TTSError):
-                    engine.synthesize("hello", "Samantha")
+                    engine.synthesize("hello", "en")
                 self.assertEqual(calls[-1][0], failed_tool)
                 self.assertFalse(Path(calls[0][4]).parent.exists())
 
@@ -231,7 +238,7 @@ class AudioTests(unittest.TestCase):
             child = real_popen(*args, **kwargs)
             children.append(child)
             return child
-        with patch.object(server.subprocess, "Popen", side_effect=capture):
+        with patch.object(backends.subprocess, "Popen", side_effect=capture):
             with self.assertRaises(server.TTSError) as caught:
                 engine._run([sys.executable, "-c", "import time; time.sleep(30)"], time.monotonic() + 0.2)
         self.assertEqual(caught.exception.status, 504)

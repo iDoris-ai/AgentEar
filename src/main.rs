@@ -19,8 +19,10 @@ mod kb;
 mod label;
 mod paste;
 mod route;
+mod session;
 mod sidecar;
 mod store;
+mod talk;
 mod terms;
 mod tray;
 
@@ -335,6 +337,121 @@ fn main() -> Result<()> {
         return diagnose(&vendor);
     }
 
+    // ------------------------------------------------------------------
+    // 通话（M3 / ADR-0007）。
+    //
+    // 三个入口，都**不碰麦克风**：
+    //   --ask <文字>       文字进 → 语音出（跳过 ASR）
+    //   --say <文字>       只测 TTS 那一段
+    //   --talk-turn <wav>  **完整一轮，且走的是守护进程那条代码路径**
+    //                      （ASR → 会话状态机 → LLM → TTS → 播放）
+    //
+    // 为什么 `--talk-turn` 不是可有可无的：守护进程那一轮的入口是**录音键**，
+    // 而按键、麦克风权限、TCC 这几样都没法在无人值守下复现。没有这个入口，
+    // 「推键式链路真的通」就永远只能靠人肉按一次键来证明——
+    // 而那正是这个仓库反复吃过亏的地方（`benchmarks-m3.md` §7.5：
+    // 测量设计有缺陷时，数字算得再对也是假的）。
+    // 它跑的是 `answer_out_loud` **同一个函数**，只是文字从 wav 来而不是从麦克风来。
+    // ------------------------------------------------------------------
+    if args.iter().any(|a| a == "--talk-turn") {
+        let wav = args_after(&args, "--talk-turn")
+            .first()
+            .copied()
+            .ok_or_else(|| anyhow::anyhow!("--talk-turn 后面要跟一个 wav 路径"))?
+            .to_string();
+        let lang = match flag_value(&args, "--lang") {
+            Some(v) => talk::TalkLang::parse(v)?,
+            None => cfg.talk_lang,
+        };
+        // 会话状态机要么已经开着，要么按这次的语言现开一个。
+        // 命令行要能独立跑完整一轮，所以不能依赖 `talk_enabled`——
+        // 那个开关管的是**守护进程**要不要在录音后自动接话。
+        if with_session(|s| s.lang()).is_none() {
+            open_session(lang);
+        }
+        // ⚠️ **这一步不能省：它等价于守护进程里「按下录音键」。**
+        // 少了它，会话还停在 Idle，后面 finish_listening / turn_ready
+        // 会被状态机当成非法转移全部拒掉——而拒绝只写 warning，
+        // 于是日志里会出现「0 轮」这种自相矛盾的结果（实测踩到过）。
+        if let Some(Err(e)) = with_session(|s| s.begin_turn()) {
+            log::warn!("开不了一轮：{e}");
+        }
+        println!("== 通话一轮（离线，不走麦克风）==");
+        // ASR：与守护进程同一个引擎、同一条参数规则（`--lang` 只认 th / auto）。
+        // 与守护进程同一个后端、同一套构造（`config.json` 的 `asr_backend` 说了算）
+        let engine = engine::build(cfg.asr_backend, &vendor, Some(&data_root))?;
+        let asr_lang = if lang == talk::TalkLang::Th {
+            asr::AsrLang::Thai
+        } else {
+            asr::AsrLang::Auto
+        };
+        let t_asr = Instant::now();
+        let transcript = engine
+            .transcribe(std::path::Path::new(&wav), asr_lang)
+            .with_context(|| format!("转写失败：{wav}"))?;
+        let heard = paste::sanitize(&transcript.text);
+        println!(
+            "① 听到（ASR {:.2}s）：{heard}",
+            t_asr.elapsed().as_secs_f32()
+        );
+        if heard.trim().is_empty() {
+            // 空转写要**显式收尾**：会话那边会把这一轮当作「没人说话」丢掉，
+            // 不留空轮次（`session.rs` 的用例钉住这条）。
+            with_session(|s| s.finish_listening());
+            with_session(|s| s.turn_ready("", None));
+            println!("（这段音频没有语音，轮次结束）");
+            return Ok(());
+        }
+        // ②③④ 与守护进程一模一样：会话推进 → LLM → TTS → 播放
+        answer_out_loud(&cfg, &heard, lang);
+        return Ok(());
+    }
+
+    if args.iter().any(|a| a == "--ask") {
+        let text = args_after(&args, "--ask")
+            .first()
+            .copied()
+            .ok_or_else(|| anyhow::anyhow!("--ask 后面要跟一句问话"))?
+            .to_string();
+        let lang = match flag_value(&args, "--lang") {
+            Some(v) => talk::TalkLang::parse(v)?,
+            None => cfg.talk_lang,
+        };
+        let engines = talk::Engines::from_config(&cfg);
+        println!(
+            "LLM {} @ {}\nTTS {} @ {}",
+            engines.llm.name(),
+            cfg.talk_llm_url.as_deref().unwrap_or(talk::DEFAULT_LLM_URL),
+            engines.tts.name(),
+            engines.tts.endpoint().unwrap_or("(内置)")
+        );
+        let reply = talk::answer(&engines, &cfg, &text, lang)?;
+        println!("\n问：{text}\n答：{reply}\n");
+        let played = talk::speak(&engines, &reply, lang)?;
+        println!("（已播放 {:.2}s）", played.as_secs_f32());
+        return Ok(());
+    }
+
+    if args.iter().any(|a| a == "--say") {
+        let text = args_after(&args, "--say")
+            .first()
+            .copied()
+            .ok_or_else(|| anyhow::anyhow!("--say 后面要跟一段文字"))?
+            .to_string();
+        let lang = match flag_value(&args, "--lang") {
+            Some(v) => talk::TalkLang::parse(v)?,
+            None => cfg.talk_lang,
+        };
+        let engines = talk::Engines::from_config(&cfg);
+        let played = talk::speak(&engines, &text, lang)?;
+        println!(
+            "TTS {} 说了 {:.2}s：{text}",
+            engines.tts.name(),
+            played.as_secs_f32()
+        );
+        return Ok(());
+    }
+
     // 打印每一个修饰键事件，确认按键到底有没有被收到
     if args.iter().any(|a| a == "--debug-keys") {
         hotkey::set_debug_keys(true);
@@ -394,6 +511,26 @@ fn main() -> Result<()> {
         log::warn!("自动上屏需要辅助功能权限，未授予 → 只写剪贴板，请手动 ⌘V");
     }
     paste::set_enabled(can_paste);
+
+    // 通话形态：只有显式打开时才建会话，并在启动时把「用哪个语言」定下来。
+    // 之后用户在菜单里改 `talk_lang` 会在**下一轮**生效（生效点是每轮
+    // `answer_out_loud` 重新读配置的那一刻），不需要重启——
+    // 这正是 jason 要的「过程中可以随时切」。
+    if cfg.talk_enabled {
+        open_session(cfg.talk_lang);
+        let engines = talk::Engines::from_config(&cfg);
+        log::info!(
+            "通话已开启：LLM {} @ {}，TTS {} @ {}，语言 {}",
+            engines.llm.name(),
+            cfg.talk_llm_url.as_deref().unwrap_or(talk::DEFAULT_LLM_URL),
+            engines.tts.name(),
+            engines.tts.endpoint().unwrap_or("(内置)"),
+            cfg.talk_lang.as_str()
+        );
+        if cfg.talk_llm_engine == "mock" {
+            log::warn!("通话用的是 mock 引擎：回答是本地写死的，不是模型产出");
+        }
+    }
 
     println!("\n╭─────────────────────────────────────────────╮");
     println!("│  AgentEar M1 已就绪                          │");
@@ -515,22 +652,42 @@ fn worker(
         if rx.try_recv().is_ok() {
             log::debug!("收到触发事件");
             state = match state {
-                State::Idle => match begin(&store) {
-                    Ok(s) => {
-                        last_heartbeat = Instant::now();
-                        s
+                State::Idle => {
+                    // ⚠️ **打断优先于开始录音。** 用户按这一下键的意思是
+                    // 「别说了，听我说」——工作线程那边可能正在播上一轮的回答。
+                    // 先掐掉播放再开麦克风，顺序反了就会先录到自己正在放的
+                    // 声音（AEC 那一格 T3.4.0 实测残留单字，见 ADR-0007 §4.3.0）。
+                    let interrupted = talk::stop_playback();
+                    if interrupted {
+                        log::info!("通话被打断，开始听下一句");
                     }
-                    Err(e) => {
-                        log::error!("开始录音失败: {e:#}");
-                        State::Idle
+                    // 会话状态机自己会处理「正在播时按下键 = 打断 + 开新一轮」，
+                    // 所以这里只报一次按下，不在外面判断相位。
+                    if let Some(Err(e)) = with_session(|s| s.begin_turn()) {
+                        log::warn!("通话会话不能开新一轮: {e}");
                     }
-                },
+                    match begin(&store) {
+                        Ok(s) => {
+                            last_heartbeat = Instant::now();
+                            s
+                        }
+                        Err(e) => {
+                            log::error!("开始录音失败: {e:#}");
+                            State::Idle
+                        }
+                    }
+                }
                 s @ State::Recording { .. } => finish(s, &store, asr.as_ref())?,
             };
         } else {
             std::thread::sleep(Duration::from_millis(20));
         }
     }
+
+    // ⚠️ 主循环是**不退出**的（`loop {}`，只能被信号杀掉），所以这里没有
+    // 「退出前收尾」可写：挂在 loop 之后的清理代码是死代码。
+    // 通话的统计因此每轮就写进日志（见 `answer_out_loud` 的 info 行），
+    // 而不是等一个永远不会到来的退出点。
 }
 
 fn begin(store: &store::Store) -> Result<State> {
@@ -743,6 +900,17 @@ fn finish(state: State, store: &store::Store, asr: &dyn engine::AsrEngine) -> Re
                     .ok();
                 deliver::attempt(store, &sink, &route, ix.as_ref());
             }
+
+            // —— 通话形态：说一句、答一句 ——
+            //
+            // **排在最后**，和知识库投递同一个道理：文字已经进了剪贴板、
+            // 也上了屏，语音这条路慢一点或者失败都不会让用户白说一次。
+            // 默认关（`talk_enabled`），所以已发布用户的链路一个字节都没变。
+            if cfg.talk_enabled {
+                // 守护进程这一轮用哪个语言，**在配置里读**：菜单改了下一轮生效，
+                // 这就是 jason 要的「过程中可以随时切」。
+                answer_out_loud(&cfg, &text, cfg.talk_lang);
+            }
         }
         Ok(_) => log::warn!("转写结果为空（这段音频可能没有语音）"),
         // raw 已经安全落盘，转写失败只是丢了一次派生结果，可以重跑
@@ -751,6 +919,110 @@ fn finish(state: State, store: &store::Store, asr: &dyn engine::AsrEngine) -> Re
 
     tray::set(tray::Status::Idle);
     Ok(State::Idle)
+}
+
+/// 通话会话状态机（`src/session.rs`）。
+///
+/// **只在 `talk_enabled` 时创建**：没打通话就不该有「轮次」这个概念，
+/// 否则每次普通录音都会推进一个没人看的相。
+///
+/// 为什么是全局而不是 `State` 的一个字段：录音键在主线程处理，而
+/// 一轮的推进（转写 → LLM → 播放）在工作线程的 `finish` 里。
+/// 和 `talk::PLAYING` / `tray` 用同一个套路——**跨线程共享的是一个
+/// 「现在到哪一相」的事实，不是一套消息通道**。
+static TALK_SESSION: std::sync::Mutex<Option<session::Session>> = std::sync::Mutex::new(None);
+
+/// 通话开着的时候，对当前会话做一件事。
+fn with_session<R>(f: impl FnOnce(&mut session::Session) -> R) -> Option<R> {
+    let mut slot = TALK_SESSION.lock().unwrap_or_else(|e| e.into_inner());
+    slot.as_mut().map(f)
+}
+
+fn open_session(lang: talk::TalkLang) {
+    let mut slot = TALK_SESSION.lock().unwrap_or_else(|e| e.into_inner());
+    *slot = Some(session::Session::new(lang));
+}
+
+/// 把一句话交给 LLM，把回答念出来。**通话形态的收尾动作。**
+///
+/// 任何一步失败都只记日志：文字已经上屏了，用户这一轮不算白说。
+/// 但**不许静默**——边车没起时日志里必须能看出是「谁没起」，
+/// 否则用户只会觉得「按了没反应」。
+fn answer_out_loud(cfg: &config::Config, heard: &str, lang: talk::TalkLang) {
+    use crate::talk;
+    let engines = talk::Engines::from_config(cfg);
+
+    // 每轮都按配置对齐一次会话语言：这是 jason 要的「过程中可以随时切」
+    // 的生效点。会话自己会在不该切的时候（正在推理）拒绝，返回值记日志即可。
+    if let Some(Err(e)) = with_session(|s| s.set_lang(lang)) {
+        log::warn!("本轮不改通话语言: {e}");
+    }
+    // 录音结束 → 等结果
+    if let Some(Err(e)) = with_session(|s| s.finish_listening()) {
+        log::warn!("通话会话状态不对（{e}），这一轮按普通录音处理");
+    }
+
+    println!("🔊 通话（{} → {}）…", engines.llm.name(), engines.tts.name());
+    let reply = match talk::answer(&engines, cfg, heard, lang) {
+        Ok(reply) => reply,
+        Err(e) => {
+            log::error!("通话没拿到回答（LLM 边车起了吗？scripts/serve-talk-llm.sh）: {e:#}");
+            println!("（没拿到回答，详见日志）");
+            // ⚠️ **转写照样记一轮**：用户说了什么是有价值的记录，
+            // 不能因为 LLM 挂了就当这一轮不存在（session.rs 的用例钉住这条）。
+            // 记完再把相标成 Failed——通话本身还活着，下一轮照常能开。
+            if let Some(Err(e)) = with_session(|s| s.turn_ready(heard, None)) {
+                log::warn!("通话会话记录失败: {e}");
+            }
+            with_session(|s| s.fail(format!("这一轮没拿到回答: {e}")));
+            return;
+        }
+    };
+    println!("🔊 {reply}");
+    if let Some(Err(e)) = with_session(|s| s.turn_ready(heard, Some(reply.clone()))) {
+        log::warn!("通话会话记录失败: {e}");
+    }
+    match talk::speak(&engines, &reply, lang) {
+        Ok(played) => {
+            log::info!("通话播完，用时 {:.2}s", played.as_secs_f32());
+            // ⚠️ 这一轮的总时长要在 `speaking_done` **之前**读：
+            // 那个调用会把计时起点清掉，之后读永远是 0（实测踩到，
+            // 日志里出现过自相矛盾的「1 轮，本轮 0ms」）。
+            let turn_ms = with_session(|s| s.turn_elapsed())
+                .flatten()
+                .map(|d| d.as_millis())
+                .unwrap_or(0);
+            // 时长要回填进这一轮：它是「被打断」与「播完」唯一的客观区别
+            // （被掐掉的那一轮时长会明显短于音频本身）。
+            if let Some(Err(e)) = with_session(|s| s.speaking_done(played)) {
+                log::warn!("通话会话收尾失败: {e}");
+            }
+            // 每轮都写一条 info：主循环不会正常退出，所以没有「退出时汇总」
+            // 这个时机。「打断了几次」是 V1 的出口判据之一，只放 debug 会在
+            // 默认日志级别下丢掉。
+            if let Some(s) = with_session(|s| {
+                format!(
+                    "通话统计：{} 轮，相 {}，语言 {}，本轮 {}ms，打断 {} 次（掐掉播放 {} 次）",
+                    s.turns().len(),
+                    s.phase().as_str(),
+                    s.lang().as_str(),
+                    turn_ms,
+                    s.barge_ins(),
+                    s.interrupted_playbacks()
+                )
+            }) {
+                log::info!("{s}");
+            }
+        }
+        Err(e) => {
+            log::error!("通话合成/播放失败（TTS 边车起了吗？scripts/serve-tts.sh）: {e:#}");
+            println!("（语音没出来，详见日志）");
+            if let Some(Err(e)) = with_session(|s| s.speaking_done(std::time::Duration::ZERO)) {
+                log::warn!("通话会话收尾失败: {e}");
+            }
+            with_session(|s| s.fail(format!("这一轮没播出来: {e}")));
+        }
+    }
 }
 
 /// launchd 的 job label，`scripts/bundle.sh` 与 plist 里保持一致。
@@ -901,6 +1173,67 @@ fn diagnose(vendor: &std::path::Path) -> Result<()> {
         println!("  ⚠️ 开关是开的但服务没起——每次录音会多等一次超时后才上屏");
     }
 
+    // 通话（M3）同样是**可选**链路：两个边车都要单独起，没起不是故障。
+    // 但**必须在这里能看出来**：通话失败的症状是「按了键只上屏、没有声音」，
+    // 而那两个边车跑在别的进程里，光看 AgentEar 自己什么都看不出来
+    // （菜单栏那三个坑记的是同一类教训：症状都是「按了没反应」）。
+    println!("\n实时通话（可选，需要两个边车）:");
+    println!("  开关: {}", if cfg.talk_enabled { "✅ 开" } else { "⚪ 关" });
+    let talk_cfg_engines = talk::Engines::from_config(&cfg);
+    let llm_url = cfg
+        .talk_llm_url
+        .clone()
+        .unwrap_or_else(|| talk::DEFAULT_LLM_URL.to_string());
+    let tts_url = cfg
+        .tts_url
+        .clone()
+        .unwrap_or_else(|| talk::DEFAULT_TTS_URL.to_string());
+    println!(
+        "  LLM 引擎: {} @ {}",
+        talk_cfg_engines.llm.name(),
+        if cfg.talk_llm_engine == "mock" {
+            "(内置 mock，不连服务)"
+        } else {
+            &llm_url
+        }
+    );
+    println!(
+        "  TTS 引擎: {} @ {}",
+        talk_cfg_engines.tts.name(),
+        talk_cfg_engines.tts.endpoint().unwrap_or("(内置 say)")
+    );
+    // ⚠️ 两条「谁没起」要真的**分别**记下来，最后那句警告只在**确实缺东西**时打。
+    // 曾经写成无条件打——两个边车都在跑也照样喊「有一个没起」，
+    // 而自检骗人比没有自检更糟（这个仓库为这条栽过不止一次）。
+    let mut missing: Vec<&str> = Vec::new();
+    if cfg.talk_llm_engine != "mock" {
+        match talk::probe_endpoint(&llm_url) {
+            Ok(()) => println!("  ✅ LLM 边车在跑"),
+            Err(e) => {
+                println!("  ⚪ LLM 边车: {e}");
+                println!("     启动：scripts/serve-talk-llm.sh（首次需先跑 scripts/setup-talk.sh）");
+                missing.push("LLM");
+            }
+        }
+    }
+    if cfg.talk_tts_engine != "say" {
+        match talk::probe_endpoint(&tts_url) {
+            Ok(()) => println!("  ✅ TTS 边车在跑"),
+            Err(e) => {
+                println!("  ⚪ TTS 边车: {e}");
+                println!("     启动：scripts/serve-tts.sh（首次需先跑 scripts/setup-talk.sh）");
+                missing.push("TTS");
+            }
+        }
+    }
+    println!("  通话语言: {}", cfg.talk_lang.as_str());
+    if cfg.talk_enabled && !missing.is_empty() {
+        println!(
+            "  ⚠️ 开关是开的，但 {} 边车没起——这一轮会只有文字没有声音",
+            missing.join(" / ")
+        );
+    }
+
     println!("\n数据目录: {}", data_root()?.display());
     Ok(())
 }
@@ -1020,6 +1353,45 @@ fn vendor_root() -> Result<PathBuf> {
         }
     }
     Ok(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("vendor"))
+}
+
+/// 测试用的临时目录。**必须能被并行跑的多个测试同时用。**
+///
+/// ⚠️ 原来三个模块各自写的是 `{pid}-{SystemTime::now().as_nanos()}`，
+/// 看着够唯一，实际会撞：**macOS 上 realtime 时钟的分辨率约 1 µs**，
+/// 实测连续两次取到的纳秒值相同的情况占 **91.6%**（20 万次里 18.3 万次）。
+/// 测试是并行跑的（默认多线程），两个模块的 `tmpdir()` 落在同一个时钟刻度
+/// 就指向**同一个目录**，于是互相覆盖对方写的文件。
+///
+/// 症状正是 FU-16 里那条查不出身份的 flake：**随机有一条用例失败，
+/// 而且每次还不是同一条**。2026-09-14 复现并定位：
+/// 连跑 20 次全量 `cargo test` 失败 1 次，失败用例是
+/// `deliver::tests::drain_retries_what_the_last_run_left_behind` 与
+/// `kb::tests::identity_is_the_full_hash_not_a_prefix`**两个不同模块里的
+/// 不同用例**——单个用例自己有 bug 不会长这样，共享的临时目录才会。
+///
+/// 修法：名字里再加一个**进程内单调递增的计数器**，它不依赖时钟分辨率。
+/// 时钟那一项保留，是为了不同进程（并行跑多份 `cargo test`）之间仍然不同。
+#[cfg(test)]
+pub mod testutil {
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+
+    pub fn tmpdir(prefix: &str) -> PathBuf {
+        let p = std::env::temp_dir().join(format!(
+            "{prefix}-{}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0),
+            SEQ.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&p).unwrap();
+        p
+    }
 }
 
 #[cfg(test)]
