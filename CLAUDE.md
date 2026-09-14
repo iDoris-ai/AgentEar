@@ -2,11 +2,83 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-## 当前状态：**v0.5.0 —— ASR 引擎可切换**；M1/M2 已发布；M3 实时对话在实现中
+## 当前状态：**v0.6.0 —— 通话链路**；M1/M2 已发布；**M3 通话链路已跑通，AEC / 自动打断未做**
 
 M1 完成；**知识库投递 + 全文检索默认开（v0.4.2）**；M2 理解层已发布（v0.4.0）但默认关；
-**v0.5.0 加了可切换的 ASR 后端**（`--asr-backend` / `config.json` 的 `asr_backend`，
+**v0.6.0 加了通话链路（说一句答一句、可按键打断）**，**v0.5.0 加了可切换的 ASR 后端**（`--asr-backend` / `config.json` 的 `asr_backend`，
 **默认仍是 `builtin`**，`speech_swift` 要用户自己装 `speech` CLI，且**菜单栏里没有这一项**）。
+
+**M3 实时对话（ADR-0007）：V1 的通话链路已经跑通并随 v0.6.0 发布，但还没有产品入口。**
+下面的代码在 `src/talk.rs` / `src/session.rs` 等；**默认关**，
+要显式打开 `talk_enabled` 并自己起两个边车（都**不随包分发**）。
+
+- **`src/talk.rs` = 通话引擎适配层**（ADR-0007 §4 的 R0）。
+  `TalkLang{zh,en,th}`；`LlmEngine` 两个实现——`OpenAiCompat`（任何 OpenAI 兼容端点，
+  **默认指向 `127.0.0.1:8794`** 的 MiniCPM5-2B 边车）与 `WeatherMock`
+  （零依赖、写死回答、**必须显式配置 `talk_llm_engine: "mock"` 才启用**）；
+  `TtsEngine` 两个实现——`HttpTts`（走 `services/tts` 边车，默认 VoxCPM2-4bit）
+  与 `SayTts`（macOS `say`，零依赖兜底）。另有 `AudioTransport`/`CurlAudio`
+  （音频是**二进制 POST，不能走 String**）、`validate_wav`（**HTTP 200 但不是 WAV 一律拒绝**，
+  否则播放器会把一段 HTML 错误页当音频）、`play_blocking`（`afplay` 子进程，可打断）、
+  `strip_thinking`（兜掉 ` thinking` 段）。
+- **`src/session.rs` = 通话会话状态机**，ADR-0007 §4.4 **选 A（R2 自主编排）**的落地：
+  相 `Idle/Listening/Thinking/Speaking/Failed`；`begin_turn` / `finish_listening` /
+  `turn_ready` / `speaking_done` / `barge_in` / `set_lang` / `fail` / `hang_up` / `turn_elapsed`。
+  **语言可在通话中随时切**，但 Thinking 相拒绝（理由写在文档注释里）；
+  **空转写不记轮次**；LLM 失败时转写照样记一轮（`reply: None`）。
+- **配置项全部默认关、或指向本机默认端口**（`src/config.rs`）：`talk_enabled`(false)、
+  `talk_lang`(zh)、`talk_llm_engine`("openai_compat")、`talk_llm_url`(None→8794)、
+  `talk_tts_engine`("http")、`tts_url`(None→8765)、`talk_timeout_secs`(60)、
+  `talk_city`("清迈")、`talk_weather_note`(None)，另有 `Config::weather_fact()`。
+  **不开 `talk_enabled` 时，已发布用户的行为一个字节都没变。**
+- **CLI 三个新入口**（都不碰麦克风）：
+  `--ask <文字>`（文字 → LLM → TTS → 播放，跳过 ASR）、`--say <文字>`（只测 TTS）、
+  **`--talk-turn <wav> [--lang zh|en|th]`**（**完整一轮，且走守护进程那条代码路径**：
+  ASR → 会话状态机 → LLM → TTS → 播放）。加 `--talk-turn` 的理由是**可测性**：
+  守护进程那一轮的入口是录音键，按键/麦克风权限/TCC 都没法无人值守复现，
+  没有它「推键式链路真的通」就只能靠人肉按一次键来证明。
+  ⚠️ 它实测**当场抓出一个真 bug**：这个入口最初漏了「等价于按下键」的
+  `begin_turn()`，于是状态机把 `finish_listening` / `turn_ready` 全部按非法转移
+  拒掉——**只写 warning**，统计出来是自相矛盾的「0 轮」。
+- **守护进程两处改动**：① 录音键**先 `talk::stop_playback()` 掐掉正在播的回答再开麦克风**
+  ——这是 V1 的打断入口；② 转写 / 上屏 / 知识库都走完之后，若 `talk_enabled`
+  则 `answer_out_loud()` 把回答念出来，**失败只记日志，不挡上屏**。
+- **边车与脚本**：`services/tts/backends.py`（新增 `SayBackend` + `VoxCpm2Backend`，
+  HTTP 契约不变）、`services/tts/server.py`（`--backend {voxcpm2,say}`，**默认 voxcpm2**）、
+  `scripts/setup-talk.sh`（按需下载两个模型，**不随包分发**）、
+  `scripts/serve-talk-llm.sh`（`mlx_lm.server` + `--chat-template-args '{"enable_thinking": false}'`，
+  端口 8794）、`scripts/serve-tts.sh`（用带 mlx-audio 的 venv 起 `server.py`）、
+  `scripts/talk-e2e.sh`（端到端验收）。
+
+**⚠️ M3 这轮的诚实边界（不要美化、也不要外推）**：
+
+> 本轮的实测明细在 **`docs/benchmarks-talk.md`**（**MLX 4bit 路径**：
+> `VoxCPM2-4bit` + `MiniCPM5-2B-4bit`，2026-09-14）。
+> ⚠️ 它与 `docs/benchmarks-m3.md` **不是同一条路径**——那份是 **speech-swift 的 bf16**
+> （Swift CLI），**两份数字不能互相引用、也不能横比**（连「4bit 更省内存」都不成立：
+> 2.5 GB 是 Python + MLX 进程峰值，1.54 GiB 是 speech-swift 进程峰值，口径不同）。
+
+1. **天气那句话是本地写死的场景，不是天气接口**（ADR-0007 §4.6）。它的唯一作用是
+   **证明 ASR→LLM→TTS 通**，不是产品能力；接真实天气源是集成方的事（R3 外壳层）。
+2. **V1 只是打断式半双工**，解决「说完才轮到我」，**不解决「一边听一边想」**——
+   **不许写「体感接近全双工」**。**AEC 这一格仍然没解决**：T3.4.0 实测 VPIO
+   **内容级自触发 0/5、事件级仍 5/5**（残留单字）。本轮的解法是**推键式**
+   （用户按键即打断、播放前先掐），**没有做 VAD 自动打断，也没有做双讲**；
+   **误打断率、端到端打断延迟 <300ms 仍是未测**。
+3. **MiniCPM5-2B 的模型卡只声明 en/zh**，泰语在能力边界外：实测能听懂泰语问句、
+   也能产出泰语，但提示词不钉死语言时会用中文回答；钉死之后**仍然不稳定**——
+   实测到两种坏形态：**夹英文词**（`overall`）与**把问句原样退回来**
+   （后者已由 `src/talk.rs::is_echo` 挡住，这一轮不播，宁可没声音）。
+   **不要把泰语质量写成与中英同级**，也不要写成「稳定纯泰语」；要稳就得换模型
+   （`talk_llm_url` 指向任何 OpenAI 兼容端点，Rust 侧不用改）。
+4. **4bit 与 bf16 的质量对比没做**（只测了 4bit 能跑、时延与内存）。
+   `benchmarks-m3.md` 里那批 VoxCPM2 数据是 **speech-swift 的 bf16 路径**，
+   与本轮的 **MLX 4bit 路径不是同一个运行时，不要混着引用**。
+5. **whisper 泰语的时延数字在本 sandbox 里无效**：实测每次调用约 19.9s，
+   而 `docs/data/thai-coldstart-raw.txt` 记的是 0.96s；CPU-only（`-ng`）是 5.9s，
+   差异来自 Metal 着色器缓存写不进去（sandbox 禁止写仓库外）。
+   **任何在本环境测出的 whisper/Metal 时延都不可引用**，要么在正常 Terminal 里复测，
+   要么标注为环境无效。
 
 M2 = 术语纠错 + 一级标签识别 + `routes/` 落盘，需要一个本地 LLM 边车
 （`scripts/setup-llm.sh` / `serve-llm.sh`，模型 7.8 GB **不随包分发**）。
@@ -43,7 +115,7 @@ clippy **刻意不加 `-D warnings`**（既有 13 条警告，加了会让 CI �
 
 ```bash
 cargo build --release
-cargo test                                    # 219 个测试（源码 224，5 条 ignored：4 条要边车、1 条要联网）：提交协议、崩溃语义、token 过滤、i18n、下载协议、知识库投递
+cargo test                                    # 239 passed / 0 failed / 6 ignored（源码共 245；ignored 6 条：4 条要边车、1 条要联网、1 条要能出声的环境）：提交协议、崩溃语义、token 过滤、i18n、下载协议、知识库投递、通话会话状态机
 ./target/release/agentear                     # 守护进程，Ctrl+Shift+R 开始/停止录音
 ./target/release/agentear --transcribe x.wav  # 离线转写，不占麦克风，用于验证 ASR 链路
 ./target/release/agentear --diagnose          # 环境自检：权限、音频设备、ASR 依赖
@@ -52,10 +124,26 @@ cargo test                                    # 219 个测试（源码 224，5 �
 ./target/release/agentear --transcribe x.wav --lang th   # 不改配置试泰语链路
 ./target/release/agentear --classify "这是一个 idea"      # 给一段文字分类（评测脚本也走这条）
 ./target/release/agentear --replay-kb                    # 从 routes/ 全量重建 kb/，幂等，可反复跑
+./target/release/agentear --say "你好"                    # 只测 TTS：合成 + 播放（跳过 ASR 和 LLM）
+./target/release/agentear --ask "今天天气怎么样"           # 文字 → LLM → TTS → 播放（跳过 ASR）
+./target/release/agentear --talk-turn q_zh.wav --lang zh   # **完整一轮**（ASR→会话→LLM→TTS→播放），走守护进程同一条路径
+cargo test -- --ignored stop_playback         # 打断机制：真掐掉一段 5s 音频（需要能出声的环境）
 scripts/bundle.sh                             # 打 .app bundle → dist/
+
+# 通话链路（M3）的两个边车 + 端到端验收，都要单独起，都**不随包分发**：
+scripts/setup-talk.sh                         # 首次：下 MiniCPM5-2B-4bit（LLM）与 VoxCPM2-4bit（TTS）
+scripts/serve-talk-llm.sh                     # 每次：LLM 边车，默认 127.0.0.1:8794
+scripts/serve-tts.sh                          # 每次：TTS 边车，默认 127.0.0.1:8765（--backend voxcpm2）
+scripts/talk-e2e.sh --text '今天天气怎么样' --lang zh   # 全链路：ASR → LLM → TTS → 音频文件
+
+python3 -m unittest discover -s services/tts -p 'test_*.py'   # 34 passed（TTS 边车）
 ```
 
 日志同时写 stderr 和 `~/.agentear/agentear.log`。
+
+⚠️ **`--transcribe` 的 `--lang` 只认 `th` / `auto`**（实测传 `zh` 会被参数解析拒绝，exit 1；
+中英走 SenseVoice 默认路径，不需要这个参数）。`scripts/talk-e2e.sh` 里那条按语言决定加不加
+参数的写法就是为它让路的。
 
 **macOS 上按键相关的三个坑**（症状都是「按了没反应」，见 `docs/m1-status.md`）：
 主线程必须跑 AppKit/CFRunLoop 事件循环；`NSEvent` 全局监听在纯 CLI 二进制里回调
@@ -63,6 +151,19 @@ scripts/bundle.sh                             # 打 .app bundle → dist/
 设备位 `NX_DEVICE_R_CMD (0x10)`。
 
 **TCC 权限不会从终端带到 .app**：两者是独立主体，麦克风与辅助功能各自要授权一次。
+
+**MLX 的一个硬约束（本轮踩到，值得先记着）：MLX stream 是线程局部的。**
+在一个线程加载权重、在 HTTP 工作线程里推理**不会抛 Python 异常，而是直接 SIGABRT**：
+
+```
+libc++abi: terminating due to uncaught exception of type std::runtime_error:
+There is no Stream(cpu, 1) in current thread.
+```
+
+崩点在惰性数组**第一次被求值**（`np.asarray`）的那一刻，而只读 `.shape` / `.size`
+**不会触发求值**——所以探针可能「通过」而 bug 还在（本轮最初的探针就是这样）。
+修法：**load + generate + numpy 转换全放在同一条专用线程上**，HTTP 工作线程
+通过队列投递（`services/tts/backends.py::VoxCpm2Backend._mlx_thread`）。
 
 数据落在 `~/.agentear/`（`AGENTEAR_DATA` 可覆盖）；ASR 二进制与模型在 `vendor/`（`AGENTEAR_VENDOR` 可覆盖，**不入库**）。
 
@@ -161,7 +262,11 @@ jason 要的「边说边理解、可互相打断」是全双工 speech-to-speech
 **产品形态已分成两档（jason 2026-09-08 拍板，见 [ADR-0007](docs/decisions/0007-realtime-voice-architecture.md)）：
 V1 = 打断式半双工，内存门槛 ≤10 GB；V2 = 实时全双工，放宽到 64 GB 级。**
 V1 不是 V2 的临时替代品，是**长期保留的低配档位**——不是所有人都有 64 GB。
-V1 的做法：VAD 检测到开口就掐掉 TTS。
+
+⚠️ **V1 的打断入口，截至 2026-09-14 落地的是「推键式」，不是 VAD 自动打断**
+（ADR-0007 初稿写的「VAD 检测到开口就掐掉 TTS」**还不是事实**）：用户按录音键，
+程序**先掐掉正在播的回答再开麦克风**。**VAD 自动打断与双讲都没做**，
+所以「误打断率」与「端到端打断延迟 <300 ms」两条出口判据**仍未测**（T3.4.2 收口）。
 
 ⚠️ **不要再用「2 GB 预算内做不到」解释为什么不做全双工。** 那个理由已经过期
 （M2 起预算 ≤9 GiB，目标机 64 GB）。**真正的障碍是：目前没有「已验证覆盖中泰

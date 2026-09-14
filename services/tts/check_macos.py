@@ -65,8 +65,13 @@ def main():
     }
     print(f"Acceptance artifacts: {output}", flush=True)
     started = time.perf_counter()
+    # ⚠️ **必须显式指定 --backend say。** 2026-09-14 之后 `--backend` 的默认值是
+    # `voxcpm2`，而这个脚本用的是系统 Python（实测 3.9），装不了 mlx——
+    # 不写这一行，脚本会因为「默认后端换成了模型后端」而整体失败，
+    # 而它真正要验的是 `say` 那条零依赖路径（合成结果、并发、SIGINT 收尾）。
+    # VoxCPM2 那条路径的验收在 scripts/talk-e2e.sh 与 docs/benchmarks-talk.md。
     process = subprocess.Popen(
-        [sys.executable, str(Path(__file__).with_name("server.py")), "--port", "0"],
+        [sys.executable, str(Path(__file__).with_name("server.py")), "--port", "0", "--backend", "say"],
         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
     )
     try:
@@ -76,13 +81,20 @@ def main():
         if not line:
             process.wait(timeout=5)
             raise RuntimeError(process.stderr.read().strip() or "Service exited before startup.")
-        if not line.startswith("AgentEar TTS listening on http://127.0.0.1:"):
+        # 启动行现在带后端名（"AgentEar TTS (say) listening on ..."）：只校验
+        # 「它报了监听地址」这一件事，别把措辞钉死——措辞会变，契约不会。
+        if "AgentEar TTS" not in line or "http://127.0.0.1:" not in line:
             raise RuntimeError(f"Unexpected service startup: {line!r}")
-        url = line.rsplit(" ", 1)[1]
+        url = line.rsplit(" ", 1)[1].strip()
+        if not url.startswith("http://127.0.0.1:"):
+            raise RuntimeError(f"Could not parse the listening URL from {line!r}")
         health = request(url, "GET", "/health", output / "health.json")
         report["process_start_to_health_seconds"] = time.perf_counter() - started
         assert health["status"] == 200
-        assert json.loads((output / "health.json").read_text()) == {"ok": True}
+        # /health 现在额外报后端名（换后端却不换服务是最难发现的错）
+        health_body = json.loads((output / "health.json").read_text())
+        assert health_body["ok"] is True, health_body
+        assert health_body["backend"] == "say", health_body
         voices = request(url, "GET", "/voices", output / "voices.json")
         assert voices["status"] == 200
         assert json.loads((output / "voices.json").read_text()) == {

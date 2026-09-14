@@ -626,17 +626,11 @@ fn front_matter_id(doc: &str) -> Option<String> {
 mod tests {
     use super::*;
 
+    /// 临时目录走共用的 `testutil`：原来的 `{pid}-{纳秒}` 会撞
+    /// （macOS 时钟分辨率约 1 µs，实测 91.6% 的连续两次取值相同），
+    /// 并行测试因此会互相覆盖对方的文件。见 `testutil::tmpdir` 的说明。
     fn tmpdir() -> PathBuf {
-        let p = std::env::temp_dir().join(format!(
-            "agentear-kb-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        fs::create_dir_all(&p).unwrap();
-        p
+        crate::testutil::tmpdir("agentear-kb")
     }
 
     fn route(hash: &str, label: Label, text: &str) -> Route {

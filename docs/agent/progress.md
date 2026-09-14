@@ -2,17 +2,26 @@
 
 > 此刻在做什么、卡在哪、分支与 PR。每推进一步就更新，宁可啰嗦不可与仓库脱节。
 
-**更新时间**：2026-09-09
-**当前分支**：main（干净）
-**main HEAD**：`3daa112` — chore(release): **v0.5.0 —— ASR 引擎可切换**
-**测试**：`cargo test` **219 passed / 0 failed / 5 ignored**（源码共 224 条）。
-ignored 的 5 条：**4 条要 LLM 边车**（3 条要边车在跑 + 1 条会真的拉起边车），**1 条要联网**（HEAD 一次模型 URL）。
+**更新时间**：2026-09-14
+**当前分支**：main（本轮从 `861cdf8` 起，v0.6.0 已发）。
+**版本：v0.6.0 —— 通话链路**（`0.5.0 → 0.6.0`）。
+新增 `src/talk.rs` / `src/session.rs` / `services/tts/backends.py` /
+`scripts/{setup-talk,serve-talk-llm,serve-tts,talk-e2e}.sh`，
+改动 `src/config.rs` / `src/main.rs` / `services/tts/server.py`。
+**测试**：`cargo test` **239 passed / 0 failed / 6 ignored**（源码共 245 条；改动前是 219）。
+⚠️ 修复 FU-16 之后**连跑 30 次全量 0 失败**（修复前 20 次里 1 次）。
+ignored 的 6 条：**4 条要 LLM 边车**（3 条要边车在跑 + 1 条会真的拉起边车）、
+**1 条要联网**（HEAD 一次模型 URL）、**1 条要能出声的环境**（打断机制那条）。
+Python 侧 `python3 -m unittest discover -s services/tts -p 'test_*.py'` **34 passed**（改动前 16）。
 
 > ⚠️ 上一版本文停在 2026-09-03（`2b3b916`），中间漏记了 17 个 commit、
-> 4 个版本（v0.4.0 / v0.4.1 / v0.4.2 / v0.5.0）。这次是补记。
+> 4 个版本（v0.4.0 / v0.4.1 / v0.4.2 / v0.5.0）。那次是补记。
 > **教训**：发版和文档同步要放进同一个 PR，不要事后补。
+> ⚠️ **2026-09-14 这一轮本来又踩了同一半**（代码写完、实测做完、但没提交没发版）。
+> **已随 v0.6.0 一起提交**：代码、实测、文档、版本号在同一个 PR 里，
+> 这正是上面那条教训要求的做法。**下次也这么做：不要事后再补文档。**
 
-## 此刻状态：M2 已发布可用；**M3 实时对话在实现阶段，可行性 spike 判定「不通过」**
+## 此刻状态：M2 已发布可用；**M3 通话链路已跑通，AEC / 自动打断未做**
 
 - 本地已无未合并分支。**远程只剩 `origin/c1-thai-asr-baseline` 未合**（ahead=13）。
   `origin/arm/agentear-dev` **ahead=0 / behind=5 —— 已经合进 main 了**
@@ -24,6 +33,78 @@ ignored 的 5 条：**4 条要 LLM 边车**（3 条要边车在跑 + 1 条会真
 - 已清理：9 个 squash-merged 的本地分支 + 5 个失效 worktree（2026-09-09）。
   ⚠️ 这两个数字是当时的操作记录，**git 里不留删除痕迹，事后无法从仓库自证**。
 
+## 本轮（2026-09-14）：实时对话从「引擎可换」走到「一条链路真的能对话」
+
+### 改了什么（按文件）
+
+| 文件 | 做了什么 |
+|---|---|
+| `src/talk.rs`（新，754 行） | 通话引擎适配层。`TalkLang{zh,en,th}`；`LlmEngine` = `OpenAiCompat`（任何 OpenAI 兼容端点，默认 `127.0.0.1:8794`）\| `WeatherMock`（写死回答，**必须显式配置才启用**）；`TtsEngine` = `HttpTts`（`services/tts` 边车）\| `SayTts`（macOS `say` 兜底）；`AudioTransport`/`CurlAudio`（**二进制 POST，不能走 String**）；`validate_wav`（**HTTP 200 但不是 WAV 一律拒绝**）；`play_blocking`（`afplay` 子进程，可打断）；`strip_thinking`（兜掉 ` thinking` 段） |
+| `src/session.rs`（新，462 行） | 通话会话状态机，**ADR-0007 §4.4 选 A 的落地**。相 `Idle/Listening/Thinking/Speaking/Failed`；`begin_turn`/`finish_listening`/`turn_ready`/`speaking_done`/`barge_in`/`set_lang`/`fail`/`hang_up`/`turn_elapsed`。**语言可在通话中随时切，但 Thinking 相拒绝**（理由写在文档注释里）；**空转写不记轮次**；**LLM 失败时转写照样记一轮**（`reply: None`） |
+| `src/config.rs` | 新增通话配置，**全部默认关或指向本机默认端口**：`talk_enabled`(false)、`talk_lang`(zh)、`talk_llm_engine`("openai_compat")、`talk_llm_url`(None→8794)、`talk_tts_engine`("http")、`tts_url`(None→8765)、`talk_timeout_secs`(60)、`talk_city`("清迈")、`talk_weather_note`(None)，另有 `Config::weather_fact()` |
+| `src/main.rs` | 新增 `--ask <文字>`（文字→LLM→TTS→播放，跳过 ASR）与 `--say <文字>`（只测 TTS）；守护进程录音键路径两处改动——**按键先 `talk::stop_playback()` 掐掉正在播的回答再开麦克风（V1 的打断入口）**，以及转写/上屏/知识库都走完之后，若 `talk_enabled` 则 `answer_out_loud()` 把回答念出来（**失败只记日志，不挡上屏**） |
+| `services/tts/backends.py`（新） | `SayBackend` + `VoxCpm2Backend`，**HTTP 契约一个字没改** |
+| `services/tts/server.py` | 新增 `--backend {voxcpm2,say}`（**默认 voxcpm2**）、`--model`、`--queue-wait`；`/health` 增加 backend/model/sample_rate/load_seconds；`/voices` 按后端返回 |
+| `scripts/*.sh`（新 4 个） | `setup-talk.sh`（下两个模型，**按需、不随包分发**）、`serve-talk-llm.sh`（`mlx_lm.server` + `--chat-template-args '{"enable_thinking": false}'`，端口 8794）、`serve-tts.sh`（用带 mlx-audio 的 venv 起 `server.py`）、`talk-e2e.sh`（端到端验收） |
+
+### 测了什么
+
+> 明细在 [`docs/benchmarks-talk.md`](../benchmarks-talk.md)（**MLX 4bit 路径**，2026-09-14，
+> 主线程落地）。⚠️ 它与 [`docs/benchmarks-m3.md`](../benchmarks-m3.md)（**speech-swift 的 bf16 路径**）
+> **不是同一条路径**：数字不能互相引用，**连「4bit 更省内存」都不成立**——
+> 2.5 GB 是 Python + MLX 进程峰值，1.54 GiB 是 speech-swift 进程峰值，**口径不同**。
+
+- `cargo test` **238 / 0 / 5 ignored**；`cargo test session_state` **10 条全绿**，
+  含验收点名的「通话中切语言」「打断后恢复行为一致」。Python 侧 **34 passed**。
+- 三语端到端（`scripts/talk-e2e.sh`）：**中文、英文、泰语三条都跑通**，
+  ASR 逐字正确，回答分别得到中文 / 英文 / 纯泰语语音。
+- **回环验证「说的确实是目标语言」**：zh 合成音频送 SenseVoice 得回
+  「今天青迈天气还不错，最高32度。」；泰语合成音频送 whisper(th) 得回
+  「วันอีกที่เชียงใหม่อากาศดีอุณหภูมิ 32 องศา」。
+- 时延与内存（M1 Max / 64 GB）：
+  **VoxCPM2-4bit**（`mlx-community/VoxCPM2-4bit`）48 kHz 单声道 16bit、
+  模型加载 0.86s、HTTP 端到端一句 **2.6–3.9s**、进程峰值 RSS 约 2.5 GB；
+  **MiniCPM5-2B-4bit**（`mlx-community/MiniCPM5-2B-mlx-4Bit`）加载后常驻峰值 1.59 GB、
+  单句 0.66–0.85s，关掉 thinking 后不再吐推理段。
+  **一次完整轮次（不含 ASR）**：LLM 0.66–0.85s + TTS 合成 2.6–5.1s + 播放按音频长度。
+
+### 还欠什么（**别把这些读成已完成**）
+
+1. **没有产品入口。** 通话只有 CLI（`--ask`/`--say`）和脚本；守护进程那条路要显式开
+   `talk_enabled`，而且**没有起/停一次通话的界面**，也没接 AEC 会话。
+2. **AEC 那一格仍然没解决。** T3.4.0 实测 VPIO 内容级 0/5、**事件级仍 5/5**（残留单字）。
+   本轮的解法是**推键式**（按键即打断、播放前先掐），**没有做 VAD 自动打断，也没有做双讲**。
+   → **「自触发率 = 0」「端到端打断延迟 <300 ms」「误打断 < 1 次 / 10 分钟」三条出口判据全部仍未验收。**
+3. **持久化策略还是老的。** ADR-0007 §4.5 要求通话走 `StreamCheckpointPolicy`（有界丢失），
+   本轮**没有实现**——通话沿用既有的快捷键录音落盘路径（`BatchCommitPolicy`）。
+4. **4bit 与 bf16 的质量对比没做。** 只测了 4bit 能跑、时延与内存。
+   ⚠️ `benchmarks-m3.md` 里那批 VoxCPM2 数据是 **speech-swift 的 bf16 路径**，
+   与本次的 **MLX 4bit 路径不是同一个运行时，不要混着引用**。
+5. **泰语在 LLM 的能力边界外。** MiniCPM5-2B 模型卡只声明 en/zh：实测能听懂泰语问句、
+   也能产出泰语，但**提示词不钉死语言时它会用中文回答**；钉死这次得到了纯泰语。
+   **不要把泰语质量写成与中英同级。**
+6. **人耳验收还没做。** 音色、情感、方言仍然要 jason 听（Q3 未结，见下）。
+
+### 本轮追加（同日，推键式链路收口）
+
+- **`--talk-turn <wav> [--lang]`**：完整一轮（ASR → 会话状态机 → LLM → TTS → 播放），
+  **跑的是守护进程同一个 `answer_out_loud`**。加它的理由是：守护进程那一轮的入口是
+  录音键，按键 / 麦克风权限 / TCC 都没法无人值守复现，没有它「推键式链路真的通」
+  只能靠人肉按一次键来证明。
+- ⚠️ **它当场抓出一个真 bug**：第一版漏了「等价于按下键」的 `begin_turn()`，
+  状态机把 `finish_listening` / `turn_ready` 全部按**非法转移**拒掉，
+  **而拒绝只写 warning**——统计打印的是自相矛盾的「0 轮」，链路却看起来完全正常。
+  已修，并把教训写进 `docs/benchmarks-talk.md` §4.3。
+- **打断机制本身有了用例**：`cargo test -- --ignored stop_playback`
+  （造 5s 正弦波，起播 → 600ms 后掐 → 断言播放 <4s 且幂等）。
+  标 `#[ignore]` 是因为它需要**能出声的环境**，不是因为它不可靠。
+  本机实测通过；仓库的 ignored 用例因此是 **6 条**（4 条要边车、1 条要联网、1 条要音频输出）。
+- **三语各跑一次完整一轮**：zh/en/th 的 ASR 都逐字正确、回答语言与 `--lang` 一致
+  （不再被 `config.talk_lang` 覆盖）、播放时长 4.05–5.05s、会话各记 1 轮。
+- `scripts/talk-e2e.sh` 的问句文件改成**带语言后缀**（`ask_<lang>.wav`）：
+  原来三语共用一个 `ask.wav`，后一次运行会覆盖前一次，拿泰语 wav 去跑 `--lang zh`
+  就得到乱码转写——实测踩到过一次（转出「When你 I got bin right。」）。
+
 ## 用户装上到底能用什么（这张表比 task 状态更重要）
 
 | 能力 | 状态 | 装上能用吗 |
@@ -33,9 +114,10 @@ ignored 的 5 条：**4 条要 LLM 边车**（3 条要边车在跑 + 1 条会真
 | M2 术语纠错 / 标签识别 | ✅ v0.4.0 | **能，但要自己起 LLM 边车**（7.8 GB，不随包分发） |
 | M2 知识库投递（`kb/**/*.md`） | ✅ v0.4.1 **默认开** | **能，零外部依赖** |
 | L2 全文检索（`--search`） | ✅ v0.4.2 | **能** |
+| **通话（说一句答一句，可按键打断）** | ✅ **v0.6.0** | **能，但要自己起两个边车 + 开 `talk_enabled`**；模型不随包分发 |
 | ASR 后端可切换（`--asr-backend speech_swift`） | ✅ v0.5.0 | **能，但要自己装 speech CLI**；默认仍是 builtin |
-| **M3 实时通话（打电话式、可打断）** | 只有 spike + 引擎层 | ❌ **还没有** |
-| TTS 说话 | **V1 HTTP 服务已在 main**（`services/tts/`，PR #41） | ⚠️ **能单独跑，但 Rust 侧没接** |
+| **M3 实时通话（打电话式、可打断）** | 通话链路已在工作区（**未发版**） | ⚠️ **能用命令行验**（`--ask` / `--say` / `scripts/talk-e2e.sh`）；**产品入口还没有**，守护进程要显式开 `talk_enabled` |
+| TTS 说话 | **Rust 侧本轮已接**（`HttpTts` / `SayTts`） | ⚠️ **默认关**；VoxCPM2 要自己起 TTS 边车（不随包分发），`say` 兜底零依赖 |
 
 **措辞纪律**：不启用理解层时，只有**明说了标签**的中英文句子会进知识库
 （`label::explicit_only`，纯本地字符串匹配，**没有泰语**）。
@@ -53,11 +135,20 @@ T3.4.0 可行性 spike  ✅ 跑完   **判定：不通过**（四条阈值 1 PAS
    ↓
 T3.4.1 引擎适配层    ✅ DONE   PR #44 → v0.5.0，src/engine.rs
    ↓
-T3.4.2 通话会话层    ▶ READY  ← 下一个该做的，也是整个 M3 的重心
+T3.4.2 通话会话层    ▶ IN_PROGRESS（2026-09-14）
+                              ✅ 已落地：选 A 自主编排 → src/session.rs；
+                                 LLM/TTS 引擎适配 → src/talk.rs；推键式打断
+                              ❌ 未收：AEC 事件级、VAD 自动打断、
+                                 端到端打断 <300ms、误打断率、
+                                 StreamCheckpointPolicy、通话入口 UI
    ↓
-T3.4.3 mock LLM（查天气）      BLOCKED（等 T3.4.2）
-T3.4.4 serve / mcp 集成接口    BLOCKED（等 T3.4.2）
+T3.4.3 mock LLM（查天气）      ✅ DONE（2026-09-14，三语端到端跑通）
+T3.4.4 serve / mcp 集成接口    BLOCKED（等 T3.4.2 收口）
 ```
+
+⚠️ **T3.4.2 的 `IN_PROGRESS` 不表示出口判据过了。** 三条出口判据
+（**自触发率 = 0 / 端到端打断延迟 <300 ms / 误打断 <1 次每 10 分钟**）**本轮一条都没测**。
+推键式打断只解决了「用户主动按键时能立刻插话」,**不等于**VAD 自动打断。
 
 **T3.4.0 的四条阈值实测（benchmarks-m3.md §7）**：
 
@@ -76,22 +167,31 @@ T3.4.4 serve / mcp 集成接口    BLOCKED（等 T3.4.2）
 
 ## 下一步（按优先级）
 
-1. **T3.4.2 通话会话层** —— M3 的重心。⚠️ **但它不是唯一的门**：M3 要能发，
-   还得有 **TTS 的 Rust 集成**、T3.4.3 mock LLM、T3.4.4 集成接口。
-   ✅ **TTS 的 V1 HTTP 服务已经合进 main 了**（`services/tts/`，PR #41，2026-09-09）：
-   `POST /speak {text,lang}` → `audio/wav`，中英泰三语走 macOS `say`，
-   带 `/health` 与 `/voices`，16 条测试。
-   **但 `services/tts/ACCEPTANCE.md` 开头明写「No Rust integration performed」** ——
-   守护进程一行都没调它，所以 T3.3.1 仍是 `ASSIGNED`（理由见 `tasks.md`）。
-   开工第一件事是还两笔债：
-   ADR-0007 §4.4 的**编排职责二选一**（ADR 倾向 A 自主编排，但明写了不能默认已定），
-   和 T3.4.0 留下的 **AEC 事件级自触发**（最小语音时长 + 能量门限 + 播放期 gating）。
+1. **T3.4.2 通话会话层收口** —— M3 的重心，本轮把「编排」那一半做完了，剩下的是硬的：
+   ① **AEC 事件级自触发**（T3.4.0 的卡点：内容级 0/5、**事件级 5/5** 残留单字），
+   本轮只绕开了它（推键式），**没有解决它**；
+   ② **三条出口判据**实测到「自触发率 = 0 / 端到端打断 <300 ms / 误打断 <1 次每 10 分钟」，
+   **外放与耳机两组都要测**；
+   ③ ADR-0007 §4.5 的 `StreamCheckpointPolicy`（有界丢失）—— 本轮通话**还在用老的落盘路径**；
+   ④ 起/停一次通话的产品入口。
+   ✅ 先还掉的两笔债里，**ADR-0007 §4.4 的编排职责二选一已经拍定并落地（选 A 自主编排）**，
+   这条不用再开。
 2. **T3.2.1 泰语 code-switch initial prompt** —— 约 10 行，与 M3 无依赖，
    夹英文 CER 31.1%→18.4%。**落地要截到 40 词**：20/30/40 词三格收益可复现（纯泰语 CER 都是 2.2%），
    54–70 词与基线区分不开且不单调（4.2% / 3.1%），85 词 6.6%，100 词纯泰语崩到 22.2%。
    ⚠️ **40 是护栏建议，不是测出来的拐点**——RESULTS.md 明说劣化起点定位不了。
 3. **T3.5.1 中文/英文 ASR 横比** —— 「换默认 ASR 引擎」拍板的前置，没有它 jason 无法决策。
 4. T3.5.3 逐组件许可证表 —— 未确认许可的组件不得进默认方案（VoiceChat 11B 就是仅研究用途）。
+5. **T3.5.4 TTS 人耳验收** —— 本轮只是让链路出声，**音色 / 情感 / 方言一个字都没评**。
+
+### 本轮欠着的一条「环境无效」警告
+
+⚠️ **whisper 泰语的时延数字在本 sandbox 里无效。** 实测每次调用约 **19.9s**，
+而 `docs/data/thai-coldstart-raw.txt` 记的是 **0.96s**；CPU-only（`-ng`）是 5.9s。
+差异来自 **Metal 着色器缓存写不进去**（sandbox 禁止写仓库外），不是模型变慢。
+→ **任何在这个环境里测出的 whisper / Metal 时延都不可引用**，
+要么在正常 Terminal 里复测，要么明确标注为环境无效。
+本次报的 LLM / TTS 时延走的是 MLX（`mlx_lm.server` / `mlx-audio`），不受这条影响。
 
 ## 待 jason 拍板 / 需要人
 
@@ -99,16 +199,26 @@ T3.4.4 serve / mcp 集成接口    BLOCKED（等 T3.4.2）
 |---|---|---|---|
 | **Q3** | `~/Desktop/agentear-tts-samples/` 的样本是真方言还是普通话念汉字？ | ADR-0005 全部结论、T3.5.4 | **需要人耳**，我播不了音频 |
 | **Q4** | 要不要把默认 ASR 换成 Qwen3-ASR？ | ADR-0001 / ADR-0007 §5 | 影响全部语种，**要等 T3.5.1 的中英横比**才谈得上 |
+| **Q5** | **V1 的打断入口就按「推键式」定，还是要补 VAD 自动打断 / 双讲？** | T3.4.2 收口、M3 能不能发 | 本轮**按推键式实现**（按键先掐播放再开麦），**没有 VAD 自动打断**。T3.4.0 的应急预案写的就是「退回强制耳机或按住说话，**必须 jason 拍板**」——现在事实上走到了这一格的半步，**要 jason 确认这是 V1 的出口形态**，还是要继续投 AEC |
 | Q1 | 「今天开会讨论了传输协议」判 note 还是 journal？ | 标签定义权威性 | 实现按 journal 做了，标为临时决策 |
 | Q2 | 若闽南语 TTS 确实没方案，M3 怎么走 | T3.1.3 | ADR-0005 已按两种情形写好，等 Q3 |
 
 ## 环境前置
 
 ```bash
-scripts/setup-llm.sh          # 首次：装环境 + 拉 7.8 GB 模型
+scripts/setup-llm.sh          # 首次：装环境 + 拉 7.8 GB 模型（M2 理解层）
 scripts/serve-llm.sh          # 每次：起服务，默认 127.0.0.1:8793
 ./target/release/agentear --diagnose | tail -6   # 确认「✅ 服务」
+
+# 通话链路（M3）：另两个边车，端口不同，互不干扰
+scripts/setup-talk.sh         # 首次：下 MiniCPM5-2B-4bit + VoxCPM2-4bit（不随包分发）
+scripts/serve-talk-llm.sh     # LLM，默认 127.0.0.1:8794
+scripts/serve-tts.sh          # TTS，默认 127.0.0.1:8765
+./target/release/agentear --say "你好"        # 不碰麦克风验 TTS
+./target/release/agentear --ask "今天天气怎么样"  # 不碰麦克风验 LLM + TTS
 ```
+
+⚠️ **端口 8794 而不是 8793**：8793 是 M2 理解层那个 9B 边车的，两个可以同时起。
 
 ⚠️ 边车没起时，`cargo test --release -- --ignored` 的集成测试会失败——
 **那是环境问题不是代码问题**，先查这一条再怀疑实现。
@@ -131,6 +241,19 @@ scripts/serve-llm.sh          # 每次：起服务，默认 127.0.0.1:8793
    但根治要 T3.4.5（改用 clap）。
 8. **spike 的对照组必须能证伪自己**：T3.4.0 第一批三轮 AEC 数据
    因扬声器被静音而全部作废，重测才加了「对照组必须复现 TTS 内容」的守卫。
+9. **MLX stream 是线程局部的**（2026-09-14 踩到，症状最容易被误诊）：
+   在一个线程加载权重、在 HTTP 工作线程里推理**不抛 Python 异常，直接 SIGABRT**——
+   `libc++abi: terminating ... There is no Stream(cpu, 1) in current thread.`。
+   崩点在**惰性数组第一次被求值**（`np.asarray`）那一刻；只读 `.shape` / `.size`
+   **不会求值**，所以探针会「通过」而 bug 还在（第一版探针就是这样）。
+   修法：**load + generate + numpy 转换全放同一条专用线程**，HTTP 工作线程走队列投递。
+10. **音频不能用 String 走 curl**。`talk.rs` 专门抽了 `AudioTransport`：
+   WAV 里有 `\0` 和非 UTF-8 字节，走文本通道会在第一处就断掉。
+11. **「HTTP 200」不等于「拿到了音频」**。`validate_wav` 会拒掉所有不是 WAV 的响应——
+   边车返回一段 HTML 错误页时，播放器原来会把它当音频播（或者更糟，静默无声）。
+12. **`--transcribe --lang` 只认 `th` / `auto`**：传 `zh` 会被参数解析拒绝（实测 exit 1）。
+   中英走 SenseVoice 默认路径，本来也不需要这个参数。`scripts/talk-e2e.sh`
+   按语言决定加不加 `--lang` 就是为它让路。
 
 ## 变更日志
 
@@ -141,3 +264,9 @@ scripts/serve-llm.sh          # 每次：起服务，默认 127.0.0.1:8793
 - 2026-09-08 ADR-0007 定稿草案；T3.4.0 可行性 spike；T3.4.1 引擎适配层 → **v0.5.0**
 - 2026-09-09 **PR #41 合入 Arm 的 TTS V1 HTTP 服务**（`services/tts/`，macOS `say`，中英泰）
 - 2026-09-09 补记本文与 tasks.md（漏记了 4 个版本）；清理 9 分支 + 5 worktree
+- 2026-09-14 **实时对话链路跑通**（未提交、未发版）：`src/talk.rs` + `src/session.rs` +
+  TTS 边车 VoxCPM2-4bit 后端 + 4 个脚本；**ADR-0007 §4.4 拍定选 A（自主编排）落地**；
+  三语端到端与回环验证通过；`cargo test` 219→**238**，TTS 侧单测 16→**34**
+- 2026-09-14 把规划文档同步到本轮实况：`CLAUDE.md` / `README.md` / 本文 /
+  `tasks.md` / `roadmap.md` / ADR-0005（顶部状态）/ ADR-0007（§4、§6 回填，
+  §4.4 标明选 A 已落地）
