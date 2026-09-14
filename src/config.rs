@@ -238,6 +238,25 @@ pub struct Config {
     /// 或 `say`（零依赖兜底）。
     #[serde(deserialize_with = "lenient")]
     pub talk_tts_engine: String,
+    /// 对话模式的两个边车没在跑时，要不要**尝试按配置的命令拉起来**。
+    ///
+    /// **默认 true**，但它只是兜底——正常路径永远是「按 URL 去连」
+    /// （ADR-0002 §8：连接优先、拉起兜底）。
+    #[serde(deserialize_with = "lenient")]
+    pub talk_autostart: bool,
+    /// 拉起 LLM 边车的命令，argv 形式（第一项是程序）。
+    ///
+    /// **默认空** = 「不知道怎么拉，只连不拉」。理由和 `llm_start_command`
+    /// 一模一样：**不能写死编译期路径**——那是开发机上的仓库路径，
+    /// 分发到别人机器上指向一个不存在的目录，而且一旦被写进用户的
+    /// config.json 就固化下来了。
+    ///
+    /// 空的时候**日志里会打出该跑哪条命令**，不会静默。
+    #[serde(deserialize_with = "lenient")]
+    pub talk_llm_start_command: Vec<String>,
+    /// 拉起 TTS 边车的命令。语义同上。
+    #[serde(deserialize_with = "lenient")]
+    pub talk_tts_start_command: Vec<String>,
     /// TTS 边车地址。留空 = `http://127.0.0.1:8765`。
     ///
     /// 端口写死在这里而不是从边车读：`sidecar.rs` 记过那个教训——
@@ -378,6 +397,9 @@ impl Default for Config {
             talk_llm_engine: default_talk_llm_engine(),
             talk_llm_url: None,
             talk_tts_engine: default_talk_tts_engine(),
+            talk_autostart: default_autostart(),
+            talk_llm_start_command: Vec::new(),
+            talk_tts_start_command: Vec::new(),
             tts_url: None,
             talk_timeout_secs: default_talk_timeout_secs(),
             talk_city: default_talk_city(),

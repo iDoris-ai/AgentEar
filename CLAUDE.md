@@ -2,7 +2,7 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-## 当前状态：**v0.7.0 —— 输入法/对话双模式**；M1/M2 已发布；**M3 通话链路已跑通，AEC / 自动打断未做**
+## 当前状态：**v0.7.1 —— 双模式 + 边车自动拉起**；M1/M2 已发布；**M3 通话链路已跑通，AEC / 自动打断未做**
 
 M1 完成；**知识库投递 + 全文检索默认开（v0.4.2）**；M2 理解层已发布（v0.4.0）但默认关；
 **v0.6.0 加了通话链路（说一句答一句、可按键打断）**，**v0.5.0 加了可切换的 ASR 后端**（`--asr-backend` / `config.json` 的 `asr_backend`，
@@ -28,10 +28,19 @@ M1 完成；**知识库投递 + 全文检索默认开（v0.4.2）**；M2 理解�
   （菜单显示输入法、行为却是对话，属于最难查的一类 bug）。
 - 两种模式的**前半段完全相同**（录音/落盘/转写/上屏），只有后半段要不要出声不同。
   所以走错模式**只会让这一轮没声音，不会丢转写**。
-- 对话模式仍要自己起两个边车（都**不随包分发**）：
-  `scripts/serve-talk-llm.sh` + `scripts/serve-tts.sh`。
-  从菜单切进对话模式时**会先探一次边车并把「谁没起」写进日志**——
-  那两个进程在别的进程里，光看菜单看不出来。
+- **对话模式的两个边车：连接优先、拉起兜底**（ADR-0002 §8 的老规矩，v0.7.1 补齐）。
+  启动（对话模式）或从菜单切进对话模式时，`talk::ensure_sidecars_async` 在**后台线程**里
+  逐个探活；没起就按 `talk_llm_start_command` / `talk_tts_start_command` 拉起，
+  再等就绪（最长 90s）。
+  ⚠️ **必须异步**：就绪等待放主线程上，菜单栏会整整一分半不响应，而用户此刻正在按键。
+  - **拉起命令默认是空的**（= 不知道怎么拉，只连不拉）。理由和 `llm_start_command`
+    一模一样：**不能写死编译期路径**——那是开发机的仓库路径，分发出去指向不存在的目录，
+    而且一旦写进用户 config.json 就固化了。空的时候**日志里会打出该跑哪条命令**，不静默。
+  - **退出时必须收掉我们拉起的那些**：菜单 Quit 走 `talk::shutdown_spawned()`，
+    **信号路径（Ctrl+C / kill）走 `sidecar::on_signal` 里新增的
+    `talk::kill_spawned_pids_from_signal()`**——只做 `kill(2)`，符合 async-signal-safe。
+    漏了信号那条路会留下两个常驻约 4 GB 的进程（实测 2026-09-14：修好后 SIGTERM 能收干净）。
+  - **只收自己拉起的**：用户手工跑的进程一律不动（`sidecar.rs` 定的规矩）。
 
 - **`src/talk.rs` = 通话引擎适配层**（ADR-0007 §4 的 R0）。
   `TalkLang{zh,en,th}`；`LlmEngine` 两个实现——`OpenAiCompat`（任何 OpenAI 兼容端点，

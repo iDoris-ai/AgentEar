@@ -526,6 +526,9 @@ fn main() -> Result<()> {
     );
     if cfg.talk_mode == config::TalkMode::Conversation {
         open_session(cfg.talk_lang);
+        // **连接优先、拉起兜底**（ADR-0002 §8）。异步做：就绪等待最长 90 秒，
+        // 卡在启动路径上等于菜单栏一分半不出来。
+        talk::ensure_sidecars_async(&cfg);
         let engines = talk::Engines::from_config(&cfg);
         log::info!(
             "对话模式：LLM {} @ {}，TTS {} @ {}，语言 {}",
@@ -573,6 +576,8 @@ fn main() -> Result<()> {
             log::error!("工作线程退出: {e:#}");
             // 这条路径也要收拾边车，否则它会活过 AgentEar
             sidecar::shutdown();
+    talk::shutdown_spawned();
+            talk::shutdown_spawned();
             std::process::exit(1);
         }
     });
@@ -1057,6 +1062,7 @@ pub fn restart_self() {
     // 重启也是一条退出路径：不收拾的话，重启后的新实例会发现端口被
     // 「上一个自己拉起的边车」占着，而那个进程已经没人管了。
     sidecar::shutdown();
+    talk::shutdown_spawned();
 
     let target = format!("gui/{}/{}", unsafe { libc::getuid() }, LAUNCHD_LABEL);
     let managed = std::process::Command::new("/bin/launchctl")

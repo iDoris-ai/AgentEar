@@ -342,7 +342,7 @@ agentear --asr-backend speech_swift --transcribe x.wav
 「用户显式启用 + 不随包分发 + 峰值实测入库」的可选后端开放。
 **没切的话内存占用和 v0.4.2 完全一样。**
 
-## 实时通话(M3,**未发版**)
+## 实时通话(M3,v0.6.0 起)
 
 > **两种模式,默认输入法**(v0.7.0 起):**菜单栏 → 模式** 里选「输入法模式」或「对话模式」,
 > 点一下立刻生效,不用重启。输入法模式就是 M1 以来的行为(只上屏、不出声);
@@ -354,10 +354,25 @@ agentear --asr-backend speech_swift --transcribe x.wav
 
 ### 怎么跑
 
-两个边车都要单独起,**都不随包分发**:
+模型**不随包分发**,首次要下一次:
 
 ```bash
-scripts/setup-talk.sh        # 首次:下 MiniCPM5-2B-4bit(LLM)与 VoxCPM2-4bit(TTS)
+scripts/setup-talk.sh        # 下 MiniCPM5-2B-4bit(LLM)与 VoxCPM2-4bit(TTS),约 3.5 GB
+```
+
+**两个边车不用自己起**(v0.7.1 起):切到对话模式时,AgentEar **先连、连不上就按配置拉起**,
+再等就绪。想让它自动拉,把两条命令填进配置:
+
+```json
+{
+  "talk_llm_start_command": ["/你的路径/AgentEar/scripts/serve-talk-llm.sh"],
+  "talk_tts_start_command": ["/你的路径/AgentEar/scripts/serve-tts.sh"]
+}
+```
+
+不填(=默认)就是**只连不拉**,日志里会告诉你该跑哪条命令。需要单独调试时也可以自己起:
+
+```bash
 scripts/serve-talk-llm.sh    # LLM 边车,默认 127.0.0.1:8794
 scripts/serve-tts.sh         # TTS 边车,默认 127.0.0.1:8765
 
@@ -375,7 +390,8 @@ scripts/talk-e2e.sh --text '今天天气怎么样' --lang zh
 { "talk_mode": "conversation", "talk_lang": "zh" }
 ```
 
-配置项:`talk_mode`(默认 `input_method`)、`talk_lang`(zh)、`talk_llm_engine`(`openai_compat` / `mock`)、
+配置项:`talk_mode`(默认 `input_method`)、`talk_autostart`(默认 true)、
+`talk_llm_start_command` / `talk_tts_start_command`(默认空 = 只连不拉)、`talk_lang`(zh)、`talk_llm_engine`(`openai_compat` / `mock`)、
 `talk_llm_url`、`talk_tts_engine`(`http` / `say`)、`tts_url`、`talk_timeout_secs`(60)、
 `talk_city`、`talk_weather_note`。**默认输入法模式,不切对话模式的话行为与 v0.5.0 完全一样。**
 (v0.6.0 的旧字段 `talk_enabled: true` 会自动迁移成 `talk_mode: "conversation"`。)
