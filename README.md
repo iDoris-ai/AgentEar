@@ -344,8 +344,9 @@ agentear --asr-backend speech_swift --transcribe x.wav
 
 ## 实时通话(M3,**未发版**)
 
-> ⚠️ **这段代码还没有产品入口,也没有随任何版本发布。** 现在能用的形态是两个命令行入口
-> 和一条端到端验收脚本;守护进程要显式打开 `talk_enabled` 才会把回答念出来。
+> **两种模式,默认输入法**(v0.7.0 起):**菜单栏 → 模式** 里选「输入法模式」或「对话模式」,
+> 点一下立刻生效,不用重启。输入法模式就是 M1 以来的行为(只上屏、不出声);
+> 对话模式在上屏之后把回答念出来。想离线验后半段,还有两个命令行入口和一条端到端脚本。
 > 方案见 [ADR-0007](docs/decisions/0007-realtime-voice-architecture.md)。
 
 说一句 → 本机转写 → 交给本地 LLM → 用语音回答。**链路已经跑通**(中/英/泰三语都实测过),
@@ -371,12 +372,13 @@ scripts/talk-e2e.sh --text '今天天气怎么样' --lang zh
 要按录音键的那条路也把回答念出来,在 `~/.agentear/config.json` 里加一行:
 
 ```json
-{ "talk_enabled": true, "talk_lang": "zh" }
+{ "talk_mode": "conversation", "talk_lang": "zh" }
 ```
 
-配置项:`talk_enabled`(默认 false)、`talk_lang`(zh)、`talk_llm_engine`(`openai_compat` / `mock`)、
+配置项:`talk_mode`(默认 `input_method`)、`talk_lang`(zh)、`talk_llm_engine`(`openai_compat` / `mock`)、
 `talk_llm_url`、`talk_tts_engine`(`http` / `say`)、`tts_url`、`talk_timeout_secs`(60)、
-`talk_city`、`talk_weather_note`。**默认全关,不开 `talk_enabled` 的话行为与 v0.5.0 完全一样。**
+`talk_city`、`talk_weather_note`。**默认输入法模式,不切对话模式的话行为与 v0.5.0 完全一样。**
+(v0.6.0 的旧字段 `talk_enabled: true` 会自动迁移成 `talk_mode: "conversation"`。)
 
 **换 LLM 只改 `talk_llm_url`**:Rust 侧只发一条 OpenAI 兼容的 `POST /v1/chat/completions`,
 对面是 2B 还是 9B 它不关心。`talk_llm_engine: "mock"` 是一个写死回答的零依赖实现,

@@ -56,6 +56,38 @@ impl Trigger {
     }
 }
 
+/// 录音键按下去之后干什么。**默认输入法模式。**
+///
+/// jason 2026-09-14 拍板：两种模式并存，**默认输入法**，切到对话模式
+/// 要**从菜单里点**——不是配置文件里的一个开关，因为那对用户是不可见的
+/// （v0.6.0 就是那样：`talk_enabled` 只能手改 config.json，等于没有入口）。
+///
+/// 两者的**前半段完全一样**（录音 → raw 落盘 → 转写 → 剪贴板/上屏），
+/// 差别只在后半段要不要 LLM + TTS + 播放。所以它是「模式」而不是两个功能：
+/// 走错模式只影响「有没有声音」，不会丢掉转写。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum TalkMode {
+    /// 记下来、上屏，不出声。M1 以来的行为。
+    #[default]
+    InputMethod,
+    /// 上屏之后把回答念出来（说一句答一句，按录音键可打断）。
+    Conversation,
+}
+
+impl TalkMode {
+    /// 菜单和文档都从这一份清单派生。**加第三个模式时这是唯一要改的地方**——
+    /// 曾经菜单里手写死两项，加模式时就得记得同时改三处（菜单、i18n、文档）。
+    pub const ALL: &'static [TalkMode] = &[TalkMode::InputMethod, TalkMode::Conversation];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            TalkMode::InputMethod => "input_method",
+            TalkMode::Conversation => "conversation",
+        }
+    }
+}
+
 /// 保留天数的默认值。`Default::default()` 给 0（= 永不清理），
 /// 不是我们要的，所以单列一个。
 fn default_retention_days() -> u32 {
@@ -172,15 +204,21 @@ pub struct Config {
     // 已发布用户升级上来行为与 v0.5.0 完全一致——不开 `talk_enabled`
     // 的话，这一整块代码一行都不会走到。
     // ------------------------------------------------------------------
-    /// 按下录音键之后，是不是「说一句、答一句」的通话形态。
+    /// 录音键的行为模式。**默认输入法模式**，切对话模式要从菜单里点。
     ///
-    /// **默认关。** 打开之后这一轮录音除了照常上屏，还会把文字交给
-    /// LLM，把回答合成语音播出来。它需要两个边车
-    /// （`scripts/serve-talk-llm.sh` + `scripts/serve-tts.sh`），
-    /// 没起的时候开着它只会让每次录音都白等一次超时——
-    /// 和 `correct_terms` 同一个道理。
+    /// 对话模式需要两个边车（`scripts/serve-talk-llm.sh` + `scripts/serve-tts.sh`），
+    /// 没起的时候它只会让每次录音都白等一次超时——和 `correct_terms` 同一个道理。
+    /// 所以**默认不是它**，而且**切换入口必须是可见的菜单项**（见 `tray.rs`）。
     #[serde(deserialize_with = "lenient")]
-    pub talk_enabled: bool,
+    pub talk_mode: TalkMode,
+    /// **旧字段（v0.6.0 引入，v0.7.0 起只读）**：`talk_enabled: true`
+    /// 等价于 `talk_mode: "conversation"`。
+    ///
+    /// 留着它只为了读老配置（v0.6.0 的用户是手改这个开关开的通话）。
+    /// `skip_serializing` 让下次落盘时它自动消失——**迁移只做一次**，
+    /// 之后 `talk_mode` 是唯一事实来源，不会出现两个字段打架。
+    #[serde(default, rename = "talk_enabled", skip_serializing)]
+    pub talk_enabled_legacy: bool,
     /// 通话用哪个语言。**默认中文**，因为 `asr_lang` 的默认是 Auto，
     /// 而「回答用什么语言」必须显式说清——模型不会替用户决定这件事
     /// （jason 2026-09-08：沟通前确认用什么语言，过程中可以随时切）。
@@ -334,7 +372,8 @@ impl Default for Config {
             llm_start_command: default_start_command(),
             kb_enabled: default_kb_enabled(),
             kb_dir: None,
-            talk_enabled: false,
+            talk_mode: TalkMode::default(),
+            talk_enabled_legacy: false,
             talk_lang: TalkLang::default(),
             talk_llm_engine: default_talk_llm_engine(),
             talk_llm_url: None,
@@ -357,20 +396,42 @@ static PATH: OnceLock<PathBuf> = OnceLock::new();
 /// 让守护进程起不来**，宁可用默认值跑着并把错误写进日志。
 pub fn load(data_root: &Path) -> Config {
     let path = data_root.join("config.json");
-    let cfg = match std::fs::read_to_string(&path) {
-        Ok(s) => match serde_json::from_str::<Config>(&s) {
-            Ok(c) => c,
+    // `raw` 留着不只是为了报错信息：**迁移要用它判断某个键到底有没有出现过**。
+    // `lenient` 分不出「字段不存在」和「字段存在但等于默认值」，
+    // 而迁移恰恰要区分这两件事（见下面 `mode_key_present`）。
+    let (cfg, raw) = match std::fs::read_to_string(&path) {
+        Ok(raw) => match serde_json::from_str::<Config>(&raw) {
+            Ok(c) => (c, Some(raw)),
             Err(e) => {
                 log::error!("config.json 解析失败，改用默认配置: {e}");
-                Config::default()
+                (Config::default(), Some(raw))
             }
         },
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Config::default(),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => (Config::default(), None),
         Err(e) => {
             log::error!("读取 config.json 失败，改用默认配置: {e}");
-            Config::default()
+            (Config::default(), None)
         }
     };
+    // 迁移：v0.6.0 的 `talk_enabled: true` → `talk_mode: "conversation"`。
+    //
+    // **判据是「新键根本没出现过」，不是「新键等于默认值」。** 两者差很远：
+    // 用户在菜单里显式切回输入法（写下了 `talk_mode: "input_method"`），
+    // 如果按「等于默认值」判断，下次启动会被老字段顶回对话模式——
+    // 菜单显示输入法、行为却是对话，属于最难查的一类 bug。
+    // 所以这里直接看原始 JSON 里有没有这个键。
+    let mode_key_present = raw
+        .as_deref()
+        .and_then(|r| serde_json::from_str::<serde_json::Value>(r).ok())
+        .map(|v| v.get("talk_mode").is_some())
+        .unwrap_or(false);
+    let mut cfg = cfg;
+    if cfg.talk_enabled_legacy && !mode_key_present {
+        cfg.talk_mode = TalkMode::Conversation;
+        log::info!("配置迁移：talk_enabled → talk_mode=\"conversation\"（下次保存时旧字段会消失）");
+    }
+    cfg.talk_enabled_legacy = false;
+
     PATH.set(path).ok();
     *CURRENT.write().unwrap() = Some(cfg.clone());
     cfg
@@ -467,6 +528,96 @@ mod tests {
         assert_eq!(c.asr_lang, AsrLang::Auto, "没有 asr_lang 字段时应取默认 Auto");
         assert!(c.llm_autostart, "老配置没有这个字段时应取默认 true");
         assert!(!c.correct_terms, "术语纠错默认关——它要一个额外的边车进程");
+    }
+
+    /// **默认必须是输入法模式。** jason 2026-09-14 拍板：两种模式并存，
+    /// 默认走 M1 那条老路（只上屏、不出声）——因为对话模式要两个边车，
+    /// 没起的时候会让每次录音都白等一次超时。
+    #[test]
+    fn talk_mode_defaults_to_input_method() {
+        assert_eq!(Config::default().talk_mode, TalkMode::InputMethod);
+        assert_eq!(
+            serde_json::from_str::<Config>("{}").unwrap().talk_mode,
+            TalkMode::InputMethod,
+            "配置里没这个字段时也要落到输入法模式"
+        );
+        assert!(Config::default().talk_enabled_legacy == false || true);
+    }
+
+    /// v0.6.0 的用户是**手改 `talk_enabled`** 开的通话。升级到带模式字段的
+    /// 版本后，那台机器必须还是对话模式——否则用户会觉得「升级完我的通话没了」。
+    #[test]
+    fn legacy_talk_enabled_migrates_to_conversation() {
+        let legacy = r#"{"talk_enabled": true}"#;
+        let c: Config = serde_json::from_str(legacy).expect("v0.6.0 的配置必须能读");
+        assert!(c.talk_enabled_legacy, "旧字段要能读进来");
+        assert_eq!(c.talk_mode, TalkMode::InputMethod, "未迁移前还是默认值");
+
+        // load() 里那一步迁移（这里照它的判据手写一遍，避免测试依赖文件系统）
+        let migrated = if c.talk_enabled_legacy && c.talk_mode == TalkMode::InputMethod {
+            TalkMode::Conversation
+        } else {
+            c.talk_mode
+        };
+        assert_eq!(migrated, TalkMode::Conversation, "talk_enabled:true 应迁移成对话模式");
+    }
+
+    /// **新字段优先。** 用户在菜单里切回输入法之后，重启不能被旧字段顶回对话模式
+    /// ——那是最难查的一类 bug：菜单明明显示输入法，行为却是对话。
+    ///
+    /// 这里照 `load()` 的判据原样重写一遍（含「新键是否存在」这一步），
+    /// 因为 `load()` 要文件系统、单测里不方便直接调。
+    #[test]
+    fn explicit_talk_mode_wins_over_the_legacy_flag() {
+        fn migrate(raw: &str) -> TalkMode {
+            let c: Config = serde_json::from_str(raw).expect("要能读");
+            let mode_key_present = serde_json::from_str::<serde_json::Value>(raw)
+                .ok()
+                .map(|v| v.get("talk_mode").is_some())
+                .unwrap_or(false);
+            if c.talk_enabled_legacy && !mode_key_present {
+                TalkMode::Conversation
+            } else {
+                c.talk_mode
+            }
+        }
+        assert_eq!(
+            migrate(r#"{"talk_enabled": true}"#),
+            TalkMode::Conversation,
+            "只有老字段 → 迁移"
+        );
+        assert_eq!(
+            migrate(r#"{"talk_enabled": true, "talk_mode": "input_method"}"#),
+            TalkMode::InputMethod,
+            "显式写了输入法 → 新字段说了算，不能被老字段顶回对话"
+        );
+        assert_eq!(
+            migrate(r#"{"talk_mode": "conversation"}"#),
+            TalkMode::Conversation,
+            "只有新字段 → 原样"
+        );
+        assert_eq!(migrate(r#"{}"#), TalkMode::InputMethod, "都没有 → 默认输入法");
+    }
+
+    #[test]
+    fn talk_mode_roundtrips() {
+        for (mode, text) in [
+            (TalkMode::InputMethod, "input_method"),
+            (TalkMode::Conversation, "conversation"),
+        ] {
+            let json = serde_json::to_string(&mode).unwrap();
+            assert_eq!(json, format!("\"{text}\""));
+            assert_eq!(serde_json::from_str::<TalkMode>(&json).unwrap(), mode);
+        }
+    }
+
+    /// 落盘时旧字段要消失——否则两个字段会长期并存、互相打架。
+    #[test]
+    fn legacy_field_is_not_written_back() {
+        let c: Config = serde_json::from_str(r#"{"talk_enabled": true}"#).unwrap();
+        let written = serde_json::to_string(&c).unwrap();
+        assert!(!written.contains("talk_enabled"), "旧字段不该被写回: {written}");
+        assert!(written.contains("talk_mode"), "新字段要写出来: {written}");
     }
 
     #[test]

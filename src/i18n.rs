@@ -51,6 +51,11 @@ pub enum Key {
     Transcribing,
     /// 菜单栏标题里的「转写中」。**要比菜单里那条短**——菜单栏寸土寸金。
     TitleTranscribing,
+    /// 模式这一节：输入法 / 对话。**放在最上面**——它决定按一下键会发生什么，
+    /// 是这份菜单里唯一会改变「主行为」的开关。
+    ModeSection,
+    ModeInputMethod,
+    ModeConversation,
     TriggerSection,
     TriggerRightCommand,
     TriggerRightCommandNoPerm,
@@ -96,6 +101,20 @@ pub fn t(lang: Lang, key: Key) -> &'static str {
         K::StartRecording => pick(lang, "● Start Recording", "● 开始录音", "● เริ่มบันทึกเสียง"),
         K::Transcribing => pick(lang, "◌ Transcribing…", "◌ 转写中……", "◌ กำลังถอดความ…"),
         K::TitleTranscribing => pick(lang, "◌ ASR", "◌ 转写中", "◌ ถอดความ"),
+        K::ModeSection => pick(lang, "Mode", "模式", "โหมด"),
+        // 文案要说清**按一下键会发生什么**，而不是丢两个抽象名词给用户。
+        K::ModeInputMethod => pick(
+            lang,
+            "Type & paste (no voice)",
+            "输入法模式（只上屏，不出声）",
+            "โหมดพิมพ์ (ไม่พูด)",
+        ),
+        K::ModeConversation => pick(
+            lang,
+            "Conversation (answers out loud)",
+            "对话模式（说一句答一句）",
+            "โหมดสนทนา (ตอบด้วยเสียง)",
+        ),
         K::TriggerSection => pick(lang, "Trigger Key", "触发键", "ปุ่มลัด"),
         K::TriggerRightCommand => pick(
             lang,

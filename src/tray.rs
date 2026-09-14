@@ -94,6 +94,7 @@ const TAG_TRIGGER_BASE: isize = 100;
 const TAG_RETENTION_BASE: isize = 200;
 const TAG_UI_LANG_BASE: isize = 300;
 const TAG_ASR_LANG_BASE: isize = 400;
+const TAG_MODE_BASE: isize = 500;
 const TAG_CORRECT_TERMS: isize = 5;
 const TAG_OPEN_TERMS: isize = 6;
 const TAG_START_SIDECAR: isize = 7;
@@ -239,6 +240,25 @@ fn populate(menu: &NSMenu, mtm: MainThreadMarker, target: &MenuTarget) {
         false,
     ));
     menu.addItem(&NSMenuItem::separatorItem(mtm));
+
+    // —— 模式（输入法 / 对话）——
+    //
+    // **放在最上面、在触发键之前**：它决定「按一下键会发生什么」，
+    // 是这份菜单里唯一改变主行为的开关；触发键只决定「怎么按」。
+    //
+    // 两个选项都要能看见（radio 式勾选），不要做成一个「对话模式」开关——
+    // 单开关的失败形态是用户不知道自己现在**不在**哪个模式里。
+    let mode_item = item(mtm, target, i18n::t(lang, Key::ModeSection), -1, false);
+    mode_item.setEnabled(true);
+    submenu(
+        mtm,
+        &mode_item,
+        mode_menu_entries(lang, cfg.talk_mode)
+            .into_iter()
+            .map(|(title, tag, checked)| item(mtm, target, &title, tag, checked))
+            .collect(),
+    );
+    menu.addItem(&mode_item);
 
     // —— 触发键 ——
     let trigger_item = item(mtm, target, i18n::t(lang, Key::TriggerSection), -1, false);
@@ -458,7 +478,100 @@ fn populate(menu: &NSMenu, mtm: MainThreadMarker, target: &MenuTarget) {
     menu.addItem(&item(mtm, target, i18n::t(lang, Key::Quit), TAG_QUIT, false));
 }
 
+/// 切模式。**点一下立刻生效**，不需要重启，也不用等下一次录音。
+///
+/// 三件事都要做，缺一个都会留下不一致的状态：
+/// 1. 写配置（下次启动还是这个模式）
+/// 2. 离开对话模式时**掐掉正在播的回答**——否则会留下一段没人管的音频
+/// 3. 进对话模式时**先探一次边车**：不探的话用户按了键才发现没声音，
+///    而那两个边车跑在别的进程里，从菜单上根本看不出来
+fn set_talk_mode(mode: config::TalkMode) {
+    if config::get().talk_mode == mode {
+        return; // 点自己那一项不该有副作用（尤其别把正在播的掐了）
+    }
+    config::update(|c| c.talk_mode = mode);
+    // 日志里同时给人话和**配置值**：排障时要能一眼对上 config.json 里那个字符串。
+    log::info!("模式：{}（talk_mode = {}）", match mode {
+        config::TalkMode::InputMethod => "输入法（只上屏，不出声）",
+        config::TalkMode::Conversation => "对话（说一句答一句）",
+    }, mode.as_str());
+
+    match mode {
+        config::TalkMode::InputMethod => {
+            // 从对话切回输入法：正在播的回答要立刻停。
+            if crate::talk::stop_playback() {
+                log::info!("已切回输入法模式，掐掉正在播放的回答");
+            }
+        }
+        config::TalkMode::Conversation => {
+            let cfg = config::get();
+            let engines = crate::talk::Engines::from_config(&cfg);
+            let llm_url = cfg
+                .talk_llm_url
+                .clone()
+                .unwrap_or_else(|| crate::talk::DEFAULT_LLM_URL.to_string());
+            let tts_url = cfg
+                .tts_url
+                .clone()
+                .unwrap_or_else(|| crate::talk::DEFAULT_TTS_URL.to_string());
+            // 只报缺什么，不拦着用户切——他要切是他自己的选择。
+            if cfg.talk_llm_engine != "mock" {
+                if let Err(e) = crate::talk::probe_endpoint(&llm_url) {
+                    log::warn!("对话模式的 LLM 边车没起（{llm_url}）：{e}");
+                    log::warn!("  启动：scripts/serve-talk-llm.sh（首次先跑 scripts/setup-talk.sh）");
+                }
+            }
+            if cfg.talk_tts_engine != "say" {
+                if let Err(e) = crate::talk::probe_endpoint(&tts_url) {
+                    log::warn!("对话模式的 TTS 边车没起（{tts_url}）：{e}");
+                    log::warn!("  启动：scripts/serve-tts.sh（首次先跑 scripts/setup-talk.sh）");
+                }
+            }
+            log::info!("对话模式已就绪（LLM {} / TTS {}）", engines.llm.name(), engines.tts.name());
+        }
+    }
+}
+
+/// 模式子菜单的**纯**内容：`(标题, tag, 是否勾选)`。
+///
+/// 抽出来是为了可测——菜单本身跑在 AppKit 主线程上、点不了，而这里最容易出的错
+/// **恰恰是 tag 和模式的对应关系写反**（点「输入法」却切到「对话」），
+/// 那种错误靠人眼看一眼菜单是发现不了的（两项都在，勾选也对，就是行为反了）。
+///
+/// 清单来自 `TalkMode::ALL` 的**顺序**，所以「枚举顺序」和「tag 偏移」是同一份事实。
+fn mode_menu_entries(lang: Lang, current: config::TalkMode) -> Vec<(String, isize, bool)> {
+    config::TalkMode::ALL
+        .iter()
+        .enumerate()
+        .map(|(i, mode)| {
+            let key = match mode {
+                config::TalkMode::InputMethod => Key::ModeInputMethod,
+                config::TalkMode::Conversation => Key::ModeConversation,
+            };
+            (
+                i18n::t(lang, key).to_string(),
+                TAG_MODE_BASE + i as isize,
+                current == *mode,
+            )
+        })
+        .collect()
+}
+
+/// 从菜单 tag 反推模式。**和 `mode_menu_entries` 共用同一份 `ALL`**，
+/// 两边不可能各写一套偏移。
+fn mode_for_tag(tag: isize) -> Option<config::TalkMode> {
+    let index = tag.checked_sub(TAG_MODE_BASE)?;
+    usize::try_from(index)
+        .ok()
+        .and_then(|i| config::TalkMode::ALL.get(i).copied())
+}
+
 fn handle(tag: isize, mtm: MainThreadMarker) {
+    // 模式切换单独处理：它的副作用不止改配置（要掐播放、要开关会话）。
+    if let Some(mode) = mode_for_tag(tag) {
+        set_talk_mode(mode);
+        return;
+    }
     match tag {
         TAG_TOGGLE => crate::hotkey::trigger_now(),
         TAG_AUTO_PASTE => {
@@ -699,4 +812,58 @@ pub fn run(mtm: MainThreadMarker) -> ! {
     let app = NSApplication::sharedApplication(mtm);
     app.run();
     unreachable!("NSApplication::run 不应返回")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::TalkMode;
+
+    /// **点哪一项就切到哪个模式**——这是这次菜单唯一不能靠人眼看出来的错法。
+    #[test]
+    fn mode_menu_tag_roundtrips_to_the_right_mode() {
+        for mode in TalkMode::ALL.iter().copied() {
+            let entries = mode_menu_entries(Lang::Zh, mode);
+            let (_, tag, checked) = entries
+                .iter()
+                .find(|(_, _, checked)| *checked)
+                .expect("当前模式必须被勾上");
+            assert_eq!(
+                mode_for_tag(*tag),
+                Some(mode),
+                "tag {tag} 反推出来的模式和勾选的那一项不一致（点它会切错）"
+            );
+        }
+    }
+
+    /// 两项都要在菜单里，而且**恰好一项被勾选**。
+    /// 单开关式的「对话模式」勾选框会让人不知道自己现在在哪个模式里。
+    #[test]
+    fn mode_menu_lists_every_mode_and_checks_exactly_one() {
+        for lang in Lang::ALL.iter().copied() {
+            let entries = mode_menu_entries(lang, TalkMode::Conversation);
+            assert_eq!(entries.len(), TalkMode::ALL.len());
+            assert_eq!(entries.iter().filter(|(_, _, c)| *c).count(), 1);
+            for (title, _, _) in &entries {
+                assert!(!title.trim().is_empty(), "空标题的菜单项等于没有这一项");
+            }
+        }
+    }
+
+    /// 三种语言的文案不能撞车：撞了就等于没有区分。
+    #[test]
+    fn mode_titles_differ_per_language_and_per_mode() {
+        for lang in Lang::ALL.iter().copied() {
+            let entries = mode_menu_entries(lang, TalkMode::InputMethod);
+            assert_ne!(entries[0].0, entries[1].0, "{lang:?} 下两个模式标题相同");
+        }
+    }
+
+    /// 不属于模式区的 tag 一律返回 None——否则别的菜单项会被误当成模式切换。
+    #[test]
+    fn unrelated_tags_are_not_modes() {
+        for tag in [TAG_TOGGLE, TAG_QUIT, TAG_MODE_BASE - 1, TAG_MODE_BASE + 99] {
+            assert_eq!(mode_for_tag(tag), None, "tag {tag} 不该被当成模式");
+        }
+    }
 }
