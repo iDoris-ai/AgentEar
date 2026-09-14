@@ -115,6 +115,28 @@ class WavPackingTests(unittest.TestCase):
         self.assertEqual(caught.exception.status, 500)
 
 
+class LoudnessTests(unittest.TestCase):
+    """响度归一：直接治「声量飘忽」（实测不归一时 RMS 差 4.54 倍）。"""
+
+    def test_quiet_and_loud_inputs_come_out_at_the_same_level(self):
+        quiet = backends.normalize_loudness([0.01, -0.01] * 500)
+        loud = backends.normalize_loudness([0.5, -0.5] * 500)
+        rms = lambda a: (sum(float(x) ** 2 for x in a) / len(a)) ** 0.5  # noqa: E731
+        self.assertAlmostEqual(rms(quiet), backends.TARGET_RMS, places=6)
+        self.assertAlmostEqual(rms(loud), backends.TARGET_RMS, places=6)
+        self.assertAlmostEqual(rms(quiet) / rms(loud), 1.0, places=6)
+
+    def test_peak_never_clips(self):
+        # 尖峰 + 低 RMS：只按 RMS 拉满会把峰值推过 1.0 → 削波破音
+        samples = [0.0] * 900 + [0.9, -0.9] + [0.0] * 98
+        out = backends.normalize_loudness(samples)
+        self.assertLessEqual(max(abs(x) for x in out), backends.PEAK_CEILING)
+
+    def test_silence_is_not_amplified(self):
+        silence = [0.0] * 100
+        self.assertEqual(list(backends.normalize_loudness(silence)), silence)
+
+
 class VoxCpm2BackendTests(unittest.TestCase):
     def test_synthesize_returns_a_valid_wav_and_passes_text_through(self):
         backend, fake = voxcpm2_backend()
@@ -167,7 +189,15 @@ class VoxCpm2BackendTests(unittest.TestCase):
         data = backend.synthesize("a longer sentence", "en")
         with wave.open(io.BytesIO(data), "rb") as audio:
             values = struct.unpack("<6h", audio.readframes(6))
-        self.assertEqual(values, (8191, -8191) * 3, "分段必须按顺序拼接，不能只取第一段")
+        # **不断言绝对值**：v0.8.0 起输出会过一遍响度归一（见 normalize_loudness），
+        # 所以幅度由归一目标决定，不由输入决定。这里钉的是「三段按顺序拼接」：
+        # 6 个采样、正负交替、每段幅度一致。
+        self.assertEqual(len(values), 6, "三段都要在，不能只取第一段")
+        self.assertEqual(
+            [1 if v > 0 else -1 for v in values], [1, -1] * 3, "顺序不能乱、符号不能翻"
+        )
+        self.assertEqual(len({abs(v) for v in values}), 1, "每段幅度应一致（同一归一增益）")
+        self.assertGreater(values[0], 0)
 
     def test_a_generator_that_yields_nothing_is_a_500(self):
         backend, _ = voxcpm2_backend(FakeVoxModel(segments=0))
@@ -209,7 +239,19 @@ class BackendSelectionTests(unittest.TestCase):
                     server.parse_args(argv)
 
     def test_validate_request_only_accepts_the_three_languages(self):
-        self.assertEqual(server.validate_request({"text": "hi", "lang": "th"}), ("hi", "th"))
+        self.assertEqual(
+            server.validate_request({"text": "hi", "lang": "th"}), ("hi", "th", None, None)
+        )
+        # voice / style 是可选的逐请求覆盖（菜单和语音指令都走它）
+        self.assertEqual(
+            server.validate_request({"text": "hi", "lang": "th", "voice": "f1", "style": "yue"}),
+            ("hi", "th", "f1", "yue"),
+        )
+        for bad in ({"text": "hi", "lang": "th", "voice": ""},
+                    {"text": "hi", "lang": "th", "style": 7}):
+            with self.subTest(bad=bad):
+                with self.assertRaises(backends.TTSError):
+                    server.validate_request(bad)
         for payload in [{}, {"text": "hi"}, {"text": "hi", "lang": "jp"},
                         {"text": "", "lang": "en"}, {"text": 3, "lang": "en"}]:
             with self.subTest(payload=payload):

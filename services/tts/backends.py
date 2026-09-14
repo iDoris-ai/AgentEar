@@ -51,6 +51,42 @@ class TTSError(Exception):
         self.status = status
 
 
+#: 归一化目标：约 -20 dBFS 的 RMS。人耳对「一句话比另一句响 4 倍」极其敏感，
+#: 而 VoxCPM2 不同次生成的 RMS 实测能差 **4.54 倍**（`vendor/models/talk/measure_f0.py`）。
+#: -20 dBFS ≈ 0.1 的 RMS：够响、又给峰值留了 6dB 以上余量。
+TARGET_RMS = 0.1
+#: 归一化后的峰值上限。**必须留**：只按 RMS 拉满会把峰值推过 1.0 削波成破音，
+#: 而破音比「忽大忽小」更难听。
+PEAK_CEILING = 0.97
+
+
+def normalize_loudness(samples):
+    """把一段音频的**响度**拉到统一水平，峰值不越界。
+
+    这是「声量飘忽」的直接解法：VoxCPM2 每次生成的整体音量本来就随机，
+    实测 RMS 差 4.54 倍。钉参考音频能把它压到 1.04 倍，但那是**副作用**不是保证——
+    换个音色、换个语言就不一定了，所以这里再兜一层确定性的归一。
+
+    ⚠️ **按整句归一，不按帧**（不做压缩器）：帧级压缩会改变韵律，
+    而这段音频是要拿来做对话回答的，韵律比「音量绝对平」更重要。
+    """
+    try:
+        import numpy as np
+    except ImportError:
+        return samples  # 裸 Python 环境（say 后端）用不到这个
+    array = np.asarray(samples, dtype=np.float32).reshape(-1)
+    if array.size == 0:
+        return samples
+    rms = float(np.sqrt(np.mean(array.astype(np.float64) ** 2)))
+    if rms <= 1e-6:
+        return samples  # 全静音，别去放大噪声
+    gain = TARGET_RMS / rms
+    peak = float(np.max(np.abs(array)))
+    if peak * gain > PEAK_CEILING:
+        gain = PEAK_CEILING / max(peak, 1e-9)
+    return array * gain
+
+
 def wav_from_float(samples, sample_rate):
     """Pack float samples in [-1, 1] into a mono 16-bit PCM WAV byte string.
 
@@ -121,7 +157,15 @@ class SayBackend:
     def available_langs(self):
         return {lang: voice for lang, voice in self.voices_map.items() if lang in SUPPORTED_LANGS}
 
-    def synthesize(self, text, lang):
+    def synthesize(self, text, lang, voice=None, style=None):
+        """`voice` / `style` 对后端无意义（`say` 的音色由系统发音人决定）。
+
+        **接住而不是拒绝**：HTTP 契约是共享的，调用方不该为了换后端而改请求体。
+        但**不能静默**——用户点了「换音色」却发现没变化时，
+        日志里得能看出「这个后端不支持」。
+        """
+        if voice or style:
+            log_once_unsupported_voice_style(voice, style)
         voice = self.voices_map.get(lang)
         if voice is None:
             raise TTSError(400, "lang must be exactly one of: zh, en, th.")
@@ -198,6 +242,112 @@ class SayBackend:
         # Each request's communicate() reaps its child before the server joins workers.
 
 
+#: 语系/风格 → VoxCPM2 的 instruct 文案。
+#:
+#: ⚠️ **这是「创意描述」不是开关**：VoxCPM2 吃自然语言，效果没有硬保证。
+#: `benchmarks-m3.md` §6.2.2 已经记过——方言到底生没生效，**当前没有客观判据**
+#: （`language-id` 只到语言级，区分不了中文内部方言）。所以这里的每一条
+#: 都只是「让模型朝那个方向走」，**必须在文档里写明未经人耳验收**。
+STYLE_INSTRUCTS = {
+    "zh": "标准普通话",
+    "yue": "用粤语（广东话）说，地道广州口音",
+    "henan": "用河南话说，地道河南口音",
+    "sichuan": "用四川话说，地道四川口音",
+    "shandong": "用山东话说，地道山东口音",
+    "dongbei": "用东北话说，地道东北口音",
+    "tianjin": "用天津话说，地道天津口音",
+    "en": "natural English",
+    "en-gb": "British English accent",
+    "en-us": "American English accent",
+    "en-ca": "Canadian English accent",
+    "th": "natural Thai, native speaker",
+}
+
+
+class VoiceLibrary:
+    """音色库：一个目录里成对的 `<name>.wav` + `<name>.json`。
+
+    `.json` 里存 `ref_text`（**必须**：克隆模式要参考音频对应的文本，
+    文本不对会带偏）以及造它时的客观量（F0/RMS），便于事后判断哪条更稳。
+
+    没有参考音频时**退化为不钉音色**（就是用户抱怨的那种飘忽），
+    所以 `default` 为空时要明确告警，不要静默。
+    """
+
+    def __init__(self, directory, default=None):
+        self.dir = Path(directory) if directory else None
+        self.entries = {}
+        self.load_error = None
+        if self.dir and self.dir.is_dir():
+            for wav in sorted(self.dir.glob("*.wav")):
+                meta_path = wav.with_suffix(".json")
+                meta = {}
+                if meta_path.exists():
+                    try:
+                        meta = json.loads(meta_path.read_text())
+                    except (OSError, ValueError) as error:
+                        meta["ref_text_error"] = str(error)
+                self.entries[wav.stem] = {
+                    "wav": wav,
+                    "ref_text": meta.get("ref_text"),
+                    "f0_median": meta.get("f0_median"),
+                    "rms": meta.get("rms"),
+                }
+        self.default = default or (next(iter(self.entries), None))
+
+    def describe(self):
+        return {
+            name: {
+                "ref_audio": str(e["wav"]),
+                "ref_text": e["ref_text"],
+                "f0_median": e["f0_median"],
+                "rms": e["rms"],
+            }
+            for name, e in self.entries.items()
+        }
+
+    def get(self, name):
+        if not self.entries:
+            return None
+        key = name if name in self.entries else self.default
+        return self.entries.get(key)
+
+
+_WARNED_NO_VOICE = threading.Event()
+_WARNED_UNSUPPORTED = threading.Event()
+
+
+def log_once_unsupported_voice_style(voice, style):
+    """`say` 后端不支持选音色/语系——喊一次，别让用户以为点了没生效。"""
+    if not _WARNED_UNSUPPORTED.is_set():
+        _WARNED_UNSUPPORTED.set()
+        import sys
+
+        print(
+            f"⚠️ say 后端不支持 voice/style（收到 voice={voice!r} style={style!r}）——"
+            "那两个参数只有 voxcpm2 后端有效。",
+            file=sys.stderr,
+        )
+
+
+_WARNED_NO_VOICE = threading.Event()
+
+
+def log_once_no_voice():
+    """没有参考音频时喊一次。**只喊一次**：这是每次合成都成立的事实，
+    刷屏只会把真正重要的日志挤掉。"""
+    if not _WARNED_NO_VOICE.is_set():
+        _WARNED_NO_VOICE.set()
+        import sys
+
+        print(
+            "⚠️ 音色库里没有参考音频 → 每次生成会随机换一个说话人"
+            "（实测 F0 极差 65%、音量差 4.5 倍）。"
+            "跑 services/tts/make_voice.py 造一个，或用 --voices-dir 指定目录。",
+            file=sys.stderr,
+        )
+
+
 class VoxCpm2Backend:
     """``mlx-community/VoxCPM2-4bit`` held resident in this process.
 
@@ -238,8 +388,13 @@ class VoxCpm2Backend:
     MAX_TOKENS = 2000
 
     def __init__(self, model=DEFAULT_VOXCPM2_MODEL, timeout=60, queue_wait=0.0,
-                 load_timeout=600):
+                 load_timeout=600, voices_dir=None, default_voice=None,
+                 default_style=None):
         self.model_id = str(model)
+        # 音色库：**默认必须有一个**，否则就是用户抱怨的「每次换一个人」
+        self.voices = VoiceLibrary(voices_dir, default_voice)
+        self.default_style = default_style or "zh"
+        self._ref_cache = {}
         self.timeout = timeout
         self.queue_wait = queue_wait
         self.sample_rate = 48000
@@ -268,15 +423,28 @@ class VoxCpm2Backend:
             "model": self.model_id,
             "sample_rate": self.sample_rate,
             "load_seconds": round(self.load_seconds, 3),
+            "default_voice": self.voices.default,
+            "default_style": self.default_style,
+            "voices": sorted(self.voices.entries),
+            "styles": sorted(STYLE_INSTRUCTS),
+            "loudness": {"target_rms": TARGET_RMS, "peak_ceiling": PEAK_CEILING},
         }
 
     def available_langs(self):
         # Language is inferred from the text; no separate voice per language.
         return {lang: self.model_id for lang in SUPPORTED_LANGS}
 
-    def synthesize(self, text, lang):
+    def synthesize(self, text, lang, voice=None, style=None):
         if lang not in SUPPORTED_LANGS:
             raise TTSError(400, "lang must be exactly one of: zh, en, th.")
+        entry = self.voices.get(voice)
+        if self.voices.entries and entry is None:
+            raise TTSError(400, f"unknown voice {voice!r}; known: {sorted(self.voices.entries)}")
+        if voice and voice not in self.voices.entries:
+            raise TTSError(400, f"unknown voice {voice!r}; known: {sorted(self.voices.entries)}")
+        style = style or self.default_style
+        if style not in STYLE_INSTRUCTS:
+            raise TTSError(400, f"unknown style {style!r}; known: {sorted(STYLE_INSTRUCTS)}")
         # The lock is what turns "second request arrives mid-synthesis" into an
         # explicit 503 instead of an unbounded queue.
         if not self._lock.acquire(timeout=self.queue_wait):
@@ -285,7 +453,7 @@ class VoxCpm2Backend:
             if self._stopping:
                 raise TTSError(503, "TTS service is stopping.")
             job = Future()
-            self._jobs.put((text, job))
+            self._jobs.put((text, style, entry, job))
             try:
                 return job.result(timeout=self.timeout)
             except FuturesTimeout:
@@ -320,14 +488,27 @@ class VoxCpm2Backend:
             job = self._jobs.get()
             if job is None:
                 return
-            text, future = job
+            text, style, entry, future = job
             try:
-                audio, sample_rate = self._generate(text)
-                future.set_result(wav_from_float(audio, sample_rate or self.sample_rate))
+                audio, sample_rate = self._generate(text, style, entry)
+                future.set_result(
+                    wav_from_float(normalize_loudness(audio), sample_rate or self.sample_rate)
+                )
             except BaseException as error:  # noqa: BLE001 - surfaced to the caller
                 future.set_exception(error)
 
-    def _generate(self, text):
+    def _load_ref(self, entry):
+        """参考音频只解码一次，缓存住——它每次合成都要用。"""
+        if entry is None:
+            return None, None
+        key = str(entry["wav"])
+        if key not in self._ref_cache:
+            from mlx_audio.utils import load_audio
+
+            self._ref_cache[key] = load_audio(key)
+        return self._ref_cache[key], entry.get("ref_text")
+
+    def _generate(self, text, style, entry):
         """Collect every segment of the generator into one waveform.
 
         ``mlx_audio``'s ``generate`` is a **generator**, not a call returning one
@@ -338,8 +519,19 @@ class VoxCpm2Backend:
         """
         chunks = []
         sample_rate = None
+        # **钉音色**：给了参考音频就走克隆模式，不给才会每次随机换人。
+        ref_audio, ref_text = self._load_ref(entry)
+        instruct = STYLE_INSTRUCTS.get(style)
+        if ref_audio is None:
+            log_once_no_voice()
         try:
-            for segment in self._model.generate(text=text, max_tokens=self.MAX_TOKENS):
+            for segment in self._model.generate(
+                text=text,
+                max_tokens=self.MAX_TOKENS,
+                ref_audio=ref_audio,
+                ref_text=ref_text,
+                instruct=instruct,
+            ):
                 audio = getattr(segment, "audio", None)
                 if audio is None:
                     continue
@@ -379,7 +571,8 @@ def validate_wav_bytes(data):
     return data
 
 
-def build_backend(kind, model=None, timeout=None, queue_wait=0.0):
+def build_backend(kind, model=None, timeout=None, queue_wait=0.0,
+                  voices_dir=None, default_voice=None, default_style=None):
     if kind == "say":
         return SayBackend(timeout=timeout if timeout is not None else 30)
     if kind == "voxcpm2":
@@ -387,6 +580,9 @@ def build_backend(kind, model=None, timeout=None, queue_wait=0.0):
             model=model or DEFAULT_VOXCPM2_MODEL,
             timeout=timeout if timeout is not None else 60,
             queue_wait=queue_wait,
+            voices_dir=voices_dir,
+            default_voice=default_voice,
+            default_style=default_style,
         )
     raise TTSError(500, f"unknown backend {kind!r}")
 

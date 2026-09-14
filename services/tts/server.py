@@ -39,20 +39,31 @@ CONNECTION_TIMEOUT = 5
 
 
 def validate_request(payload):
-    """Return (text, lang). Language is never guessed: an unknown value is a 400."""
+    """Return (text, lang, voice, style).
+
+    Language is never guessed: an unknown value is a 400. ``voice`` / ``style``
+    are optional per-request overrides of the backend defaults — that is what
+    lets the app switch timbre or dialect for a single turn (voice command
+    "请你用广东话" arrives this way) without restarting anything.
+    """
     if not isinstance(payload, dict):
         raise TTSError(400, "The JSON body must be an object.")
     text = payload.get("text")
     lang = payload.get("lang")
+    voice = payload.get("voice")
+    style = payload.get("style")
     if not isinstance(text, str) or not text.strip():
         raise TTSError(400, "text must be a non-empty string.")
     if not isinstance(lang, str) or lang not in SUPPORTED_LANGS:
         raise TTSError(400, "lang must be exactly one of: zh, en, th.")
+    for name, value in (("voice", voice), ("style", style)):
+        if value is not None and (not isinstance(value, str) or not value.strip()):
+            raise TTSError(400, f"{name} must be a non-empty string when present.")
     try:
         text.encode("utf-8")
     except UnicodeEncodeError:
         raise TTSError(400, "text must contain valid Unicode.") from None
-    return text, lang
+    return text, lang, voice, style
 
 
 class TTSHandler(BaseHTTPRequestHandler):
@@ -82,7 +93,14 @@ class TTSHandler(BaseHTTPRequestHandler):
             payload.update(self.server.engine.describe())
             self.reply_json(200, payload)
         elif self.path == "/voices":
-            self.reply_json(200, self.server.engine.available_langs())
+            # 语言目标 + （voxcpm2 后端）可用的音色与语系：**菜单要从这里读**，
+            # 免得菜单里写死一份、后端里再写一份，两边迟早对不上。
+            payload = {"langs": self.server.engine.available_langs()}
+            describe = self.server.engine.describe()
+            for key in ("voices", "styles", "default_voice", "default_style"):
+                if key in describe:
+                    payload[key] = describe[key]
+            self.reply_json(200, payload)
         else:
             self.reply_json(404, {"error": "Unknown endpoint."})
 
@@ -116,8 +134,8 @@ class TTSHandler(BaseHTTPRequestHandler):
             self.reply_json(404, {"error": "Unknown endpoint."})
             return
         try:
-            text, lang = validate_request(self.read_json())
-            wav_bytes = self.server.engine.synthesize(text, lang)
+            text, lang, voice, style = validate_request(self.read_json())
+            wav_bytes = self.server.engine.synthesize(text, lang, voice=voice, style=style)
         except TTSError as error:
             self.reply_json(error.status, {"error": str(error)})
             return
@@ -178,6 +196,17 @@ def parse_args(argv=None):
         help="per-request synthesis timeout in seconds (default: 30 for say, 60 for voxcpm2)",
     )
     parser.add_argument(
+        "--voices-dir",
+        default=None,
+        help="directory of <name>.wav + <name>.json voice references (voxcpm2)",
+    )
+    parser.add_argument(
+        "--voice", default=None, help="default voice name from --voices-dir"
+    )
+    parser.add_argument(
+        "--style", default=None, help="default dialect/accent style key (e.g. zh, yue, en-gb)"
+    )
+    parser.add_argument(
         "--queue-wait",
         type=float,
         default=0.0,
@@ -199,7 +228,15 @@ def main():
         print("This service requires macOS (say/afconvert, or the MLX runtime).", file=sys.stderr)
         raise SystemExit(2)
     try:
-        engine = build_backend(args.backend, model=args.model, timeout=args.timeout, queue_wait=args.queue_wait)
+        engine = build_backend(
+            args.backend,
+            model=args.model,
+            timeout=args.timeout,
+            queue_wait=args.queue_wait,
+            voices_dir=args.voices_dir,
+            default_voice=args.voice,
+            default_style=args.style,
+        )
     except TTSError as error:
         print(f"Cannot start the {args.backend} backend: {error}", file=sys.stderr)
         raise SystemExit(1) from None

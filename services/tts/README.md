@@ -76,8 +76,40 @@ records the same lesson for the LLM sidecar).
 VoxCPM2. The contract never pinned a rate, so callers must read it from the WAV
 header. `agentear`'s `talk::validate_wav` only checks that it really is a WAV.
 
-`POST /speak` accepts a JSON object with a non-blank string `text` and an exact
-`lang` of `zh`, `en`, or `th`. Invalid input, including `jp`, returns `400`
+`POST /speak` accepts a JSON object with a non-blank string `text`, an exact
+`lang` of `zh`, `en`, or `th`, and two **optional per-request overrides**:
+
+| field | meaning |
+| --- | --- |
+| `voice` | name from `--voices-dir` (pins the timbre; see below) |
+| `style` | dialect/accent key: `zh`, `yue`, `henan`, `sichuan`, `shandong`, `dongbei`, `tianjin`, `en`, `en-gb`, `en-us`, `en-ca`, `th` |
+
+Unknown values are a `400` — never a silent fallback, because a wrong-sounding
+voice is indistinguishable from a broken model to the caller.
+
+### Why voices are pinned (and what happens if they are not)
+
+VoxCPM2 is **zero-shot**: with no reference audio it samples a *new speaker every
+call*. Measured 2026-09-14 on the 4-bit MLX build, three generations of the same
+sentence spanned **F0 142–286 Hz（one sample in the male band）with RMS varying
+4.54×** — which is exactly the "the voice keeps changing" complaint. Pinning a
+reference clip (`ref_audio` + `ref_text`) removes the speaker lottery, and
+`normalize_loudness()` makes the level deterministic: **RMS spread 4.54× → 1.00×**.
+
+⚠️ **The MLX build does not implement `seed`** (the official PyTorch API and the
+llama.cpp-omni CLI do). So reproducibility here comes from the reference clip,
+not from a fixed seed.
+
+Build a reference with `services/tts/make_voice.py`: it generates candidates,
+scores them on F0 / voiced frames / RMS, keeps the best, and transcribes the
+result with this repo's own ASR for `ref_text`. `--voices-dir` points at a
+directory of `<name>.wav` + `<name>.json` pairs.
+
+⚠️ **Dialect correctness has no objective check here.** `speech language-id`
+resolves language, not Chinese dialect (ADR-0007 §6.2.2), so `style=yue` is
+"steer the model", not "verified Cantonese". Only a human ear can close that.
+
+`POST /speak` also accepts the legacy shape (no `voice`/`style`). Invalid input, including `jp`, returns `400`
 with `{"error":"an explanation"}` before any synthesis starts. VoxCPM2 infers
 the language from the text and has no per-language voice; `lang` is still
 required and still validated, because guessing wrong means the caller hears a
