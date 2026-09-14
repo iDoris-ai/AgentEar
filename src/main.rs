@@ -613,7 +613,7 @@ fn main() -> Result<()> {
 }
 
 fn worker(
-    rx: std::sync::mpsc::Receiver<()>,
+    rx: std::sync::mpsc::Receiver<hotkey::Signal>,
     store: store::Store,
     // 收 trait 对象而不是具体类型：后端是运行时按配置选的，
     // 这个函数不该知道自己在跑哪一个。
@@ -662,27 +662,52 @@ fn worker(
             }
         }
 
-        if rx.try_recv().is_ok() {
-            log::debug!("收到触发事件");
-            state = match state {
-                State::Idle => {
+        if let Ok(signal) = rx.try_recv() {
+            let recording = matches!(state, State::Recording { .. });
+            // **手势 → 动作** 的判定在 `hotkey::intent` 里（纯函数、有真值表），
+            // 这里只负责执行。放那边是因为「双击写成两次单击」这种错
+            // 只有真按键能暴露，而真按键在单测里造不出来。
+            match hotkey::intent(signal, recording) {
+                // 正在录音时收到双击：只切模式，**不要停**——否则「快速点两下」
+                // 会把刚开的那段录成 0.2 秒碎片（会被当噪音丢掉）。
+                hotkey::Intent::SwitchToConversation => {
+                    log::info!("双击右 Command → 切到对话模式（这一段继续录）");
+                    set_mode(config::TalkMode::Conversation);
+                }
+                hotkey::Intent::End => {
+                    log::debug!("收到触发事件：结束这一段");
+                    state = finish(state, &store, asr.as_ref())?;
+                }
+                hotkey::Intent::Begin { set_conversation } => {
+                    log::debug!("收到触发事件：开始一段（{signal:?}）");
                     // ⚠️ **打断优先于开始录音。** 用户按这一下键的意思是
                     // 「别说了，听我说」——工作线程那边可能正在播上一轮的回答。
                     // 先掐掉播放再开麦克风，顺序反了就会先录到自己正在放的
                     // 声音（AEC 那一格 T3.4.0 实测残留单字，见 ADR-0007 §4.3.0）。
-                    // 打断只在对话模式有意义：输入法模式下不会有东西在播。
-                    // 仍然无条件调用一次——**代价是一次 mutex 尝试，收益是
-                    // 「刚切回输入法时那段没播完的音频」也会被掐掉**。
-                    let interrupted = talk::stop_playback();
-                    if interrupted {
+                    // 输入法模式下不会有东西在播，但照样调一次：
+                    // 代价是一次 mutex 尝试，收益是「刚切回输入法时那段没播完的
+                    // 音频」也会被掐掉。
+                    if talk::stop_playback() {
                         log::info!("对话被打断，开始听下一句");
                     }
-                    // 会话状态机自己会处理「正在播时按下键 = 打断 + 开新一轮」，
-                    // 所以这里只报一次按下，不在外面判断相位。
-                    if let Some(Err(e)) = with_session(|s| s.begin_turn()) {
-                        log::warn!("通话会话不能开新一轮: {e}");
+                    if let Some(conversation) = set_conversation {
+                        let mode = if conversation {
+                            config::TalkMode::Conversation
+                        } else {
+                            config::TalkMode::InputMethod
+                        };
+                        // 单击 = 输入法、双击 = 对话。**在「开始」这一刻定模式**，
+                        // 因为 `finish()` 是结束时才读配置的——如果等到松开才定，
+                        // 双击选出来的对话模式会被「停止」那一下抹掉。
+                        set_mode(mode);
                     }
-                    match begin(&store) {
+                    // **顺序有讲究**：先定模式（可能刚建好会话），再推会话相位，
+                    // 最后才开麦克风。反过来的话，双击切对话时这一轮的
+                    // `begin_turn` 会落在一个还不存在的会话上。
+                    if config::get().talk_mode == config::TalkMode::Conversation {
+                        ensure_session_listening(config::get().talk_lang);
+                    }
+                    state = match begin(&store) {
                         Ok(s) => {
                             last_heartbeat = Instant::now();
                             s
@@ -691,13 +716,13 @@ fn worker(
                             log::error!("开始录音失败: {e:#}");
                             State::Idle
                         }
-                    }
+                    };
                 }
-                s @ State::Recording { .. } => finish(s, &store, asr.as_ref())?,
-            };
-        } else {
-            std::thread::sleep(Duration::from_millis(20));
+            }
+            continue;
         }
+        // 没有事件的时候别空转
+        std::thread::sleep(Duration::from_millis(20));
     }
 
     // ⚠️ 主循环是**不退出**的（`loop {}`，只能被信号杀掉），所以这里没有
@@ -939,6 +964,40 @@ fn finish(state: State, store: &store::Store, asr: &dyn engine::AsrEngine) -> Re
     Ok(State::Idle)
 }
 
+/// 切模式。**按键和菜单都走这里**，副作用只有一份实现。
+///
+/// 三件事缺一不可：
+/// 1. 写配置（下次启动还是这个模式）
+/// 2. 离开对话模式时**掐掉正在播的回答**——否则留下一段没人管的音频
+/// 3. 进对话模式时**去把边车弄起来**（连接优先、拉起兜底）
+fn set_mode(mode: config::TalkMode) {
+    if config::get().talk_mode == mode {
+        return; // 已经是这个模式：不要有副作用（尤其别把正在播的掐了）
+    }
+    config::update(|c| c.talk_mode = mode);
+    log::info!(
+        "模式：{}（talk_mode = {}）",
+        match mode {
+            config::TalkMode::InputMethod => "输入法（只上屏，不出声）",
+            config::TalkMode::Conversation => "对话（说一句答一句）",
+        },
+        mode.as_str()
+    );
+    match mode {
+        config::TalkMode::InputMethod => {
+            if talk::stop_playback() {
+                log::info!("已切回输入法模式，掐掉正在播放的回答");
+            }
+        }
+        config::TalkMode::Conversation => {
+            // 切进对话 = 这一轮（或下一轮）要说出来，会话必须就位
+            ensure_session_listening(config::get().talk_lang);
+            // 异步：90 秒的就绪等待放主线程上，菜单栏会一分半不响应。
+            talk::ensure_sidecars_async(&config::get());
+        }
+    }
+}
+
 /// 通话会话状态机（`src/session.rs`）。
 ///
 /// **只在 `talk_enabled` 时创建**：没打通话就不该有「轮次」这个概念，
@@ -959,6 +1018,23 @@ fn with_session<R>(f: impl FnOnce(&mut session::Session) -> R) -> Option<R> {
 fn open_session(lang: talk::TalkLang) {
     let mut slot = TALK_SESSION.lock().unwrap_or_else(|e| e.into_inner());
     *slot = Some(session::Session::new(lang));
+}
+
+/// 保证会话存在，**并且把相位推到 Listening**（本轮的起点）。
+///
+/// ⚠️ 这一步不是可有可无的：会话可能①压根不存在（启动时是输入法模式，
+/// 用户中途双击/点菜单切到对话），②存在但停在上轮的 `Idle`。
+/// 这两种情况下直接走 `finish_listening` 会被状态机按非法转移拒掉，
+/// **而且只写 warning**——统计出来就是自相矛盾的「0 轮」，
+/// 而声音照样出得来（`--talk-turn` 当初就栽在这上面）。
+///
+/// 相位已经在 `Listening` 时 `begin_turn` 会报错，**那是正常的**（重复按下），
+/// 所以这里吞掉返回值。
+fn ensure_session_listening(lang: talk::TalkLang) {
+    if with_session(|_| ()).is_none() {
+        open_session(lang);
+    }
+    let _ = with_session(|s| s.begin_turn());
 }
 
 /// 把一句话交给 LLM，把回答念出来。**通话形态的收尾动作。**

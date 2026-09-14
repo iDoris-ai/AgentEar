@@ -248,7 +248,20 @@ fn populate(menu: &NSMenu, mtm: MainThreadMarker, target: &MenuTarget) {
     //
     // 两个选项都要能看见（radio 式勾选），不要做成一个「对话模式」开关——
     // 单开关的失败形态是用户不知道自己现在**不在**哪个模式里。
-    let mode_item = item(mtm, target, i18n::t(lang, Key::ModeSection), -1, false);
+    // **标题里带上当前模式**：jason 找不到这个入口，就是因为标题只写「模式」，
+    // 而他在找「对话模式」。现在不展开子菜单也能看见自己在哪一档。
+    let mode_title = format!(
+        "{}: {}",
+        i18n::t(lang, Key::ModeSection),
+        i18n::t(
+            lang,
+            match cfg.talk_mode {
+                config::TalkMode::InputMethod => Key::ModeInputShort,
+                config::TalkMode::Conversation => Key::ModeConversationShort,
+            }
+        )
+    );
+    let mode_item = item(mtm, target, &mode_title, -1, false);
     mode_item.setEnabled(true);
     submenu(
         mtm,
@@ -478,47 +491,6 @@ fn populate(menu: &NSMenu, mtm: MainThreadMarker, target: &MenuTarget) {
     menu.addItem(&item(mtm, target, i18n::t(lang, Key::Quit), TAG_QUIT, false));
 }
 
-/// 切模式。**点一下立刻生效**，不需要重启，也不用等下一次录音。
-///
-/// 三件事都要做，缺一个都会留下不一致的状态：
-/// 1. 写配置（下次启动还是这个模式）
-/// 2. 离开对话模式时**掐掉正在播的回答**——否则会留下一段没人管的音频
-/// 3. 进对话模式时**先探一次边车**：不探的话用户按了键才发现没声音，
-///    而那两个边车跑在别的进程里，从菜单上根本看不出来
-fn set_talk_mode(mode: config::TalkMode) {
-    if config::get().talk_mode == mode {
-        return; // 点自己那一项不该有副作用（尤其别把正在播的掐了）
-    }
-    config::update(|c| c.talk_mode = mode);
-    // 日志里同时给人话和**配置值**：排障时要能一眼对上 config.json 里那个字符串。
-    log::info!("模式：{}（talk_mode = {}）", match mode {
-        config::TalkMode::InputMethod => "输入法（只上屏，不出声）",
-        config::TalkMode::Conversation => "对话（说一句答一句）",
-    }, mode.as_str());
-
-    match mode {
-        config::TalkMode::InputMethod => {
-            // 从对话切回输入法：正在播的回答要立刻停。
-            if crate::talk::stop_playback() {
-                log::info!("已切回输入法模式，掐掉正在播放的回答");
-            }
-        }
-        config::TalkMode::Conversation => {
-            let cfg = config::get();
-            let engines = crate::talk::Engines::from_config(&cfg);
-            // **不只是报警，而是真的去把它们弄起来**（连接优先、拉起兜底）。
-            // v0.7.0 只写日志是不够的：用户点完菜单就去按键了，
-            // 而那两个进程在别处，日志他看不到。
-            crate::talk::ensure_sidecars_async(&cfg);
-            log::info!(
-                "已切到对话模式（LLM {} / TTS {}）——正在确认两个边车，没起会按配置拉起",
-                engines.llm.name(),
-                engines.tts.name()
-            );
-        }
-    }
-}
-
 /// 模式子菜单的**纯**内容：`(标题, tag, 是否勾选)`。
 ///
 /// 抽出来是为了可测——菜单本身跑在 AppKit 主线程上、点不了，而这里最容易出的错
@@ -551,6 +523,12 @@ fn mode_for_tag(tag: isize) -> Option<config::TalkMode> {
     usize::try_from(index)
         .ok()
         .and_then(|i| config::TalkMode::ALL.get(i).copied())
+}
+
+/// 切模式。**副作用只有一份实现**，在 `crate::set_mode` 里
+/// （写配置 / 掐播放 / 拉起边车）。这里只做「点的是哪一项」的判断。
+fn set_talk_mode(mode: config::TalkMode) {
+    crate::set_mode(mode);
 }
 
 fn handle(tag: isize, mtm: MainThreadMarker) {
