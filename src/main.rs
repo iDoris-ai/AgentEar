@@ -516,11 +516,19 @@ fn main() -> Result<()> {
     // 之后用户在菜单里改 `talk_lang` 会在**下一轮**生效（生效点是每轮
     // `answer_out_loud` 重新读配置的那一刻），不需要重启——
     // 这正是 jason 要的「过程中可以随时切」。
-    if cfg.talk_enabled {
+    log::info!(
+        "模式：{}（talk_mode = {}）",
+        match cfg.talk_mode {
+            config::TalkMode::InputMethod => "输入法（按一下键 → 转写 → 上屏，不出声）",
+            config::TalkMode::Conversation => "对话（按一下键 → 转写 → 上屏 → 把回答念出来）",
+        },
+        cfg.talk_mode.as_str()
+    );
+    if cfg.talk_mode == config::TalkMode::Conversation {
         open_session(cfg.talk_lang);
         let engines = talk::Engines::from_config(&cfg);
         log::info!(
-            "通话已开启：LLM {} @ {}，TTS {} @ {}，语言 {}",
+            "对话模式：LLM {} @ {}，TTS {} @ {}，语言 {}",
             engines.llm.name(),
             cfg.talk_llm_url.as_deref().unwrap_or(talk::DEFAULT_LLM_URL),
             engines.tts.name(),
@@ -528,7 +536,7 @@ fn main() -> Result<()> {
             cfg.talk_lang.as_str()
         );
         if cfg.talk_llm_engine == "mock" {
-            log::warn!("通话用的是 mock 引擎：回答是本地写死的，不是模型产出");
+            log::warn!("对话用的是 mock 引擎：回答是本地写死的，不是模型产出");
         }
     }
 
@@ -657,9 +665,12 @@ fn worker(
                     // 「别说了，听我说」——工作线程那边可能正在播上一轮的回答。
                     // 先掐掉播放再开麦克风，顺序反了就会先录到自己正在放的
                     // 声音（AEC 那一格 T3.4.0 实测残留单字，见 ADR-0007 §4.3.0）。
+                    // 打断只在对话模式有意义：输入法模式下不会有东西在播。
+                    // 仍然无条件调用一次——**代价是一次 mutex 尝试，收益是
+                    // 「刚切回输入法时那段没播完的音频」也会被掐掉**。
                     let interrupted = talk::stop_playback();
                     if interrupted {
-                        log::info!("通话被打断，开始听下一句");
+                        log::info!("对话被打断，开始听下一句");
                     }
                     // 会话状态机自己会处理「正在播时按下键 = 打断 + 开新一轮」，
                     // 所以这里只报一次按下，不在外面判断相位。
@@ -906,8 +917,10 @@ fn finish(state: State, store: &store::Store, asr: &dyn engine::AsrEngine) -> Re
             // **排在最后**，和知识库投递同一个道理：文字已经进了剪贴板、
             // 也上了屏，语音这条路慢一点或者失败都不会让用户白说一次。
             // 默认关（`talk_enabled`），所以已发布用户的链路一个字节都没变。
-            if cfg.talk_enabled {
-                // 守护进程这一轮用哪个语言，**在配置里读**：菜单改了下一轮生效，
+            // **只有对话模式才出声。** 模式是每轮现读的，所以菜单里切一下
+            // 对下一轮立刻生效，不用重启（输入法模式走的就是 M1 那条老路）。
+            if cfg.talk_mode == config::TalkMode::Conversation {
+                // 这一轮用哪个语言，**在配置里读**：菜单改了下一轮生效，
                 // 这就是 jason 要的「过程中可以随时切」。
                 answer_out_loud(&cfg, &text, cfg.talk_lang);
             }
@@ -950,6 +963,12 @@ fn open_session(lang: talk::TalkLang) {
 /// 否则用户只会觉得「按了没反应」。
 fn answer_out_loud(cfg: &config::Config, heard: &str, lang: talk::TalkLang) {
     use crate::talk;
+    // 会话可能还不存在：启动时是输入法模式、用户中途从菜单切到对话模式
+    // 就是这种情况。**这里懒创建**，而不是要求菜单切换时必须成功创建——
+    // 少一个「菜单点了但状态没建起来」的失败面。
+    if with_session(|_| ()).is_none() {
+        open_session(lang);
+    }
     let engines = talk::Engines::from_config(cfg);
 
     // 每轮都按配置对齐一次会话语言：这是 jason 要的「过程中可以随时切」
@@ -1178,7 +1197,14 @@ fn diagnose(vendor: &std::path::Path) -> Result<()> {
     // 而那两个边车跑在别的进程里，光看 AgentEar 自己什么都看不出来
     // （菜单栏那三个坑记的是同一类教训：症状都是「按了没反应」）。
     println!("\n实时通话（可选，需要两个边车）:");
-    println!("  开关: {}", if cfg.talk_enabled { "✅ 开" } else { "⚪ 关" });
+    println!(
+        "  模式: {}（talk_mode = {}）",
+        match cfg.talk_mode {
+            config::TalkMode::InputMethod => "⚪ 输入法（只上屏，不出声）",
+            config::TalkMode::Conversation => "✅ 对话（说一句答一句）",
+        },
+        cfg.talk_mode.as_str()
+    );
     let talk_cfg_engines = talk::Engines::from_config(&cfg);
     let llm_url = cfg
         .talk_llm_url
@@ -1227,9 +1253,9 @@ fn diagnose(vendor: &std::path::Path) -> Result<()> {
         }
     }
     println!("  通话语言: {}", cfg.talk_lang.as_str());
-    if cfg.talk_enabled && !missing.is_empty() {
+    if cfg.talk_mode == config::TalkMode::Conversation && !missing.is_empty() {
         println!(
-            "  ⚠️ 开关是开的，但 {} 边车没起——这一轮会只有文字没有声音",
+            "  ⚠️ 对话模式开着，但 {} 边车没起——这一轮会只有文字没有声音",
             missing.join(" / ")
         );
     }

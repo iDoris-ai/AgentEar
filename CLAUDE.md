@@ -2,15 +2,36 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-## 当前状态：**v0.6.0 —— 通话链路**；M1/M2 已发布；**M3 通话链路已跑通，AEC / 自动打断未做**
+## 当前状态：**v0.7.0 —— 输入法/对话双模式**；M1/M2 已发布；**M3 通话链路已跑通，AEC / 自动打断未做**
 
 M1 完成；**知识库投递 + 全文检索默认开（v0.4.2）**；M2 理解层已发布（v0.4.0）但默认关；
 **v0.6.0 加了通话链路（说一句答一句、可按键打断）**，**v0.5.0 加了可切换的 ASR 后端**（`--asr-backend` / `config.json` 的 `asr_backend`，
 **默认仍是 `builtin`**，`speech_swift` 要用户自己装 `speech` CLI，且**菜单栏里没有这一项**）。
 
-**M3 实时对话（ADR-0007）：V1 的通话链路已经跑通并随 v0.6.0 发布，但还没有产品入口。**
-下面的代码在 `src/talk.rs` / `src/session.rs` 等；**默认关**，
-要显式打开 `talk_enabled` 并自己起两个边车（都**不随包分发**）。
+**M3 实时对话（ADR-0007）：V1 的通话链路已随 v0.6.0 发布；v0.7.0 给了它产品入口。**
+
+**两种模式，默认输入法（jason 2026-09-14 拍板）：**
+
+| 模式 | 按一下录音键 → | 默认 |
+|---|---|---|
+| **输入法模式** | 录音 → raw 落盘 → 转写 → 剪贴板 / 上屏。**不出声** | ✅ **是** |
+| **对话模式** | 上面全部 + LLM → TTS → 播放（按录音键可打断正在播的回答） | 否 |
+
+- **切换入口是菜单栏 → 模式**（`src/tray.rs` 的 `TAG_MODE_BASE`），两个选项都列出来带勾选，
+  **点一下立刻生效**（不用重启、不用等下一轮）。⚠️ **不要把它做成配置文件里的开关**——
+  v0.6.0 就是那样（`talk_enabled` 只能手改 config.json），等于没有入口。
+- 配置字段是 **`talk_mode`**（`"input_method"` / `"conversation"`）。
+  v0.6.0 的 `talk_enabled` **降级为只读旧字段**：`talk_enabled: true` →
+  `talk_mode: "conversation"` 迁移一次，之后落盘时旧字段自动消失（`skip_serializing`）。
+  **迁移判据是「新键根本没出现过」，不是「新键等于默认值」**——两者差很远：
+  用户从菜单显式切回输入法之后，按后者判断会被旧字段顶回对话模式
+  （菜单显示输入法、行为却是对话，属于最难查的一类 bug）。
+- 两种模式的**前半段完全相同**（录音/落盘/转写/上屏），只有后半段要不要出声不同。
+  所以走错模式**只会让这一轮没声音，不会丢转写**。
+- 对话模式仍要自己起两个边车（都**不随包分发**）：
+  `scripts/serve-talk-llm.sh` + `scripts/serve-tts.sh`。
+  从菜单切进对话模式时**会先探一次边车并把「谁没起」写进日志**——
+  那两个进程在别的进程里，光看菜单看不出来。
 
 - **`src/talk.rs` = 通话引擎适配层**（ADR-0007 §4 的 R0）。
   `TalkLang{zh,en,th}`；`LlmEngine` 两个实现——`OpenAiCompat`（任何 OpenAI 兼容端点，
@@ -26,11 +47,12 @@ M1 完成；**知识库投递 + 全文检索默认开（v0.4.2）**；M2 理解�
   `turn_ready` / `speaking_done` / `barge_in` / `set_lang` / `fail` / `hang_up` / `turn_elapsed`。
   **语言可在通话中随时切**，但 Thinking 相拒绝（理由写在文档注释里）；
   **空转写不记轮次**；LLM 失败时转写照样记一轮（`reply: None`）。
-- **配置项全部默认关、或指向本机默认端口**（`src/config.rs`）：`talk_enabled`(false)、
+- **配置项全部默认关、或指向本机默认端口**（`src/config.rs`）：`talk_mode`(input_method)、
   `talk_lang`(zh)、`talk_llm_engine`("openai_compat")、`talk_llm_url`(None→8794)、
   `talk_tts_engine`("http")、`tts_url`(None→8765)、`talk_timeout_secs`(60)、
   `talk_city`("清迈")、`talk_weather_note`(None)，另有 `Config::weather_fact()`。
-  **不开 `talk_enabled` 时，已发布用户的行为一个字节都没变。**
+  **留在输入法模式时，已发布用户的行为一个字节都没变**（v0.6.0 的老 `talk_enabled`
+  会迁移成对话模式，所以那台机器升级后仍是对话——这是有意的，见上）。
 - **CLI 三个新入口**（都不碰麦克风）：
   `--ask <文字>`（文字 → LLM → TTS → 播放，跳过 ASR）、`--say <文字>`（只测 TTS）、
   **`--talk-turn <wav> [--lang zh|en|th]`**（**完整一轮，且走守护进程那条代码路径**：
@@ -41,8 +63,9 @@ M1 完成；**知识库投递 + 全文检索默认开（v0.4.2）**；M2 理解�
   `begin_turn()`，于是状态机把 `finish_listening` / `turn_ready` 全部按非法转移
   拒掉——**只写 warning**，统计出来是自相矛盾的「0 轮」。
 - **守护进程两处改动**：① 录音键**先 `talk::stop_playback()` 掐掉正在播的回答再开麦克风**
-  ——这是 V1 的打断入口；② 转写 / 上屏 / 知识库都走完之后，若 `talk_enabled`
+  ——这是 V1 的打断入口；② 转写 / 上屏 / 知识库都走完之后，**若 `talk_mode` 是对话模式**
   则 `answer_out_loud()` 把回答念出来，**失败只记日志，不挡上屏**。
+  模式是**每轮现读配置**的，所以菜单里切一下对下一轮立刻生效。
 - **边车与脚本**：`services/tts/backends.py`（新增 `SayBackend` + `VoxCpm2Backend`，
   HTTP 契约不变）、`services/tts/server.py`（`--backend {voxcpm2,say}`，**默认 voxcpm2**）、
   `scripts/setup-talk.sh`（按需下载两个模型，**不随包分发**）、

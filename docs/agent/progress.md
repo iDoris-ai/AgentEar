@@ -37,6 +37,31 @@ Python 侧 `python3 -m unittest discover -s services/tts -p 'test_*.py'` **34 pa
 > **已随 v0.6.0 一起提交**：代码、实测、文档、版本号在同一个 PR 里，
 > 这正是上面那条教训要求的做法。**下次也这么做：不要事后再补文档。**
 
+## 本轮（2026-09-14 晚，v0.7.0）：两模式 + 菜单入口
+
+**jason 的要求**：输入法模式和对话模式并存，**默认输入法模式**，切对话模式**要点击菜单**。
+
+- `src/config.rs`：新增 `TalkMode { InputMethod, Conversation }`（**默认 `InputMethod`**），
+  字段 `talk_mode`。v0.6.0 的 `talk_enabled` **降级为只读旧字段**（`skip_serializing`）：
+  `talk_enabled: true` → 迁移成 `"conversation"` 一次，之后落盘自动消失。
+  **迁移判据是「新键根本没出现过」而不是「新键等于默认值」**——用户从菜单切回输入法后
+  不能被旧字段顶回对话（那样会出现「菜单显示输入法、行为是对话」）。
+  这一条在真实配置上验过：`--diagnose` 打印「配置迁移：talk_enabled → talk_mode="conversation"」。
+- `src/tray.rs`：菜单**第一栏**是「模式」子菜单（输入法 / 对话，两项都列出来带勾选），
+  `TAG_MODE_BASE`。**点一下立刻生效**。切回输入法时会**掐掉正在播的回答**；
+  切进对话模式会**先探两个边车**并把「谁没起」写进日志（它们在别的进程里，菜单上看不出来）。
+- `src/i18n.rs`：三语加 `ModeSection` / `ModeInputMethod` / `ModeConversation`，
+  文案写的是**按一下键会发生什么**（「输入法模式（只上屏，不出声）」），
+  而不是丢两个抽象名词给用户。
+- `src/main.rs`：启动按模式决定要不要建会话；`finish()` 里只有对话模式才 `answer_out_loud`；
+  `--diagnose` 把「开关」改成「模式」。
+- 测试：新增 5 条（默认输入法、旧字段迁移、新字段优先、roundtrip、旧字段不写回），
+  全量 `cargo test` **244 passed / 0 failed / 6 ignored**。
+
+⚠️ **没有做到的**：菜单路径本身**没有自动化测试**（AppKit 主线程那一套）——
+「点菜单能切换」只有人肉能验；`set_talk_mode` 的三个副作用（写配置 / 掐播放 / 探边车）
+是靠代码审查 + 日志确认的，不是测出来的。
+
 ## 此刻状态：M2 已发布可用；**M3 通话链路已跑通，AEC / 自动打断未做**
 
 - 本地已无未合并分支。**远程只剩 `origin/c1-thai-asr-baseline` 未合**（ahead=13）。
