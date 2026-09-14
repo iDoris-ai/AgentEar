@@ -21,9 +21,9 @@
 //! 注入一个假的传输层就能确定性地覆盖每一条。
 
 use anyhow::{bail, Context, Result};
-use std::io::Write;
+use std::io::{Read, Write};
 use std::process::{Command, Stdio};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// 一次 HTTP POST。
 ///
@@ -32,6 +32,28 @@ use std::time::Duration;
 /// （codex 在 label 那轮抓到过）。
 pub trait Transport: Send + Sync {
     fn post_json(&self, url: &str, body: &str, timeout_secs: u64) -> Result<String>;
+
+    /// 流式 POST：**每读到一行就回调一次**，不等响应结束。
+    ///
+    /// 存在的理由是首字延迟：整句路径要等模型把话说完才开始合成，
+    /// 用户第一次听到声音在 4–6s；边出边合成能把这段重叠起来。
+    ///
+    /// ⚠️ 默认实现**直接报不支持**，而不是退化成「读完再回调一次」——
+    /// 那会让调用方以为拿到了流，实际一点没省。测试替身因此不必实现它。
+    fn post_sse_lines(
+        &self,
+        _url: &str,
+        _body: &str,
+        _timeout_secs: u64,
+        _on_line: &mut (dyn FnMut(&str) + Send),
+    ) -> Result<()> {
+        bail!("这个传输实现不支持流式响应")
+    }
+
+    /// 调用方据此决定走流式还是退回整句路径。
+    fn supports_stream(&self) -> bool {
+        false
+    }
 }
 
 /// 生产实现：调系统的 curl。
@@ -60,6 +82,40 @@ impl Transport for Curl {
         // 父进程的墙钟给到 curl 超时之上再加 5 秒：正常情况下该由 curl
         // 自己先退出，父进程这层只兜住「curl 根本没在按预期推进」的情况。
         run_with_deadline(cmd, body, Duration::from_secs(timeout_secs + 5))
+    }
+
+    fn supports_stream(&self) -> bool {
+        true
+    }
+
+    /// `curl -N`：**关掉输出缓冲**。不加它 curl 会把整段响应攒在缓冲区里，
+    /// 我们读到的仍然是「一次性的一大块」——流式就成了摆设。
+    fn post_sse_lines(
+        &self,
+        url: &str,
+        body: &str,
+        timeout_secs: u64,
+        on_line: &mut (dyn FnMut(&str) + Send),
+    ) -> Result<()> {
+        let mut cmd = Command::new("/usr/bin/curl");
+        cmd.arg("-fsS")
+            .arg("-N")
+            .arg("--max-time")
+            .arg(timeout_secs.to_string())
+            .arg("-X")
+            .arg("POST")
+            .arg("-H")
+            .arg("Content-Type: application/json")
+            .arg("-H")
+            .arg("Accept: text/event-stream")
+            .arg("--data-binary")
+            .arg("@-")
+            // ⚠️ **和 `post_json` 一样，路径由这里拼**：`url` 是 base
+            // （`http://127.0.0.1:8794`）。漏了这一段就是 404，
+            // 而且它会被上层当成「流式不可用」静默退回整句路径——
+            // 实测踩到：修好之前跑出来的是「有文字、没声音」。
+            .arg(format!("{url}/v1/chat/completions"));
+        run_with_deadline_lines(cmd, body, Duration::from_secs(timeout_secs + 5), on_line)
     }
 }
 
@@ -176,6 +232,87 @@ pub fn extract_content(raw: &str) -> Result<String> {
         bail!("模型返回空内容");
     }
     Ok(content.to_string())
+}
+
+/// 和 `run_with_deadline_bytes` 同一个形状，区别只在 **stdout 按行回调**：
+/// 每收到一行就交给调用方，不攒到最后。
+///
+/// ⚠️ **回调在读线程里跑**，所以它必须自律：不许阻塞、不许 panic 蔓延。
+/// 我们的回调只做「解析一行 SSE 并投进队列」，是纯计算。
+///
+/// ⚠️ 回调签名带 `+ Send`：它要跨进 `thread::scope` 里那条读线程。
+/// **用 scope 而不是 `thread::spawn`** 就是为了不必把回调变成 `'static`
+/// —— 第一版试过用裸指针把生命周期擦掉，那是没必要的风险。
+///
+/// 三个方向仍然是三条线程（写 stdin、读 stdout、读 stderr）——
+/// `run_with_deadline_bytes` 的注释记过为什么少一条就会死锁。
+fn run_with_deadline_lines(
+    mut cmd: Command,
+    stdin_body: &str,
+    deadline: Duration,
+    on_line: &mut (dyn FnMut(&str) + Send),
+) -> Result<()> {
+    let mut child = cmd
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .context("启动子进程失败")?;
+
+    let mut stdin = child.stdin.take().context("拿不到 stdin")?;
+    let body = stdin_body.to_string();
+    let mut out_pipe = child.stdout.take().context("拿不到 stdout")?;
+    let mut err_pipe = child.stderr.take().context("拿不到 stderr")?;
+
+    std::thread::scope(|scope| -> Result<()> {
+        scope.spawn(move || {
+            let _ = stdin.write_all(body.as_bytes());
+            drop(stdin);
+        });
+        // 读线程借用 `on_line`：scope 保证它一定在回调还活着的时候收工。
+        scope.spawn(|| {
+            use std::io::BufRead;
+            let buf = std::io::BufReader::new(&mut out_pipe);
+            for line in buf.lines() {
+                match line {
+                    Ok(l) => on_line(&l),
+                    Err(_) => break, // 管道断了：交给下面的退出码去报
+                }
+            }
+        });
+        let err_reader = scope.spawn(move || {
+            let mut buf = String::new();
+            let _ = err_pipe.read_to_string(&mut buf);
+            let n = buf.chars().count();
+            buf.chars().skip(n.saturating_sub(2048)).collect::<String>()
+        });
+
+        let start = Instant::now();
+        let status = loop {
+            match child.try_wait() {
+                Ok(Some(s)) => break s,
+                Ok(None) => {
+                    if start.elapsed() >= deadline {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        bail!("子进程超过墙钟上限 {deadline:?}，已终止");
+                    }
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                Err(e) => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(e).context("等待子进程失败");
+                }
+            }
+        };
+        // scope 结束时三条线程都会被 join，所以这里之后拿到 stderr 是安全的。
+        let err = err_reader.join().unwrap_or_default();
+        if !status.success() {
+            bail!("子进程退出码 {:?}: {}", status.code(), err.trim());
+        }
+        Ok(())
+    })
 }
 
 #[cfg(test)]
@@ -401,7 +538,7 @@ use std::sync::{Condvar, Mutex};
 /// 那条约束要的是「独立进程 + 明确协议边界，可独立重启、独立崩溃」。
 /// 拉起一个外部进程不改变这三条。**「拉起」和「内嵌」是两回事**——
 /// 内嵌是把 Python 运行时塞进我们的二进制，那才是被排除的东西。
-
+///
 /// 生命周期状态。
 ///
 /// ⚠️ **必须是状态机，不能只是 `Option<Child>`**（codex High 1）：

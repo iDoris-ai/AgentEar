@@ -114,6 +114,27 @@ pub trait LlmEngine: Send + Sync {
     fn name(&self) -> &'static str;
     /// 一轮问答。**返回的是要念出来的正文**，不含任何思考过程。
     fn reply(&self, system: &str, user: &str, lang: TalkLang) -> Result<String>;
+
+    /// 流式版：**每攒出一段就回调一次**，返回完整正文。
+    ///
+    /// 默认实现直接调 `reply` 再一次性回调——**语义正确，只是不省时间**。
+    /// 这样 `WeatherMock` 之类不必关心流式，而调用方只管调这一个入口。
+    fn reply_stream(
+        &self,
+        system: &str,
+        user: &str,
+        lang: TalkLang,
+        on_delta: &mut (dyn FnMut(&str) + Send),
+    ) -> Result<String> {
+        let text = self.reply(system, user, lang)?;
+        on_delta(&text);
+        Ok(text)
+    }
+
+    /// 是否真的逐段产出。调用方据此判断「边出边合成」能不能省下首字时间。
+    fn streams(&self) -> bool {
+        false
+    }
 }
 
 /// 零依赖的写死回答（ADR-0007 §4.6）。
@@ -195,6 +216,135 @@ impl LlmEngine for OpenAiCompat {
         let text = sidecar::extract_content(&raw)?;
         Ok(strip_thinking(&text))
     }
+
+    fn streams(&self) -> bool {
+        self.transport.supports_stream()
+    }
+
+    /// 走 OpenAI 兼容的 SSE：`"stream": true`，逐行 `data: {...}`。
+    ///
+    /// ⚠️ **思考段要边收边扣**：`strip_thinking` 是「整段文本」的函数，
+    /// 而流式下我们拿到的是一段段碎片——一个 ` thinking` 还没闭合时就把
+    /// 里面的字念出来，用户会听到模型的自言自语。
+    /// 判据是「最后一个 `<think` 比最后一个 `</think>` 更靠后」，
+    /// 在这种状态下**一个字符都不往下游放**。
+    fn reply_stream(
+        &self,
+        system: &str,
+        user: &str,
+        lang: TalkLang,
+        on_delta: &mut (dyn FnMut(&str) + Send),
+    ) -> Result<String> {
+        let body = serde_json::json!({
+            "messages": [
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ],
+            "max_tokens": 160,
+            "temperature": 0.3,
+            "stream": true,
+        })
+        .to_string();
+
+        let mut acc = String::new();
+        // 回调里要区分「正文」和「思考」：先在本地按未闭合思考段截断，
+        // 再把新增的正文交给调用方。
+        let mut emitted = 0usize;
+        let mut err: Option<anyhow::Error> = None;
+        {
+            let mut on_line = |line: &str| {
+                if err.is_some() {
+                    return;
+                }
+                let Some(payload) = line.strip_prefix("data:") else {
+                    return; // 空行、注释行（`: keep-alive`）、`event:` 都不管
+                };
+                let payload = payload.trim();
+                if payload.is_empty() || payload == "[DONE]" {
+                    return;
+                }
+                match sse_delta(payload) {
+                    Ok(Some(delta)) => {
+                        acc.push_str(&delta);
+                        let safe = think_filtered(&acc);
+                        if safe.len() > emitted {
+                            let fresh = safe[emitted..].to_string();
+                            emitted = safe.len();
+                            on_delta(&fresh);
+                        }
+                    }
+                    Ok(None) => {}
+                    Err(e) => err = Some(e),
+                }
+            };
+            // 流式失败（比如对面不支持 `stream`）就退回整句路径：
+            // **宁可慢一点，也不要这一轮没声音**。
+            match self
+                .transport
+                .post_sse_lines(&self.url, &body, self.timeout_secs, &mut on_line)
+            {
+                Ok(()) => {}
+                Err(e) => {
+                    log::warn!("流式通话失败（{e:#}），退回整句路径");
+                    // ⚠️ **`on_delta` 必须照发**：下游（切句 → 合成 → 播放）
+                    // 全靠它驱动。这里少调一次，用户拿到的是「有文字、没声音」——
+                    // 比慢得多更糟，而且日志里一切正常。实测踩到过。
+                    let text = self.reply(system, user, lang)?;
+                    on_delta(&text);
+                    return Ok(text);
+                }
+            }
+        }
+        if let Some(e) = err {
+            return Err(e);
+        }
+        let text = strip_thinking(&acc);
+        if text.is_empty() {
+            bail!("流式通话没拿到任何正文");
+        }
+        Ok(text)
+    }
+}
+
+/// 流式下「现在就可以念出来」的正文。
+///
+/// 分两步：先去闭合的思考段（复用 `strip_thinking` 的规则），再把**尚未闭合**
+/// 的思考段扣住——流式的好处在这里，也是它的风险：一个 ` thinking` 还没等到
+/// `</think>`，里面的字就已经到手了，**不扣住就会听见模型的自言自语**。
+/// 标签被切在半个字上（`<thi`）时也一起扣住，等后续字节补齐再放行。
+///
+/// ⚠️ 这与 `strip_thinking` 对**未闭合**段的规则不同（那边不吞，见它的用例）。
+/// 差别是有理由的：一次性路径拿到的是一整段文本，无法区分「真的是思考段」
+/// 和「正文里恰好写了 `<think`」；流式路径明确知道**这个标签正在写**。
+/// 保守方向是「宁可少念一句」。
+fn think_filtered(text: &str) -> String {
+    let out = strip_thinking(text);
+    if let Some(pos) = out.rfind("<think") {
+        return out[..pos].to_string();
+    }
+    // 尾部可能是半个标签：从长到短找最长的那个前缀
+    for k in (1..THINK_TAG.len()).rev() {
+        if out.ends_with(&THINK_TAG[..k]) {
+            return out[..out.len() - k].to_string();
+        }
+    }
+    out
+}
+
+/// `think_filtered` 里用来判断「尾部是不是半个标签」的那个标签。
+const THINK_TAG: &str = "<think";
+
+/// 一行 SSE 里的 `choices[0].delta.content`。
+///
+/// `Ok(None)` = 这一块没有正文（首包只带 role、末包带 finish_reason），
+/// **不是错误**。
+fn sse_delta(payload: &str) -> Result<Option<String>> {
+    let v: serde_json::Value =
+        serde_json::from_str(payload).with_context(|| format!("SSE 块不是合法 JSON: {payload}"))?;
+    Ok(v["choices"][0]["delta"]["content"]
+        .as_str()
+        .filter(|s| !s.is_empty())
+        .map(str::to_string))
 }
 
 /// 去掉模型可能带出来的 ` thinking... response` 段。
@@ -510,6 +660,17 @@ pub struct Player {
 /// 「停」信号去引入一整套消息通道**。
 static PLAYING: std::sync::Mutex<Option<Player>> = std::sync::Mutex::new(None);
 
+/// 打断次数。**流式播放要靠它才知道「这一句是被掐掉的」**：
+/// `play_blocking` 被打断时返回的时长与「播完」长得一样，
+/// 光看时长分不出来——而流式下分不出来就会继续把后面的句子往下播，
+/// 用户按了键却还在被念，这是最刺眼的一类 bug。
+static INTERRUPTS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// 打断计数器的当前值。调用方记下开始时的值，事后比对。
+pub fn interrupts() -> u64 {
+    INTERRUPTS.load(std::sync::atomic::Ordering::SeqCst)
+}
+
 /// 掐掉正在播的回答。**给录音键调用**（V1 的打断入口）。
 ///
 /// 返回 `true` 表示确实掐掉了东西。没在播时是 no-op，调用方不必先查状态。
@@ -520,6 +681,7 @@ pub fn stop_playback() -> bool {
     match slot.take() {
         Some(mut player) => {
             player.stop();
+            INTERRUPTS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             log::info!("打断：掐掉正在播放的回答");
             true
         }
@@ -973,6 +1135,117 @@ pub fn option_label(option: &(&'static str, &'static str, &'static str, &'static
 pub const DEFAULT_LLM_URL: &str = "http://127.0.0.1:8794";
 pub const DEFAULT_TTS_URL: &str = "http://127.0.0.1:8765";
 
+// ------------------------------------------------- 句子切分（流式合成用）
+
+/// 一个句子至少要这么长才单独送去合成。
+///
+/// 太短的碎片（「3.」「好的。」）单独合成有两个坏处：合成一次的**固定开销**
+/// （一次 HTTP + 一次 MLX 调用，实测 2.6s 起）会比它念出来的时间还长，
+/// 而且零样本音色在极短文本上更不稳。宁可多攒一点。
+pub const MIN_SENTENCE_CHARS: usize = 6;
+
+/// 句末标点。中英泰都算上——泰语虽然用空格分词，但句末也可能出现这些。
+fn is_sentence_end(c: char) -> bool {
+    // `.` 也在里面：英文的句子就是靠它断的。它是小数点和版本号的一部分
+    // 那种情况在 `find_cut` 里单独排掉。
+    matches!(c, '。' | '！' | '？' | '!' | '?' | '；' | ';' | '\n' | '…' | '.')
+}
+
+/// 把流式碎片攒成「可以送去合成的句子」。
+///
+/// **为什么不能按标点随手切**：句号在数字和版本号里到处都是
+/// （`3.5`、`v0.9.0`），切错了会把一句话撕成两半、或者合成出一个半截词。
+/// 所以除了句末标点，还要看**攒够长度没有**、以及**后面确实还有内容**。
+#[derive(Default)]
+pub struct SentenceSplitter {
+    pending: String,
+    emitted: usize,
+}
+
+impl SentenceSplitter {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// 已经交出去的句子数（日志与测试用）。
+    pub fn emitted(&self) -> usize {
+        self.emitted
+    }
+
+    /// 喂一段流式碎片，返回**现在就能送去合成的句子**（可能不止一句）。
+    pub fn push(&mut self, delta: &str) -> Vec<String> {
+        self.pending.push_str(delta);
+        let mut out = Vec::new();
+        while let Some(cut) = self.find_cut() {
+            let sentence: String = self.pending.drain(..cut).collect();
+            let sentence = sentence.trim();
+            if !sentence.is_empty() {
+                out.push(sentence.to_string());
+                self.emitted += 1;
+            }
+        }
+        out
+    }
+
+    /// 流结束：把剩下的一并交出来。
+    pub fn finish(&mut self) -> Option<String> {
+        let rest = self.pending.trim().to_string();
+        self.pending.clear();
+        if rest.is_empty() {
+            return None;
+        }
+        self.emitted += 1;
+        Some(rest)
+    }
+
+    /// 下一个切点（字节下标，切在标点**之后**）。
+    ///
+    /// ⚠️ 两个「先不切」的情形都要留着：
+    /// ① 标点是当前最后一个字符——后面可能还有内容，是小数点的前半截；
+    /// ② 攒的字数不够 `MIN_SENTENCE_CHARS`——继续往后找，下一处标点会自然接上。
+    fn find_cut(&self) -> Option<usize> {
+        let chars: Vec<(usize, char)> = self.pending.char_indices().collect();
+        for (i, (byte_idx, c)) in chars.iter().enumerate() {
+            if !is_sentence_end(*c) {
+                continue;
+            }
+            if i + 1 >= chars.len() {
+                continue;
+            }
+            let end = byte_idx + c.len_utf8();
+            let non_ws = self.pending[..end].chars().filter(|c| !c.is_whitespace()).count();
+            if non_ws < MIN_SENTENCE_CHARS {
+                continue;
+            }
+            // 小数点 / 版本号：`3.5`、`v0.9.0` —— 前后都是数字就不算句末。
+            // （`。` 与 `.` 是两个不同的字符，中文那句不受这里影响。）
+            if *c == '.' {
+                let prev = chars[..i].iter().rev().find(|(_, c)| !c.is_whitespace());
+                let next = chars[i + 1..].iter().find(|(_, c)| !c.is_whitespace());
+                if prev.map(|(_, c)| c.is_ascii_digit()).unwrap_or(false)
+                    && next.map(|(_, c)| c.is_ascii_digit()).unwrap_or(false)
+                {
+                    continue;
+                }
+            }
+            return Some(end);
+        }
+        None
+    }
+}
+
+/// 把一段**已经完整**的文本切成句子（目前只有测试用；
+/// 留着是因为它是 `SentenceSplitter` 最直观的用法示例）。
+#[cfg(test)]
+pub fn split_sentences(text: &str) -> Vec<String> {
+    let mut sp = SentenceSplitter::new();
+    let mut out = sp.push(text);
+    if let Some(rest) = sp.finish() {
+        out.push(rest);
+    }
+    out
+}
+
 /// 把回答和问句做**去标点、去空白**的归一化比较，判断模型是不是把问题原样退了回来。
 ///
 /// 实测动机（2026-09-14）：泰语那一轮 MiniCPM5-2B 有一次**直接把问句复述了回来**
@@ -1043,6 +1316,155 @@ pub fn speak(engines: &Engines, text: &str, lang: TalkLang) -> Result<Duration> 
     play_blocking(&wav)
 }
 
+/// 一轮问答 + 逐句合成 + 逐句播放：**「边出边合成」的落点**。
+///
+/// ## 它和 `answer` + `speak` 的区别
+///
+/// 老路径是严格串行的三拍：等 LLM 把整段话说完（0.7–0.9s）→ 整段送去做 TTS
+/// （2.6–5.1s）→ 才开始播。用户从说完到听见第一个字要 **4–6s**。
+/// 这里把后两拍**重叠**起来：LLM 一出第一个句子就送去合成，合成一段播一段，
+/// 剩下的句子在播放期间继续合成。
+///
+/// ## 为什么必须能退回老路
+///
+/// 流式依赖 SSE、依赖边车认 `stream: true`、依赖模型中途就给出句末标点。
+/// 这三条**任何一条不成立都不能变成「这一轮没声音」**——那比慢得多更糟。
+/// 所以：传输不支持流式、或流式请求直接失败，一律退回整句路径。
+///
+/// 返回 `(完整回答, 实际播出去的时长)`。
+pub fn answer_and_speak_streamed(
+    engines: &Engines,
+    cfg: &crate::config::Config,
+    user_text: &str,
+    lang: TalkLang,
+    // 第一段音频**即将开始播**时回调一次。调用方用它把会话推进到
+    // `Speaking`——流式下这一刻回答还没写完，过了这一刻再推就晚了。
+    on_first_audio: &mut dyn FnMut(),
+) -> Result<(String, Duration)> {
+    if !engines.llm.streams() {
+        // 引擎不支持流式：老老实实走老路，行为与 v0.9.0 完全一致。
+        let reply = answer(engines, cfg, user_text, lang)?;
+        on_first_audio();
+        let played = speak(engines, &reply, lang)?;
+        return Ok((reply, played));
+    }
+
+    let system = system_prompt(lang, &cfg.weather_fact());
+    let question = user_text.to_string();
+    // 生产者：收 LLM 的流 → 切句 → 逐句合成 → 投进通道。
+    // ⚠️ **合成的顺序就是播出的顺序**，FIFO 通道就够，不带序号——
+    // 多一个序号就多一处可能对不上的地方。
+    let (tx, rx) = std::sync::mpsc::channel::<Result<Vec<u8>>>();
+    let abort = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let llm = engines.llm.clone();
+    let tts = engines.tts.clone();
+    let abort_prod = abort.clone();
+    let started = Instant::now();
+    let interrupts_at_start = interrupts();
+
+    let producer = std::thread::spawn(move || -> Result<String> {
+        let mut splitter = SentenceSplitter::new();
+        let mut first_sentence = true;
+        let mut echoed = false;
+        let send = |sentence: &str| -> bool {
+            match tts.synthesize(sentence, lang) {
+                Ok(wav) => tx.send(Ok(wav)).is_ok(),
+                Err(e) => {
+                    let _ = tx.send(Err(e));
+                    false
+                }
+            }
+        };
+        let mut on_delta = |delta: &str| {
+            if echoed {
+                return; // 已经判定为复述：后面的碎片一律不再合成
+            }
+            for sentence in splitter.push(delta) {
+                if abort_prod.load(std::sync::atomic::Ordering::Relaxed) {
+                    return;
+                }
+                // ⚠️ **复述检查必须在第一句播出去之前做**：老路径能拿整段回答
+                // 去比，流式下第一句可能已经开口了。拿第一句去比是等价的代理——
+                // 复述那种坏形态就是从第一个字开始复述。
+                if first_sentence && is_echo(&sentence, &question) {
+                    log::warn!("模型把问题原样退了回来（第一句），这一轮不播");
+                    echoed = true;
+                    return;
+                }
+                first_sentence = false;
+                if !send(&sentence) {
+                    abort_prod.store(true, std::sync::atomic::Ordering::Relaxed);
+                    return;
+                }
+            }
+        };
+        let text = llm.reply_stream(&system, &question, lang, &mut on_delta)?;
+        // 尾句没有句末标点，`splitter` 里还压着——在这里补上。
+        if let Some(rest) = splitter.finish() {
+            if !echoed && !abort_prod.load(std::sync::atomic::Ordering::Relaxed) {
+                let _ = send(&rest);
+            }
+        }
+        log::info!("流式切句：共 {} 句", splitter.emitted());
+        if echoed {
+            bail!("模型把问题原样退了回来（{}），这一轮不播", llm.name());
+        }
+        Ok(text)
+    });
+
+    let mut played = Duration::ZERO;
+    let mut first_audio: Option<Duration> = None;
+    let mut consumer_err: Option<anyhow::Error> = None;
+    // 消费者：按顺序播。**这里不主动判定打断**——`play_blocking` 会被
+    // `stop_playback` 掐掉，我们只在事后看「发生过没有」，并让生产者别再合成。
+    for item in rx.iter() {
+        match item {
+            Ok(wav) => {
+                if first_audio.is_none() {
+                    let t = started.elapsed();
+                    first_audio = Some(t);
+                    log::info!(
+                        "首字延迟（流式，{} → 切句播放）：{:.2}s 起播",
+                        engines.llm.name(),
+                        t.as_secs_f32()
+                    );
+                    on_first_audio();
+                }
+                played += play_blocking(&wav)?;
+                if interrupts() != interrupts_at_start {
+                    // 被打断了：剩下的句子不必再合成，也不必再播。
+                    abort.store(true, std::sync::atomic::Ordering::Relaxed);
+                    break;
+                }
+            }
+            Err(e) => {
+                abort.store(true, std::sync::atomic::Ordering::Relaxed);
+                consumer_err = Some(e);
+                break;
+            }
+        }
+    }
+    let produced = producer.join().unwrap_or_else(|_| Err(anyhow::anyhow!("合成线程崩了")));
+    // ⚠️ 已经播出去的不补、不撤——用户听到半句，好过听到一句错位的话。
+    // 但**错误要如实报上去**，不能因为「播了一点」就说这一轮成功。
+    if let Some(e) = consumer_err {
+        return Err(e).context("流式 TTS 合成失败");
+    }
+    let reply = produced?;
+    if reply.trim().is_empty() {
+        bail!("模型返回了空回答");
+    }
+    if let Some(t) = first_audio {
+        log::info!(
+            "通话播完：首字 {:.2}s、共播 {:.2}s、回答 {} 字",
+            t.as_secs_f32(),
+            played.as_secs_f32(),
+            reply.chars().count()
+        );
+    }
+    Ok((reply, played))
+}
+
 /// 测试专用的小工具。
 #[cfg(test)]
 pub mod tests_support {
@@ -1080,6 +1502,138 @@ pub mod tests_support {
 mod tests {
     use super::*;
     use crate::sidecar::test_support::Fake;
+
+    // ------------------------------------------------ 流式：切句
+
+    /// 逐字喂进去，看它什么时候才肯交出一句。
+    ///
+    /// **为什么要逐字喂**：真实流式就是一次几个字的碎片，
+    /// 「一次喂一整段」测不出「碎片边界上判错」这类 bug。
+    #[test]
+    fn splitter_waits_for_a_complete_sentence() {
+        let mut sp = SentenceSplitter::new();
+        // 「今天天气」只有 4 个字，还没到句末标点，一句都不该出
+        assert!(sp.push("今天").is_empty());
+        assert!(sp.push("天气").is_empty());
+        // 句末标点到了，而且够长 → 出一句
+        let out = sp.push("怎么样？今天适合出门。");
+        assert_eq!(out, vec!["今天天气怎么样？"]);
+        // 剩下的留在里面，等 `finish`
+        assert_eq!(sp.finish().unwrap(), "今天适合出门。");
+    }
+
+    /// 句末标点是**最后一个字符**时先不切：后面可能还有内容。
+    ///
+    /// 这条是「按标点随手切」最容易翻车的地方——`3.` 切下去，
+    /// 下一段 `5 度` 就变成独立的一句，合成出来是「三、五度」。
+    #[test]
+    fn splitter_does_not_cut_on_a_trailing_dot() {
+        let mut sp = SentenceSplitter::new();
+        assert!(sp.push("气温 3.").is_empty(), "小数点后面还没到，不许切");
+        let out = sp.push("5 度，适合出门散步。");
+        // ⚠️ 句末标点**正好落在当前缓冲区的最后一个字符**时也是「先不切」——
+        // 因为此刻还分不清它是「一句话说完了」还是「v0.9.0 的前半截」。
+        // 真实流式里下一个碎片几毫秒就到，所以这点延迟无感；
+        // **判据是「没被切成两句」**，那句「3.」和「5 度」没有被拆开。
+        assert!(out.is_empty(), "末尾的句号要等下一个碎片才敢切");
+        assert_eq!(sp.emitted(), 0);
+        assert_eq!(sp.finish().unwrap(), "气温 3.5 度，适合出门散步。");
+    }
+
+    /// 中文的 `。` 与英文的 `.` 都要能断句——三语支持不能只顾中文。
+    #[test]
+    fn splitter_handles_all_three_languages() {
+        // 英文：靠 `.`
+        let en = split_sentences("It is sunny today. The high is 32 degrees.");
+        assert_eq!(en.len(), 2, "{en:?}");
+        assert!(en[0].ends_with("today."));
+        // 版本号里的点不能断
+        let ver = split_sentences("版本是 v0.9.0 修好的。");
+        assert_eq!(ver.len(), 1, "{ver:?}");
+        // 泰语：没有句末标点时靠 `finish` 兜底，不能丢字
+        let th = split_sentences("วันนี้อากาศดี");
+        assert_eq!(th, vec!["วันนี้อากาศดี"]);
+    }
+
+    /// 太短的碎片不单独合成：合成一次的固定开销比它念出来的时间还长。
+    #[test]
+    fn splitter_does_not_emit_tiny_fragments() {
+        let mut sp = SentenceSplitter::new();
+        // 「好。」只有 2 个字，不够 MIN_SENTENCE_CHARS → 攒着
+        assert!(sp.push("好。").is_empty());
+        // 攒够了才交出来，而且是**一句话**——「好。」没有被单独送去合成
+        let _ = sp.push("那就这么定了，明天见。");
+        assert_eq!(sp.emitted(), 0, "「好。」不许自己合成一次");
+        assert_eq!(sp.finish().unwrap(), "好。那就这么定了，明天见。");
+    }
+
+    /// 空碎片、纯空白不能变成空句子（空文本送合成会得到一段静音）。
+    #[test]
+    fn splitter_never_emits_empty_sentences() {
+        let mut sp = SentenceSplitter::new();
+        assert!(sp.push("   ").is_empty());
+        assert!(sp.push("\n\n").is_empty());
+        assert_eq!(sp.finish(), None);
+        assert_eq!(sp.emitted(), 0);
+    }
+
+    // ------------------------------------------------ 流式：思考段
+
+    /// 未闭合的思考段**一个字都不许放出去**——放出去就是听见模型的自言自语。
+    #[test]
+    fn unclosed_think_is_held_back_while_streaming() {
+        assert_eq!(think_filtered("你好。<think>我在想"), "你好。");
+        assert_eq!(think_filtered("<think>全是思考"), "");
+        // 闭合之后，里面的内容被去掉、后面的正文照常放行
+        assert_eq!(
+            think_filtered("你好。<think>想完了</think>再见。"),
+            "你好。再见。"
+        );
+    }
+
+    /// 标签被切在半个字上也要扣住：流式的碎片边界不可控。
+    #[test]
+    fn a_half_written_tag_is_held_back_too() {
+        assert_eq!(think_filtered("你好。<thi"), "你好。");
+        assert_eq!(think_filtered("你好。<think"), "你好。");
+        // 不是标签的 `<` 也要恢复：等后续字节到了自然放行
+        assert_eq!(think_filtered("1 < 2 是对的。"), "1 < 2 是对的。");
+    }
+
+    // ------------------------------------------------ 流式：SSE 解析
+
+    #[test]
+    fn sse_delta_reads_the_content_piece() {
+        let line = r#"{"choices":[{"delta":{"content":"你好"}}]}"#;
+        assert_eq!(sse_delta(line).unwrap().unwrap(), "你好");
+        // 首包只带 role、末包只带 finish_reason —— **都不是错误**
+        assert!(sse_delta(r#"{"choices":[{"delta":{"role":"assistant"}}]}"#)
+            .unwrap()
+            .is_none());
+        assert!(
+            sse_delta(r#"{"choices":[{"delta":{},"finish_reason":"stop"}]}"#)
+                .unwrap()
+                .is_none()
+        );
+        // 垃圾要报错，不能静默当成「没有正文」——那会变成「这一轮没声音」且查不出来
+        assert!(sse_delta("not json").is_err());
+    }
+
+    /// 不支持流式的传输层**必须被认出来**，否则会走进去再失败一次。
+    ///
+    /// 默认实现返回 `false`，而 `answer_and_speak_streamed` 靠它决定
+    /// 走老路还是走流式——这条判据错了，用户要么白等、要么直接没声音。
+    #[test]
+    fn a_transport_that_cannot_stream_says_so() {
+        let fake = Fake::always("{}");
+        assert!(!fake.supports_stream(), "测试替身默认不支持流式");
+        let engine = OpenAiCompat::new(
+            String::from("http://127.0.0.1:1"),
+            std::sync::Arc::new(fake),
+            1,
+        );
+        assert!(!engine.streams(), "引擎要把传输层的能力如实报出来");
+    }
 
     /// ⚠️ 这条用例的名字是承重的：`--lang zh` 被 CLI 拒过一次，
     /// 通话语言的取值必须和 ASR/CLI 那一侧对齐，不能各自发明。

@@ -2,7 +2,7 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-## 当前状态：**v0.9.0 —— 可配置语音指令表（本地快路径）**；M1/M2 已发布；**M3 通话链路已跑通，AEC / 自动打断未做**
+## 当前状态：**v0.10.0 —— 句子级流水线：边出边合成**；M1/M2 已发布；**M3 通话链路已跑通，AEC / 自动打断未做**
 
 M1 完成；**知识库投递 + 全文检索默认开（v0.4.2）**；M2 理解层已发布（v0.4.0）但默认关；
 **v0.6.0 加了通话链路（说一句答一句、可按键打断）**，**v0.5.0 加了可切换的 ASR 后端**（`--asr-backend` / `config.json` 的 `asr_backend`，
@@ -151,6 +151,37 @@ M1 完成；**知识库投递 + 全文检索默认开（v0.4.2）**；M2 理解�
     ⚠️ 这条与「留在输入法模式时已发布用户行为不变」是**有冲突**的：
     默认开 = 输入法用户也会遇到「多干一件事」。判断是**收益大于这个风险**
     （文字不丢、动作可见、一句话能关掉），但**不要写成「输入法模式完全没变」**。
+- **句子级流水线（v0.10.0）= 「首字起播」从 3.3–6.9s 压到约 2.3–2.6s**。
+  LLM 侧走 SSE 流式（`stream: true`），TTS 侧**做不到流式**（§2.3），
+  所以做的不是「音频流式」，而是**把「等 LLM 说完」和「等 TTS 合成」重叠**：
+  出一句就合成一句，合成一段播一段。
+  - **入口**：`talk::answer_and_speak_streamed`（守护进程与 `--ask` 都走它）；
+    `--ask --no-stream` 强制走老的整句路径——**它是 A/B 测首字延迟的唯一开关**，
+    也是流式出问题时的退路（不用改配置、不用重编译）。
+  - ⚠️ **地板是「一次 TTS 合成」的约 2.4s 固定开销**，不是 LLM（LLM 只占
+    0.35–0.44s）。**不要把这条优化说成「压到了 1 秒」**，也别把「首字变快」
+    写成「一轮变快」——**总时长基本没变**，省的是等待。
+  - ⚠️ **必须能退回老路，而且退回去必须有输出**：传输不支持流式 → 外层退回；
+    流式请求运行期失败 → `reply_stream` 内部退回。**两条都实测踩过坑**：
+    ① 流式 URL 漏拼 `/v1/chat/completions` → 404 → 被当成「不支持流式」；
+    ② 内部退回时忘了再调一次 `on_delta` → **有文字、没声音**且日志正常。
+    **倒退分支没有输出，比慢得多更糟。**
+  - **切句**（`SentenceSplitter`）：句末标点 + **攒够 `MIN_SENTENCE_CHARS`（6）**
+    + **标点不是当前缓冲区的最后一个字符**。最后这条是「按标点随手切」最容易
+    翻车的地方（`3.` 切下去，`5 度` 就变成独立一句）。`.` 与 `。` 是两个字，
+    版本号 `v0.9.0` 靠「前后都是数字」排掉。
+  - **思考段要边收边扣**（`think_filtered`）：`strip_thinking` 是整段文本的函数，
+    流式下必须「未闭合就一个字都不放」，否则用户会听见模型的内心独白。
+    ⚠️ 它与 `strip_thinking` 对**未闭合**段的规则不同（那边不吞，见它的用例）——
+    差别有理由：流式明确知道这个标签正在写。保守方向是「宁可少念一句」。
+  - **会话多了一条流式路径**：`speaking_started`（进 `Speaking` 相、回答先留
+    `None`）+ `note_reply`（播完补全文）。**不能用 `turn_ready(heard, None)` 代替**
+    ——那个的语义是「这一轮没有回答」，会直接回 `Idle`，于是用户按键打断时
+    `barge_in` 看不到正在播的相，`interrupted_playbacks` 统计不到，
+    而打断延迟是 V1 的出口判据。
+  - **打断**：`play_blocking` 被打断时返回的时长与「播完」长得一样，
+    所以流式用**打断计数器**（`talk::interrupts()`）区分，打断后不再合成、
+    不再播后面的句子。
 - **边车与脚本**：`services/tts/backends.py`（新增 `SayBackend` + `VoxCpm2Backend`，
   HTTP 契约不变）、`services/tts/server.py`（`--backend {voxcpm2,say}`，**默认 voxcpm2**）、
   `scripts/setup-talk.sh`（按需下载两个模型，**不随包分发**）、
@@ -223,7 +254,7 @@ clippy **刻意不加 `-D warnings`**（既有 13 条警告，加了会让 CI �
 
 ```bash
 cargo build --release
-cargo test                                    # 268 passed / 0 failed / 6 ignored（ignored 6 条：4 条要边车、1 条要联网、1 条要能出声的环境）：提交协议、崩溃语义、token 过滤、i18n、下载协议、知识库投递、通话会话状态机、语音指令表
+cargo test                                    # 281 passed / 0 failed / 6 ignored（ignored 6 条：4 条要边车、1 条要联网、1 条要能出声的环境）：提交协议、崩溃语义、token 过滤、i18n、下载协议、知识库投递、通话会话状态机、语音指令表
 ./target/release/agentear                     # 守护进程，Ctrl+Shift+R 开始/停止录音
 ./target/release/agentear --transcribe x.wav  # 离线转写，不占麦克风，用于验证 ASR 链路
 ./target/release/agentear --diagnose          # 环境自检：权限、音频设备、ASR 依赖
@@ -233,7 +264,8 @@ cargo test                                    # 268 passed / 0 failed / 6 ignore
 ./target/release/agentear --classify "这是一个 idea"      # 给一段文字分类（评测脚本也走这条）
 ./target/release/agentear --replay-kb                    # 从 routes/ 全量重建 kb/，幂等，可反复跑
 ./target/release/agentear --say "你好"                    # 只测 TTS：合成 + 播放（跳过 ASR 和 LLM）
-./target/release/agentear --ask "今天天气怎么样"           # 文字 → LLM → TTS → 播放（跳过 ASR）
+./target/release/agentear --ask "今天天气怎么样"           # 文字 → LLM → TTS → 播放（跳过 ASR），**走句子级流水线**
+./target/release/agentear --ask "…" --no-stream            # 同一个入口走**老的整句路径**（A/B 测首字延迟用）
 ./target/release/agentear --talk-turn q_zh.wav --lang zh   # **完整一轮**（ASR→会话→LLM→TTS→播放），走守护进程同一条路径
 ./target/release/agentear --commands                       # 列出语音指令表（默认给一份开箱表）
 ./target/release/agentear --add-command "记一下"            # 加一条指令（--action builtin|open_url|http_post）

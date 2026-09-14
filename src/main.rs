@@ -426,10 +426,20 @@ fn main() -> Result<()> {
             engines.tts.name(),
             engines.tts.endpoint().unwrap_or("(内置)")
         );
-        let reply = talk::answer(&engines, &cfg, &text, lang)?;
-        println!("\n问：{text}\n答：{reply}\n");
-        let played = talk::speak(&engines, &reply, lang)?;
-        println!("（已播放 {:.2}s）", played.as_secs_f32());
+        // **和守护进程同一条路**：边出边合成。`--no-stream` 强制走老的
+        // 整句路径——它是 A/B 测量首字延迟的唯一开关，也是流式出问题时的
+        // 退路（不用改配置、不用重编译）。
+        if args.iter().any(|a| a == "--no-stream") {
+            let reply = talk::answer(&engines, &cfg, &text, lang)?;
+            println!("\n问：{text}\n答：{reply}\n");
+            let played = talk::speak(&engines, &reply, lang)?;
+            println!("（整句路径，已播放 {:.2}s）", played.as_secs_f32());
+            return Ok(());
+        }
+        let (reply, played) =
+            talk::answer_and_speak_streamed(&engines, &cfg, &text, lang, &mut || {})?;
+        println!("\n问：{text}\n答：{reply}");
+        println!("\n（流式路径，已播放 {:.2}s）", played.as_secs_f32());
         return Ok(());
     }
 
@@ -1313,64 +1323,78 @@ fn answer_out_loud(cfg: &config::Config, heard: &str, lang: talk::TalkLang) {
     }
 
     println!("🔊 通话（{} → {}）…", engines.llm.name(), engines.tts.name());
-    let reply = match talk::answer(&engines, cfg, heard, lang) {
-        Ok(reply) => reply,
+    // **边出边合成**：LLM 一出第一个句子就送去合成，合成一段播一段。
+    // 引擎不支持流式时内部会自动退回整句路径（见 `answer_and_speak_streamed`），
+    // 所以这里不必判断分支。
+    //
+    // ⚠️ 进 `Speaking` 相（`speaking_started`）必须发生在**第一段音频播出之前**：
+    // 流式下这一刻全文还没生成完，但用户已经能按键打断了，
+    // 而 `barge_in` 只在 `Speaking` 相才统计 `interrupted_playbacks`。
+    let piped = talk::answer_and_speak_streamed(&engines, cfg, heard, lang, &mut || {
+        // 转写为空时 `speaking_started` 不记轮次，与 `turn_ready` 一致。
+        if let Some(Err(e)) = with_session(|s| s.speaking_started(heard)) {
+            log::warn!("通话会话记录失败: {e}");
+        }
+    });
+    let (reply, played) = match piped {
+        Ok(v) => v,
         Err(e) => {
-            log::error!("通话没拿到回答（LLM 边车起了吗？scripts/serve-talk-llm.sh）: {e:#}");
-            println!("（没拿到回答，详见日志）");
+            log::error!("通话没拿到回答（LLM 或 TTS 边车起了吗？）: {e:#}");
+            println!("（这一轮没说出来，详见日志）");
             // ⚠️ **转写照样记一轮**：用户说了什么是有价值的记录，
-            // 不能因为 LLM 挂了就当这一轮不存在（session.rs 的用例钉住这条）。
+            // 不能因为边车挂了就当这一轮不存在（session.rs 的用例钉住这条）。
             // 记完再把相标成 Failed——通话本身还活着，下一轮照常能开。
-            if let Some(Err(e)) = with_session(|s| s.turn_ready(heard, None)) {
-                log::warn!("通话会话记录失败: {e}");
+            //
+            // 两种情况要分开：已经开播过的（会话在 Speaking 相）不能再记一轮，
+            // 只能补上这句话然后收尾；还没开播的才走 `turn_ready`。
+            let speaking = matches!(with_session(|s| s.phase().as_str()), Some("speaking"));
+            if speaking {
+                with_session(|s| s.note_reply(format!("（没说出来：{e}）")));
+                with_session(|s| s.speaking_done(std::time::Duration::ZERO));
+                with_session(|s| s.fail(format!("这一轮没说完: {e}")));
+            } else {
+                if let Some(Err(e)) = with_session(|s| s.turn_ready(heard, None)) {
+                    log::warn!("通话会话记录失败: {e}");
+                }
+                with_session(|s| s.fail(format!("这一轮没拿到回答: {e}")));
             }
-            with_session(|s| s.fail(format!("这一轮没拿到回答: {e}")));
             return;
         }
     };
     println!("🔊 {reply}");
-    if let Some(Err(e)) = with_session(|s| s.turn_ready(heard, Some(reply.clone()))) {
-        log::warn!("通话会话记录失败: {e}");
+    // 全文补进这一轮（进 Speaking 相时还没有它）。
+    if let Some(Err(e)) = with_session(|s| s.note_reply(reply.clone())) {
+        log::warn!("补记回答失败: {e}");
     }
-    match talk::speak(&engines, &reply, lang) {
-        Ok(played) => {
-            log::info!("通话播完，用时 {:.2}s", played.as_secs_f32());
-            // ⚠️ 这一轮的总时长要在 `speaking_done` **之前**读：
-            // 那个调用会把计时起点清掉，之后读永远是 0（实测踩到，
-            // 日志里出现过自相矛盾的「1 轮，本轮 0ms」）。
-            let turn_ms = with_session(|s| s.turn_elapsed())
-                .flatten()
-                .map(|d| d.as_millis())
-                .unwrap_or(0);
-            // 时长要回填进这一轮：它是「被打断」与「播完」唯一的客观区别
-            // （被掐掉的那一轮时长会明显短于音频本身）。
-            if let Some(Err(e)) = with_session(|s| s.speaking_done(played)) {
-                log::warn!("通话会话收尾失败: {e}");
-            }
-            // 每轮都写一条 info：主循环不会正常退出，所以没有「退出时汇总」
-            // 这个时机。「打断了几次」是 V1 的出口判据之一，只放 debug 会在
-            // 默认日志级别下丢掉。
-            if let Some(s) = with_session(|s| {
-                format!(
-                    "通话统计：{} 轮，相 {}，语言 {}，本轮 {}ms，打断 {} 次（掐掉播放 {} 次）",
-                    s.turns().len(),
-                    s.phase().as_str(),
-                    s.lang().as_str(),
-                    turn_ms,
-                    s.barge_ins(),
-                    s.interrupted_playbacks()
-                )
-            }) {
-                log::info!("{s}");
-            }
+    {
+        log::info!("通话播完，用时 {:.2}s", played.as_secs_f32());
+        // ⚠️ 这一轮的总时长要在 `speaking_done` **之前**读：
+        // 那个调用会把计时起点清掉，之后读永远是 0（实测踩到，
+        // 日志里出现过自相矛盾的「1 轮，本轮 0ms」）。
+        let turn_ms = with_session(|s| s.turn_elapsed())
+            .flatten()
+            .map(|d| d.as_millis())
+            .unwrap_or(0);
+        // 时长要回填进这一轮：它是「被打断」与「播完」唯一的客观区别
+        // （被掐掉的那一轮时长会明显短于音频本身）。
+        if let Some(Err(e)) = with_session(|s| s.speaking_done(played)) {
+            log::warn!("通话会话收尾失败: {e}");
         }
-        Err(e) => {
-            log::error!("通话合成/播放失败（TTS 边车起了吗？scripts/serve-tts.sh）: {e:#}");
-            println!("（语音没出来，详见日志）");
-            if let Some(Err(e)) = with_session(|s| s.speaking_done(std::time::Duration::ZERO)) {
-                log::warn!("通话会话收尾失败: {e}");
-            }
-            with_session(|s| s.fail(format!("这一轮没播出来: {e}")));
+        // 每轮都写一条 info：主循环不会正常退出，所以没有「退出时汇总」
+        // 这个时机。「打断了几次」是 V1 的出口判据之一，只放 debug 会在
+        // 默认日志级别下丢掉。
+        if let Some(s) = with_session(|s| {
+            format!(
+                "通话统计：{} 轮，相 {}，语言 {}，本轮 {}ms，打断 {} 次（掐掉播放 {} 次）",
+                s.turns().len(),
+                s.phase().as_str(),
+                s.lang().as_str(),
+                turn_ms,
+                s.barge_ins(),
+                s.interrupted_playbacks()
+            )
+        }) {
+            log::info!("{s}");
         }
     }
 }

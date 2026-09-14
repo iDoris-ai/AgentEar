@@ -218,6 +218,52 @@ impl Session {
         Ok(())
     }
 
+    /// 流式专用：**回答还没写完就开始播了**，所以进播放相时拿不到全文。
+    ///
+    /// 和 `turn_ready(heard, None)` 的区别是**相**：那个的语义是「这一轮没有
+    /// 回答」，所以直接回 Idle；这里是「回答正在生成、也正在播」，
+    /// 必须进 `Speaking`——否则用户按录音键打断时，`barge_in` 看不到
+    /// 正在播的相，`interrupted_playbacks` 就统计不到，而打断延迟是 V1 的出口判据。
+    ///
+    /// 全文由 `note_reply` 补上。**空转写仍然不记轮次**，与 `turn_ready` 一致。
+    pub fn speaking_started(&mut self, heard: impl Into<String>) -> Result<(), String> {
+        if !matches!(self.phase, Phase::Thinking) {
+            return Err(format!("当前是 {}，不该有轮次结果", self.phase.as_str()));
+        }
+        let heard = heard.into();
+        if heard.trim().is_empty() {
+            self.turn_started = None;
+            self.phase = Phase::Idle;
+            return Ok(());
+        }
+        let index = self.turns.len() + 1;
+        let lang = self.lang;
+        self.turns.push(Turn {
+            index,
+            lang,
+            heard,
+            reply: None,
+            spoke_ms: 0,
+        });
+        self.phase = Phase::Speaking;
+        Ok(())
+    }
+
+    /// 流式专用：把这一轮的回答补全（`speaking_started` 时它还没写完）。
+    ///
+    /// **播完之后、`speaking_done` 之前**调用。已经有全文时不覆盖——
+    /// 覆盖会把「谁先写进去」变成隐式约定，那种约定最容易在改动里被打破。
+    pub fn note_reply(&mut self, reply: String) -> Result<(), String> {
+        let Some(turn) = self.turns.last_mut() else {
+            return Err("还没有任何一轮，不该补回答".into());
+        };
+        if turn.reply.is_some() {
+            return Err("这一轮已经有回答了".into());
+        }
+        turn.reply = Some(reply);
+        Ok(())
+    }
+
     /// 播完了。记下这一轮的实际时长。
     pub fn speaking_done(&mut self, spoke: Duration) -> Result<(), String> {
         if !matches!(self.phase, Phase::Speaking) {
@@ -289,6 +335,68 @@ mod tests {
 
     fn session() -> Session {
         Session::new(TalkLang::Zh)
+    }
+
+    /// **流式专用路径**：回答还没写完就开始播，所以进播放相时拿不到全文。
+    ///
+    /// 这条盯的是「不是 `turn_ready`」那部分：`turn_ready(heard, None)`
+    /// 会直接回 `Idle`（语义是「这一轮没有回答」），而流式这里必须进
+    /// `Speaking`——否则用户按录音键打断时 `barge_in` 看不到正在播的相，
+    /// `interrupted_playbacks` 就统计不到，而打断延迟是 V1 的出口判据。
+    #[test]
+    fn streaming_enters_speaking_before_the_reply_is_written() {
+        let mut s = session();
+        s.begin_turn().unwrap();
+        s.finish_listening().unwrap();
+
+        s.speaking_started("今天天气怎么样").unwrap();
+        assert_eq!(s.phase(), &Phase::Speaking, "边出边播时必须在 Speaking 相");
+        assert_eq!(s.turns().len(), 1);
+        assert_eq!(s.turns()[0].reply, None, "此刻全文还没生成完");
+
+        // 打断：相是 Speaking，所以这一下算「掐掉了正在播的回答」
+        assert!(s.barge_in());
+        assert_eq!(s.interrupted_playbacks(), 1);
+        assert_eq!(s.phase(), &Phase::Listening);
+    }
+
+    /// 全文在播完之后补上；**补第二次要报错**，不许静默覆盖。
+    #[test]
+    fn note_reply_fills_the_full_text_once() {
+        let mut s = session();
+        s.begin_turn().unwrap();
+        s.finish_listening().unwrap();
+        s.speaking_started("你好").unwrap();
+
+        s.note_reply("你好，今天清迈多云。".to_string()).unwrap();
+        assert_eq!(s.turns()[0].reply.as_deref(), Some("你好，今天清迈多云。"));
+        // 覆盖会让「谁先写进去」变成隐式约定，那种约定最容易在改动里被打破
+        assert!(s.note_reply("别的".to_string()).is_err());
+
+        s.speaking_done(std::time::Duration::from_millis(1200)).unwrap();
+        assert_eq!(s.turns()[0].spoke_ms, 1200);
+        assert_eq!(s.phase(), &Phase::Idle);
+    }
+
+    /// 空转写**不记轮次**——与 `turn_ready` 同一条规矩，
+    /// 否则十分钟静音会攒出一堆空轮次。
+    #[test]
+    fn streaming_records_nothing_for_an_empty_transcript() {
+        let mut s = session();
+        s.begin_turn().unwrap();
+        s.finish_listening().unwrap();
+        s.speaking_started("   ").unwrap();
+        assert!(s.turns().is_empty());
+        assert_eq!(s.phase(), &Phase::Idle);
+        // 没记轮次就没有「这一轮」，补回答自然无从谈起
+        assert!(s.note_reply("不该有地方放".to_string()).is_err());
+    }
+
+    /// 不在 `Thinking` 相时不许开播：相错了两边都对不上账。
+    #[test]
+    fn streaming_refuses_to_start_speaking_out_of_phase() {
+        let mut s = session();
+        assert!(s.speaking_started("还没开始听呢").is_err());
     }
 
     /// T3.4.2 的验收命令点名要这条：`cargo test session_state`。
