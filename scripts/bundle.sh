@@ -17,6 +17,39 @@ VERSION="$(grep -m1 '^version' "$ROOT/Cargo.toml" | cut -d'"' -f2)"
 echo "==> 构建 release"
 cargo build --release --manifest-path "$ROOT/Cargo.toml"
 
+# ⚠️ **体积守卫：vendor/ 里不该出现推理用的模型权重。**
+#
+# 踩过（2026-09-14）：我把 VoxCPM2-8bit（2.3GB）下到了 `vendor/models/talk/`，
+# 而下面这一步会把**整个 vendor/** 扫进 .app —— 于是安装包变成 4GB+，
+# GitHub Release 直接拒收（`size must be less than 2147483648`）。
+# 更糟的是**本地 `ls -lh` 只看到 240M 的旧 zip，不会注意**。
+#
+# 通话链路的模型按设计放在 `~/.agentear/talk/models/`（按需下载、不随包分发），
+# 出现在 vendor 里一定是放错了。这里**直接拦住**，别让它悄悄打进包。
+# **白名单 + 阈值**：只有这几个是**有意随包**的。
+# 不用「一律拦 200MB 以上」——`sensevoice-small-q8.gguf`（254MB）本来就该随包，
+# 那种守卫会误伤，而**误伤的守卫最后一定会被注释掉**，等于没有。
+VENDOR_MODELS="$ROOT/vendor/models"
+ALLOWED_BIG="sensevoice-small-q8.gguf fsmn-vad.gguf"
+if [ -d "$VENDOR_MODELS" ]; then
+  UNEXPECTED=""
+  while IFS= read -r f; do
+    [ -z "$f" ] && continue
+    base="$(basename "$f")"
+    case " $ALLOWED_BIG " in
+      *" $base "*) ;;
+      *) UNEXPECTED="$f" ;;
+    esac
+  done < <(find "$VENDOR_MODELS" -type f -size +200M 2>/dev/null)
+  if [ -n "$UNEXPECTED" ]; then
+    echo "!! vendor/models 里有不该随包的大文件：$UNEXPECTED" >&2
+    echo "   通话链路的模型按设计放 ~/.agentear/talk/models/（按需下载、不随包分发）。" >&2
+    echo "   实测教训：把 VoxCPM2-8bit 放在这里会让 .app 变成 4GB+，" >&2
+    echo "   GitHub Release 直接拒收（size must be less than 2147483648）。" >&2
+    exit 1
+  fi
+fi
+
 echo "==> 组装 $APP"
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
