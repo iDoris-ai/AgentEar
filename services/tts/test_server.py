@@ -87,7 +87,10 @@ class HTTPTests(unittest.TestCase):
 
         status, content_type, body = self.request("GET", "/voices")
         self.assertEqual((status, content_type), (200, "application/json"))
-        self.assertEqual(json.loads(body), server.VOICES)
+        payload = json.loads(body)
+        # v0.8.0 起 /voices 把语言目标收进 `langs`，并为支持音色的后端附带
+        # voices/styles/default_* —— 菜单从这一份读，避免两处各写一份清单。
+        self.assertEqual(payload["langs"], server.VOICES)
 
     def test_all_languages_return_their_own_wav(self):
         cases = [("zh", "Tingting", "\u660e\u5929"), ("en", "Samantha", "Hello"),
