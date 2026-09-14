@@ -10,6 +10,7 @@ mod download;
 mod engine;
 mod audio;
 mod config;
+mod commands;
 mod correct;
 mod deliver;
 mod hotkey;
@@ -449,6 +450,117 @@ fn main() -> Result<()> {
             engines.tts.name(),
             played.as_secs_f32()
         );
+        return Ok(());
+    }
+
+    // ---- 语音指令表：列 / 加 / 用录音加 ----
+    //
+    // 「录一条语音定义指令」的落点：**录的那句话先过 ASR 变成触发短语**，
+    // 再写进 `commands.json`。⚠️ ASR 会听错，所以文件必须可编辑
+    // （菜单里也有「打开指令表」），否则用户会得到一条永远匹配不上的指令。
+    if args.iter().any(|a| a == "--commands") {
+        let dir = data_root.clone();
+        for c in commands::load(&dir)? {
+            println!(
+                "{:<16} → {:?}   别名: {}",
+                c.phrase,
+                c.action,
+                if c.aliases.is_empty() { "（无）".into() } else { c.aliases.join(" / ") }
+            );
+        }
+        println!("\n文件: {}", commands::path_in(&dir).display());
+        return Ok(());
+    }
+
+    if args.iter().any(|a| a == "--add-command") || args.iter().any(|a| a == "--add-command-wav") {
+        let dir = data_root.clone();
+        let from_wav = args.iter().any(|a| a == "--add-command-wav");
+        let flag = if from_wav { "--add-command-wav" } else { "--add-command" };
+        let raw = args_after(&args, flag)
+            .first()
+            .copied()
+            .ok_or_else(|| anyhow::anyhow!("{flag} 后面要跟{}", if from_wav { "一个 wav 路径" } else { "一句短语" }))?
+            .to_string();
+        let phrase = if from_wav {
+            // 要显式给语言：中英走 SenseVoice 默认路径，泰语要指明（同 --transcribe 的规矩）
+            let lang = match flag_value(&args, "--lang") {
+                Some("th") => asr::AsrLang::Thai,
+                _ => asr::AsrLang::Auto,
+            };
+            let engine = engine::build(config::get().asr_backend, &vendor, Some(&dir))?;
+            let t = engine.transcribe(std::path::Path::new(&raw), lang)?;
+            let text = paste::sanitize(&t.text);
+            println!("听到: {text}");
+            text
+        } else {
+            raw
+        };
+        let action = match flag_value(&args, "--action").unwrap_or("builtin") {
+            "builtin" => commands::Action::Builtin {
+                name: flag_value(&args, "--name").unwrap_or("note").to_string(),
+                value: flag_value(&args, "--value").map(str::to_string),
+            },
+            "open_url" => commands::Action::OpenUrl {
+                url: flag_value(&args, "--url")
+                    .ok_or_else(|| anyhow::anyhow!("open_url 需要 --url"))?
+                    .to_string(),
+            },
+            "http_post" => commands::Action::HttpPost {
+                url: flag_value(&args, "--url")
+                    .ok_or_else(|| anyhow::anyhow!("http_post 需要 --url"))?
+                    .to_string(),
+                body: flag_value(&args, "--body").unwrap_or("").to_string(),
+            },
+            other => anyhow::bail!("--action 只认 builtin / open_url / http_post，收到 {other:?}"),
+        };
+        let cmd = commands::Command {
+            phrase: phrase.clone(),
+            aliases: Vec::new(),
+            action,
+            note: None,
+        };
+        cmd.validate().context("这条指令不合法")?;
+        let mut all = commands::load(&dir)?;
+        if all.iter().any(|c| commands::normalize(&c.phrase) == commands::normalize(&phrase)) {
+            println!("⚠️ 「{phrase}」已经存在，先删掉再加（指令表文件: {}）", commands::path_in(&dir).display());
+            return Ok(());
+        }
+        all.push(cmd);
+        commands::save(&dir, &all)?;
+        println!("✅ 已加指令「{phrase}」→ {} 条，文件: {}", all.len(), commands::path_in(&dir).display());
+        if from_wav {
+            println!("   ⚠️ 短语是 ASR 听出来的，**听错了就打开那个文件改**（菜单里也有「打开指令表」）");
+        }
+        return Ok(());
+    }
+
+    // ---- 语音指令表：**干跑**（只报命中，不执行）----
+    //
+    // 两个用处：① 用户改完 `commands.json` 可以先干跑一遍再上嘴；
+    // ② 我自己验收匹配器——**不必真的发一条录音、也不必真的发一次邮件**。
+    // 刻意**不执行**任何动作：这个入口的全部价值就是「可看不可做」。
+    if args.iter().any(|a| a == "--match-command") {
+        let dir = data_root.clone();
+        let text = args_after(&args, "--match-command")
+            .first()
+            .copied()
+            .ok_or_else(|| anyhow::anyhow!("--match-command 后面要跟一句话"))?
+            .to_string();
+        let all = commands::load(&dir)?;
+        println!("原文:     {text}");
+        println!("归一后:   {}", commands::normalize(&text));
+        match commands::match_text(&all, &text) {
+            None => {
+                println!("命中:     （无）→ 走 LLM 兜底，当作一次普通对话");
+                println!("\n指令表 {} 条，文件: {}", all.len(), commands::path_in(&dir).display());
+            }
+            Some(hit) => {
+                println!("命中短语: {}", hit.phrase);
+                println!("剩下的:   {:?}", hit.rest);
+                println!("动作:     {:?}", hit.action);
+                println!("（干跑：**没有执行**任何动作）");
+            }
+        }
         return Ok(());
     }
 
@@ -942,6 +1054,18 @@ fn finish(state: State, store: &store::Store, asr: &dyn engine::AsrEngine) -> Re
                 deliver::attempt(store, &sink, &route, ix.as_ref());
             }
 
+            // —— 语音指令表（本地快路径）——
+            //
+            // **排在 LLM 之前**：命中的指令在本地 0ms 执行完，不用等模型
+            // （省 0.7–0.9s，断网也能用）。没命中就照常走对话——
+            // 开放式的句子本来就该由 LLM 理解，指令表只认用户声明过的那几条。
+            //
+            // ⚠️ **上屏/剪贴板在前面已经做完了**，所以指令轮次也不丢文字。
+            if cfg.commands_enabled && run_command_if_matched(store, &cfg, &text, &committed.content_hash) {
+                tray::set(tray::Status::Idle);
+                return Ok(State::Idle);
+            }
+
             // —— 通话形态：说一句、答一句 ——
             //
             // **排在最后**，和知识库投递同一个道理：文字已经进了剪贴板、
@@ -962,6 +1086,132 @@ fn finish(state: State, store: &store::Store, asr: &dyn engine::AsrEngine) -> Re
 
     tray::set(tray::Status::Idle);
     Ok(State::Idle)
+}
+
+/// 指令表命中就执行，返回是否命中。
+///
+/// - `open_url` → 系统 `open`（**只允许 http/https/mailto**，在 `commands.rs` 里校验）
+/// - `http_post` → `curl` POST 一个 JSON 到**用户自己配的** webhook（Notion / n8n / 自建）
+/// - `builtin` → 本地动作（切语系/语气/模式、记一条到 kb）
+///
+/// ⚠️ **绝不执行 shell**：语音识别错一个字就变成在你机器上执行命令，而且没有撤销键。
+/// 所以动作是一个**三种的封闭集合**，不是「随便配个命令」。
+fn run_command_if_matched(
+    store: &store::Store,
+    cfg: &config::Config,
+    text: &str,
+    content_hash: &str,
+) -> bool {
+    let commands = match commands::load(store.root()) {
+        Ok(c) => c,
+        Err(e) => {
+            log::error!("读指令表失败，这一轮按普通对话处理: {e:#}");
+            return false;
+        }
+    };
+    let Some(hit) = commands::match_text(&commands, text) else {
+        return false;
+    };
+    log::info!("指令命中「{}」→ {:?}（槽位 {:?}）", hit.phrase, hit.action, hit.rest);
+
+    let outcome: Result<String> = match &hit.action {
+        commands::Action::OpenUrl { url } => {
+            let target = commands::fill(url, &hit.rest, text);
+            std::process::Command::new("/usr/bin/open")
+                .arg(&target)
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .map(|_| format!("已打开 {target}"))
+                .map_err(|e| anyhow::anyhow!("打开 URL 失败: {e}"))
+        }
+        commands::Action::HttpPost { url, body } => {
+            let target = commands::fill(url, &hit.rest, text);
+            let payload = commands::fill(body, &hit.rest, text);
+            let payload = if payload.trim().is_empty() {
+                serde_json::json!({ "text": text, "rest": hit.rest }).to_string()
+            } else {
+                payload
+            };
+            let mut cmd = std::process::Command::new("/usr/bin/curl");
+            cmd.arg("-fsS")
+                .arg("--max-time")
+                .arg(cfg.talk_timeout_secs.to_string())
+                .arg("-X")
+                .arg("POST")
+                .arg("-H")
+                .arg("Content-Type: application/json")
+                .arg("--data-binary")
+                .arg("@-")
+                .arg(&target)
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null());
+            match cmd.spawn() {
+                Ok(mut child) => {
+                    use std::io::Write;
+                    if let Some(mut stdin) = child.stdin.take() {
+                        let _ = stdin.write_all(payload.as_bytes());
+                    }
+                    let _ = child.wait();
+                    Ok(format!("已发送到 {target}"))
+                }
+                Err(e) => Err(anyhow::anyhow!("webhook 调用失败: {e}")),
+            }
+        }
+        commands::Action::Builtin { name, value } => match commands::BuiltinAction::parse(name) {
+            Ok(commands::BuiltinAction::Style) => {
+                let v = value.clone().unwrap_or_default();
+                config::update(|c| c.tts_style = v.clone());
+                Ok(format!("语系已切到 {v}"))
+            }
+            Ok(commands::BuiltinAction::Tone) => {
+                let v = value.clone().unwrap_or_default();
+                config::update(|c| c.tts_tone = v.clone());
+                Ok(format!("语气已切到 {v}"))
+            }
+            Ok(commands::BuiltinAction::Mode) => {
+                let v = value.clone().unwrap_or_default();
+                match v.as_str() {
+                    "conversation" => set_mode(config::TalkMode::Conversation),
+                    "input_method" => set_mode(config::TalkMode::InputMethod),
+                    other => log::error!("内置动作 mode 的值不认识: {other:?}"),
+                }
+                Ok(format!("模式已切到 {v}"))
+            }
+            Ok(commands::BuiltinAction::Note) => {
+                // 记一条到 kb/：**复用现成的 routes → kb 投递链路**，不另造文件写入。
+                // hash 用「这一段录音的 hash + 后缀」：指令笔记是**派生记录**，
+                // 直接复用原 hash 会覆盖普通流程刚写的那条 routes。
+                let route = route::Route::new(
+                    format!("{content_hash}-cmd"),
+                    label::Label::Note,
+                    label::Source::Explicit,
+                    text,
+                );
+                match store.write_route(&route) {
+                    Ok(_) => {
+                        let sink = kb::FileSink::new(store.root(), cfg.kb_root(store.root()));
+                        let ix = index::Index::open(store.root()).ok();
+                        deliver::attempt(store, &sink, &route, ix.as_ref());
+                        Ok("已记一条到知识库".to_string())
+                    }
+                    Err(e) => Err(anyhow::anyhow!("写 routes 失败: {e:#}")),
+                }
+            }
+            Err(e) => Err(e),
+        },
+    };
+    match outcome {
+        Ok(msg) => {
+            log::info!("指令执行完成：{msg}");
+            println!("⚡ {msg}");
+        }
+        // 失败**不挡上屏**：文字已经在剪贴板里了
+        Err(e) => log::error!("指令执行失败（不影响上屏）: {e:#}"),
+    }
+    true
 }
 
 /// 切模式。**按键和菜单都走这里**，副作用只有一份实现。

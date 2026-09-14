@@ -101,6 +101,7 @@ const TAG_VOICE_BASE: isize = 800;
 const TAG_CORRECT_TERMS: isize = 5;
 const TAG_OPEN_TERMS: isize = 6;
 const TAG_START_SIDECAR: isize = 7;
+const TAG_OPEN_COMMANDS: isize = 8;
 /// `+0` 是「系统默认」，`+1..` 对应 `DEVICE_SNAPSHOT` 的下标。
 const TAG_DEVICE_BASE: isize = 1000;
 
@@ -587,6 +588,13 @@ fn populate(menu: &NSMenu, mtm: MainThreadMarker, target: &MenuTarget) {
     menu.addItem(&item(
         mtm,
         target,
+        i18n::t(lang, Key::OpenCommands),
+        TAG_OPEN_COMMANDS,
+        false,
+    ));
+    menu.addItem(&item(
+        mtm,
+        target,
         i18n::t(lang, Key::OpenDataDir),
         TAG_OPEN_DATA,
         false,
@@ -729,6 +737,31 @@ fn handle(tag: isize, mtm: MainThreadMarker) {
                     log::error!("边车拉不起来，看日志里的原因");
                 }
             });
+        }
+        TAG_OPEN_COMMANDS => {
+            // 同 OpenTerms：这是 AppKit 主线程，**不在这里解析文件**，
+            // 只保证它存在、然后交给系统的默认编辑器。
+            let Some(root) = DATA_ROOT.get() else {
+                log::error!("数据目录未初始化");
+                return;
+            };
+            let path = crate::commands::path_in(root);
+            if !path.exists() {
+                // 第一次点：把默认表写出来，用户改的就是它
+                if let Err(e) = crate::commands::save(root, &crate::commands::default_commands()) {
+                    log::error!("写默认指令表失败: {e:#}");
+                    return;
+                }
+            }
+            if let Err(e) = std::process::Command::new("/usr/bin/open")
+                .arg("-t")
+                .arg(&path)
+                .spawn()
+            {
+                log::error!("打开指令表失败: {e}");
+            } else {
+                log::info!("已打开指令表 {}", path.display());
+            }
         }
         TAG_OPEN_TERMS => {
             let Some(root) = DATA_ROOT.get() else {
