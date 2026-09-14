@@ -375,7 +375,8 @@ scripts/serve-tts.sh          # TTS，默认 127.0.0.1:8765
   **v0.8.1**（PR #54）菜单「说话」三栏 + `/health` 自报峰值 RSS + 真人参考音频入口。
   ⚠️ 音色**仍未经人耳验收**，声学代理指标区分不出配置（同配置复测差 1 个半音，
   大于配置间差异），所以「像真人有感情」这条**没有结论**
-- 2026-09-14 **v0.9.0 语音指令表**（本地快路径 + LLM 兜底）：`src/commands.rs`
+- 2026-09-14 **v0.9.0 语音指令表**（PR [#56](https://github.com/iDoris-ai/AgentEar/pull/56)，
+  合并 commit `a145d3c`）：`src/commands.rs`
   （动作是 `builtin`/`open_url`/`http_post` 三种封闭集合，**不执行 shell**）、
   菜单「打开指令表」、CLI `--commands` / `--add-command` / `--add-command-wav` /
   **`--match-command`（干跑）**；`cargo test` 238→**268**。
