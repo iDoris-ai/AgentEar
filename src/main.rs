@@ -1202,12 +1202,17 @@ fn diagnose(vendor: &std::path::Path) -> Result<()> {
         talk_cfg_engines.tts.name(),
         talk_cfg_engines.tts.endpoint().unwrap_or("(内置 say)")
     );
+    // ⚠️ 两条「谁没起」要真的**分别**记下来，最后那句警告只在**确实缺东西**时打。
+    // 曾经写成无条件打——两个边车都在跑也照样喊「有一个没起」，
+    // 而自检骗人比没有自检更糟（这个仓库为这条栽过不止一次）。
+    let mut missing: Vec<&str> = Vec::new();
     if cfg.talk_llm_engine != "mock" {
         match talk::probe_endpoint(&llm_url) {
             Ok(()) => println!("  ✅ LLM 边车在跑"),
             Err(e) => {
                 println!("  ⚪ LLM 边车: {e}");
                 println!("     启动：scripts/serve-talk-llm.sh（首次需先跑 scripts/setup-talk.sh）");
+                missing.push("LLM");
             }
         }
     }
@@ -1217,12 +1222,16 @@ fn diagnose(vendor: &std::path::Path) -> Result<()> {
             Err(e) => {
                 println!("  ⚪ TTS 边车: {e}");
                 println!("     启动：scripts/serve-tts.sh（首次需先跑 scripts/setup-talk.sh）");
+                missing.push("TTS");
             }
         }
     }
     println!("  通话语言: {}", cfg.talk_lang.as_str());
-    if cfg.talk_enabled {
-        println!("  ⚠️ 开关是开的——两个边车有一个没起，这一轮就会只有文字没有声音");
+    if cfg.talk_enabled && !missing.is_empty() {
+        println!(
+            "  ⚠️ 开关是开的，但 {} 边车没起——这一轮会只有文字没有声音",
+            missing.join(" / ")
+        );
     }
 
     println!("\n数据目录: {}", data_root()?.display());
