@@ -123,10 +123,22 @@ pub fn set_data_root(p: PathBuf) {
 /// 菜单栏标题。语言显式传入——只有主线程调用它（0.5s 定时器），
 /// 工作线程只更新上面那两个原子量，不碰文案。
 fn title(lang: Lang) -> String {
-    match STATUS.load(Ordering::Relaxed) {
+    let base = match STATUS.load(Ordering::Relaxed) {
         1 => format!("● {}s", SECS.load(Ordering::Relaxed)),
         2 => i18n::t(lang, Key::TitleTranscribing).to_string(),
         _ => "🎙".to_string(),
+    };
+    // **模式小标记**（jason 2026-09-14）：「后边有个小就行」。
+    //
+    // 只在**非默认**的对话模式加一个符号——默认状态不该也多背一个字符，
+    // 而菜单栏寸土寸金。要是不加这一笔，用户只能靠回忆自己那天点了几下，
+    // 或者点开菜单看勾选（那正是 v0.7.0 被抱怨「看不到」的原因）。
+    //
+    // 放在**后面**而不是前面：前面那个 🎙 表达「我在录音」这件更急的事，
+    // 不能因为切模式就把它挤走。
+    match config::get().talk_mode {
+        config::TalkMode::Conversation => format!("{base}💬"),
+        config::TalkMode::InputMethod => base,
     }
 }
 
@@ -823,6 +835,21 @@ mod tests {
             let entries = mode_menu_entries(lang, TalkMode::InputMethod);
             assert_ne!(entries[0].0, entries[1].0, "{lang:?} 下两个模式标题相同");
         }
+    }
+
+    /// 模式小标记：**只在对话模式加**，而且不能把「正在录音」那个更急的指示挤掉。
+    #[test]
+    fn mode_marker_is_appended_only_in_conversation() {
+        let marker = |mode: config::TalkMode, base: &str| match mode {
+            config::TalkMode::Conversation => format!("{base}💬"),
+            config::TalkMode::InputMethod => base.to_string(),
+        };
+        use config::TalkMode::{Conversation, InputMethod};
+        assert_eq!(marker(InputMethod, "🎙"), "🎙", "默认模式不该多背一个字符");
+        assert_eq!(marker(Conversation, "🎙"), "🎙💬");
+        // 录音中：计时在前、标记在后，计时不被挤掉
+        assert_eq!(marker(Conversation, "● 7s"), "● 7s💬");
+        assert!(marker(Conversation, "● 7s").starts_with("● 7s"));
     }
 
     /// 不属于模式区的 tag 一律返回 None——否则别的菜单项会被误当成模式切换。
