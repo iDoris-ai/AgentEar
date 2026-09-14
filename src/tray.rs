@@ -506,28 +506,15 @@ fn set_talk_mode(mode: config::TalkMode) {
         config::TalkMode::Conversation => {
             let cfg = config::get();
             let engines = crate::talk::Engines::from_config(&cfg);
-            let llm_url = cfg
-                .talk_llm_url
-                .clone()
-                .unwrap_or_else(|| crate::talk::DEFAULT_LLM_URL.to_string());
-            let tts_url = cfg
-                .tts_url
-                .clone()
-                .unwrap_or_else(|| crate::talk::DEFAULT_TTS_URL.to_string());
-            // 只报缺什么，不拦着用户切——他要切是他自己的选择。
-            if cfg.talk_llm_engine != "mock" {
-                if let Err(e) = crate::talk::probe_endpoint(&llm_url) {
-                    log::warn!("对话模式的 LLM 边车没起（{llm_url}）：{e}");
-                    log::warn!("  启动：scripts/serve-talk-llm.sh（首次先跑 scripts/setup-talk.sh）");
-                }
-            }
-            if cfg.talk_tts_engine != "say" {
-                if let Err(e) = crate::talk::probe_endpoint(&tts_url) {
-                    log::warn!("对话模式的 TTS 边车没起（{tts_url}）：{e}");
-                    log::warn!("  启动：scripts/serve-tts.sh（首次先跑 scripts/setup-talk.sh）");
-                }
-            }
-            log::info!("对话模式已就绪（LLM {} / TTS {}）", engines.llm.name(), engines.tts.name());
+            // **不只是报警，而是真的去把它们弄起来**（连接优先、拉起兜底）。
+            // v0.7.0 只写日志是不够的：用户点完菜单就去按键了，
+            // 而那两个进程在别处，日志他看不到。
+            crate::talk::ensure_sidecars_async(&cfg);
+            log::info!(
+                "已切到对话模式（LLM {} / TTS {}）——正在确认两个边车，没起会按配置拉起",
+                engines.llm.name(),
+                engines.tts.name()
+            );
         }
     }
 }
@@ -636,6 +623,7 @@ fn handle(tag: isize, mtm: MainThreadMarker) {
             // 收拾**我们自己拉起的**边车。不是我们拉起的一律不动——
             // 用户可能自己开着终端跑服务，退出时把它杀了是很难排查的越权。
             crate::sidecar::shutdown();
+            crate::talk::shutdown_spawned();
             NSApplication::sharedApplication(mtm).terminate(None);
         }
         t if (TAG_TRIGGER_BASE..TAG_TRIGGER_BASE + 2).contains(&t) => {

@@ -635,6 +635,274 @@ pub fn probe_endpoint(url: &str) -> Result<()> {
     Ok(())
 }
 
+/// 一个通话边车的规格：叫什么、连哪、连不上时按什么命令拉。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Sidecar {
+    /// 只用来写日志（「LLM 边车」「TTS 边车」）。
+    pub name: &'static str,
+    pub url: String,
+    /// 空 = 不知道怎么拉。**这是默认值，不是缺陷**——见 `sidecar_action`。
+    pub command: Vec<String>,
+}
+
+/// 连不上时该干什么。**抽成纯函数是为了能把四种组合都测掉**：
+/// 最容易出的错是「autostart 开着但命令是空的」被当成「已经处理过了」，
+/// 结果用户按了键才发现没声音，而日志里什么都没有。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SidecarAction {
+    /// 已经在跑，什么都不用做。
+    AlreadyUp,
+    /// 按配置的命令拉起来。
+    Start,
+    /// 拉不了，理由要说出来（日志里必须能看出**该跑哪条命令**）。
+    CantStartNoCommand,
+    /// 拉不了：用户把自动拉起关了。
+    CantStartDisabled,
+}
+
+pub fn sidecar_action(up: bool, autostart: bool, command: &[String]) -> SidecarAction {
+    if up {
+        return SidecarAction::AlreadyUp;
+    }
+    if !autostart {
+        return SidecarAction::CantStartDisabled;
+    }
+    if command.is_empty() {
+        return SidecarAction::CantStartNoCommand;
+    }
+    SidecarAction::Start
+}
+
+/// 对话模式需要的边车清单。**按引擎派生，不是写死两个**：
+/// 用 `mock` LLM 或 `say` TTS 时那一路根本不需要边车，探它只会误导用户。
+pub fn sidecar_specs(cfg: &crate::config::Config) -> Vec<Sidecar> {
+    let mut out = Vec::new();
+    if cfg.talk_llm_engine != "mock" {
+        out.push(Sidecar {
+            name: "LLM",
+            url: cfg
+                .talk_llm_url
+                .clone()
+                .unwrap_or_else(|| DEFAULT_LLM_URL.to_string()),
+            command: cfg.talk_llm_start_command.clone(),
+        });
+    }
+    if cfg.talk_tts_engine != "say" {
+        out.push(Sidecar {
+            name: "TTS",
+            url: cfg
+                .tts_url
+                .clone()
+                .unwrap_or_else(|| DEFAULT_TTS_URL.to_string()),
+            command: cfg.talk_tts_start_command.clone(),
+        });
+    }
+    out
+}
+
+/// 我们自己拉起来的边车。**只收自己起的**——用户手工跑的进程一律不动，
+/// 退出时杀掉别人的服务是很难排查的越权（`sidecar.rs` 定的规矩）。
+static SPAWNED: std::sync::Mutex<Vec<(&'static str, std::process::Child)>> =
+    std::sync::Mutex::new(Vec::new());
+
+/// 同一批 pid 的**无锁副本**，专供信号处理函数用。
+///
+/// 信号处理函数必须 async-signal-safe：不能锁 `Mutex`、不能分配内存。
+/// 所以这里存原子值，handler 里只做 `kill(2)`（`sidecar.rs` 定的同一条规矩）。
+///
+/// 通信边车最多两个（LLM + TTS），固定长度就够——**不引 Vec 是因为
+/// handler 里不能分配**。
+static SPAWNED_PIDS: [std::sync::atomic::AtomicI32; 2] =
+    [std::sync::atomic::AtomicI32::new(0), std::sync::atomic::AtomicI32::new(0)];
+
+/// **给信号处理函数调用**：把我们拉起的边车都 SIGTERM 掉。
+///
+/// 不这么做的话，`Ctrl+C` / `kill` 退出时那两个进程（常驻约 4 GB）会活下来——
+/// 菜单 Quit 那条路会收，但信号那条路不走它。
+pub fn kill_spawned_pids_from_signal() {
+    for slot in SPAWNED_PIDS.iter() {
+        let pid = slot.load(std::sync::atomic::Ordering::SeqCst);
+        if pid > 0 {
+            unsafe { libc::kill(pid, libc::SIGTERM) };
+        }
+    }
+}
+
+fn register_pid(child: &std::process::Child) {
+    use std::sync::atomic::Ordering;
+    for slot in SPAWNED_PIDS.iter() {
+        if slot
+            .compare_exchange(0, child.id() as i32, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok()
+        {
+            return;
+        }
+    }
+    // 两个槽都满了：说明清单里超过两个边车了（现在不可能，见 sidecar_specs）
+    log::warn!("边车 pid 槽位已满，这个进程退出时不会被自动收掉");
+}
+
+fn clear_pids() {
+    for slot in SPAWNED_PIDS.iter() {
+        slot.store(0, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+/// 就绪等待上限。MLX 那两个模型要加载权重：TTS 实测 0.9–1.5s，
+/// LLM 冷启动要几秒到十几秒（含 Metal 着色器编译），所以给足。
+const READY_TIMEOUT: Duration = Duration::from_secs(90);
+
+/// **连接优先、拉起兜底**（ADR-0002 §8 的老规矩，通话边车照抄）。
+///
+/// 返回每个边车最终是否可用。**这个函数会阻塞**（最多 `READY_TIMEOUT`），
+/// 所以调用方要用 [`ensure_sidecars_async`]——菜单和启动路径都不能卡住。
+pub fn ensure_sidecars(cfg: &crate::config::Config) -> Vec<(&'static str, bool)> {
+    let mut out = Vec::new();
+    for spec in sidecar_specs(cfg) {
+        let up = probe_endpoint(&spec.url).is_ok();
+        match sidecar_action(up, cfg.talk_autostart, &spec.command) {
+            SidecarAction::AlreadyUp => {
+                log::info!("{} 边车已在跑：{}", spec.name, spec.url);
+                out.push((spec.name, true));
+            }
+            SidecarAction::CantStartDisabled => {
+                log::warn!(
+                    "{} 边车没起（{}），且配置里关了自动拉起（talk_autostart=false）",
+                    spec.name,
+                    spec.url
+                );
+                log::warn!("  自己起一下：{}", startup_hint(spec.name));
+                out.push((spec.name, false));
+            }
+            SidecarAction::CantStartNoCommand => {
+                // **不许静默。** 没有拉起命令不是错，但用户必须知道该跑什么，
+                // 否则他按了键只会有文字没有声音（这是 v0.6/v0.7.0 的短板）。
+                log::warn!("{} 边车没起（{}），也没有配置拉起命令", spec.name, spec.url);
+                log::warn!("  自己起一下：{}", startup_hint(spec.name));
+                out.push((spec.name, false));
+            }
+            SidecarAction::Start => {
+                log::info!(
+                    "{} 边车没起，按配置拉起：{}",
+                    spec.name,
+                    spec.command.join(" ")
+                );
+                match spawn_sidecar(spec.name, &spec.command) {
+                    Ok(()) => {
+                        let ready = wait_ready(spec.name, &spec.url);
+                        if ready {
+                            log::info!("{} 边车已就绪", spec.name);
+                        } else {
+                            log::error!(
+                                "{} 边车拉起后在 {:?} 内没就绪，用 --diagnose 看详情",
+                                spec.name,
+                                READY_TIMEOUT
+                            );
+                        }
+                        out.push((spec.name, ready));
+                    }
+                    Err(e) => {
+                        log::error!("拉起 {} 边车失败：{e}", spec.name);
+                        out.push((spec.name, false));
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
+/// 起一条后台线程做 [`ensure_sidecars`]——**菜单和启动路径都不能被它卡住**。
+///
+/// 90 秒的就绪等待放在主线程上，菜单栏会整整一分半不响应，
+/// 而用户此刻正在按录音键。
+pub fn ensure_sidecars_async(cfg: &crate::config::Config) {
+    let cfg = cfg.clone();
+    std::thread::spawn(move || {
+        let results = ensure_sidecars(&cfg);
+        let down: Vec<&str> = results
+            .iter()
+            .filter(|(_, up)| !up)
+            .map(|(name, _)| *name)
+            .collect();
+        if down.is_empty() {
+            log::info!("对话模式的边车都就绪了");
+        } else {
+            log::warn!(
+                "对话模式还缺 {} 边车——这一轮会只有文字没有声音（跑 --diagnose 看详情）",
+                down.join(" / ")
+            );
+        }
+    });
+}
+
+fn spawn_sidecar(name: &'static str, command: &[String]) -> Result<()> {
+    let (prog, args) = command
+        .split_first()
+        .ok_or_else(|| anyhow::anyhow!("拉起命令为空"))?;
+    let child = Command::new(prog)
+        .args(args)
+        // 输出丢弃：边车自己写日志；接进没人读的管道，写满会把它卡死
+        // （download.rs 踩过同类坑，sidecar.rs 同一条理由）
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .with_context(|| format!("启动 {prog} 失败"))?;
+    register_pid(&child);
+    SPAWNED
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .push((name, child));
+    Ok(())
+}
+
+/// 等某个边车就绪。**按名字盯住我们自己起的那个进程**：
+/// 它要是启动后就退出（命令写错、venv 缺包），不该再傻等满 90 秒。
+fn wait_ready(name: &'static str, url: &str) -> bool {
+    let start = Instant::now();
+    while start.elapsed() < READY_TIMEOUT {
+        std::thread::sleep(Duration::from_millis(1500));
+        if probe_endpoint(url).is_ok() {
+            log::info!("{name} 边车等了 {:.1}s", start.elapsed().as_secs_f32());
+            return true;
+        }
+        let mut guard = SPAWNED.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((_, child)) = guard.iter_mut().find(|(n, _)| *n == name) {
+            if let Ok(Some(code)) = child.try_wait() {
+                log::error!("{name} 边车启动后立刻退出了（{code:?}），检查拉起命令能不能单独跑通");
+                guard.retain(|(n, _)| *n != name);
+                return false;
+            }
+        }
+    }
+    false
+}
+
+/// 该跑哪条命令——**日志里必须给出这条**，否则「没声音」对用户就是无解的。
+fn startup_hint(name: &str) -> &'static str {
+    match name {
+        "LLM" => "scripts/serve-talk-llm.sh（首次先跑 scripts/setup-talk.sh）",
+        _ => "scripts/serve-tts.sh（首次先跑 scripts/setup-talk.sh）",
+    }
+}
+
+/// 退出时收掉**我们自己拉起的**边车。幂等。
+///
+/// 为什么不留在后台：它们常驻 2.5 GB + 1.6 GB。AgentEar 退出了还占着 4 GB，
+/// 用户只能去活动监视器里找——这是不能留的。
+pub fn shutdown_spawned() {
+    let kids: Vec<(&'static str, std::process::Child)> = {
+        let mut guard = SPAWNED.lock().unwrap_or_else(|e| e.into_inner());
+        std::mem::take(&mut *guard)
+    };
+    for (name, mut child) in kids {
+        log::info!("退出：关掉我们拉起的 {name} 边车");
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+    clear_pids();
+}
+
 pub const DEFAULT_LLM_URL: &str = "http://127.0.0.1:8794";
 pub const DEFAULT_TTS_URL: &str = "http://127.0.0.1:8765";
 
@@ -886,6 +1154,66 @@ mod tests {
         );
         // 幂等：没有在播的时候调用不该 panic，也不该报告成功
         assert!(!stop_playback(), "没有在播时不该报告掐掉了");
+    }
+
+    // ---- 边车生命周期（连接优先、拉起兜底）----
+
+    /// **这四种组合就是这条链路的全部判据。** 最容易出的错不是「拉不起来」，
+    /// 而是「autostart 开着但命令是空的」被当成已经处理过——用户按了键才发现
+    /// 没声音，日志里却什么都没有。
+    #[test]
+    fn sidecar_action_covers_the_whole_matrix() {
+        let cmd = vec!["/bin/true".to_string()];
+        assert_eq!(sidecar_action(true, false, &[]), SidecarAction::AlreadyUp);
+        assert_eq!(sidecar_action(true, true, &cmd), SidecarAction::AlreadyUp);
+        assert_eq!(sidecar_action(false, false, &cmd), SidecarAction::CantStartDisabled);
+        assert_eq!(sidecar_action(false, true, &[]), SidecarAction::CantStartNoCommand);
+        assert_eq!(sidecar_action(false, true, &cmd), SidecarAction::Start);
+        // 已经在跑时，另外两个参数不该影响判断（别去动一个健康的服务）
+        assert_eq!(sidecar_action(true, true, &[]), SidecarAction::AlreadyUp);
+    }
+
+    /// **按引擎派生，不是写死两个。** 用 mock LLM / say TTS 时那一路不需要边车，
+    /// 探它只会让日志里出现一条永远连不上的警告。
+    #[test]
+    fn sidecar_specs_follow_the_configured_engines() {
+        let mut cfg = crate::config::Config::default();
+        cfg.talk_llm_engine = "mock".to_string();
+        cfg.talk_tts_engine = "say".to_string();
+        assert!(sidecar_specs(&cfg).is_empty(), "全内置时一个边车都不该探");
+
+        cfg.talk_llm_engine = "openai_compat".to_string();
+        let specs = sidecar_specs(&cfg);
+        assert_eq!(specs.len(), 1);
+        assert_eq!(specs[0].name, "LLM");
+        assert_eq!(specs[0].url, DEFAULT_LLM_URL);
+
+        cfg.talk_tts_engine = "http".to_string();
+        let specs = sidecar_specs(&cfg);
+        assert_eq!(specs.len(), 2);
+        assert_eq!(specs[1].name, "TTS");
+        assert_eq!(specs[1].url, DEFAULT_TTS_URL);
+
+        // 自定义地址要透传下去（用户可能把模型跑在别的机器/端口上）
+        cfg.talk_llm_url = Some("http://127.0.0.1:9999".to_string());
+        assert_eq!(sidecar_specs(&cfg)[0].url, "http://127.0.0.1:9999");
+    }
+
+    /// 「该跑哪条命令」必须在日志里给出来——没有它，「没声音」对用户就是无解的。
+    #[test]
+    fn startup_hints_name_the_scripts() {
+        for name in ["LLM", "TTS"] {
+            let hint = startup_hint(name);
+            assert!(hint.contains("scripts/serve-"), "{name} 的提示要指向脚本：{hint}");
+            assert!(hint.contains("setup-talk"), "首次还要说清先跑 setup：{hint}");
+        }
+    }
+
+    /// 命令是空的时**不能**去 spawn——空的 argv 会让 `split_first` 拿到 None，
+    /// 这里顺手钉住那条错误路径不会 panic。
+    #[test]
+    fn spawning_an_empty_command_is_an_error_not_a_panic() {
+        assert!(spawn_sidecar("LLM", &[]).is_err());
     }
 
     #[test]

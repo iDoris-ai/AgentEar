@@ -62,6 +62,28 @@ Python 侧 `python3 -m unittest discover -s services/tts -p 'test_*.py'` **34 pa
 「点菜单能切换」只有人肉能验；`set_talk_mode` 的三个副作用（写配置 / 掐播放 / 探边车）
 是靠代码审查 + 日志确认的，不是测出来的。
 
+## 本轮（2026-09-14 晚，v0.7.1）：对话模式的边车生命周期
+
+**jason 问的**：「对话模式需要后台 cpm 模型运行，对么？如果没有，你要拉起模型运行，对吧？」
+——对，而且这正是 v0.7.0 的短板：那时菜单只**写日志报警**，用户点完菜单就去按键了，日志他看不到。
+
+- `talk::ensure_sidecars_async`：**连接优先、拉起兜底**（ADR-0002 §8 的老规矩）。
+  启动（对话模式）与切菜单两个入口都会调；**必须异步**——90 秒就绪等待放主线程上，
+  菜单栏会整整一分半不响应，而用户此刻正在按键。
+- 配置新增 `talk_autostart`(默认 true)、`talk_llm_start_command` / `talk_tts_start_command`
+  （**默认空 = 只连不拉**，理由同 `llm_start_command`：不能写死编译期路径）。
+  空的时候日志打出该跑哪条命令，不静默。
+- **退出必须收干净**：菜单 Quit 走 `talk::shutdown_spawned()`；信号路径走
+  `sidecar::on_signal` 里新增的 `talk::kill_spawned_pids_from_signal()`（只做 `kill(2)`，
+  符合 async-signal-safe）。**只收自己拉起的**，用户手工跑的不动。
+- **实机验证（不是单测）**：杀掉两个边车 → 起守护进程（对话模式）→ 日志
+  「LLM 边车没起，按配置拉起…等了 1.6s 已就绪」「TTS…3.0s 已就绪」「都就绪了」；
+  再 `kill -TERM` 守护进程 → **两个边车都随退出被收掉**（两个端口都不通了）。
+- 测试：新增 4 条（边车动作四组合全覆盖 / 按引擎派生清单 / 提示文案 / 空命令不 panic），
+  全量 `cargo test` **252 passed / 0 failed / 6 ignored**；clippy 8 条既有警告（零新增）。
+
+⚠️ **没做到的**：拉起失败后的重试与退避没有（只拉起一次）；菜单路径本身仍无自动化测试。
+
 ## 此刻状态：M2 已发布可用；**M3 通话链路已跑通，AEC / 自动打断未做**
 
 - 本地已无未合并分支。**远程只剩 `origin/c1-thai-asr-baseline` 未合**（ahead=13）。

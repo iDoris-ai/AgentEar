@@ -675,6 +675,11 @@ pub fn install_signal_handlers() {
             // SIGTERM 给它机会自己收尾
             unsafe { libc::kill(pid, libc::SIGTERM) };
         }
+        // 通话模式那两个边车（我们拉起的那些）也要收。
+        // 菜单 Quit 那条路走 `talk::shutdown_spawned()`，但信号这条路不走它——
+        // 漏了的话 `Ctrl+C` 之后会留下两个常驻约 4 GB 的进程。
+        // 这里只做 `kill(2)`，符合 async-signal-safe。
+        crate::talk::kill_spawned_pids_from_signal();
         // 恢复默认行为再把信号发给自己，保持正常的退出语义
         unsafe {
             libc::signal(sig, libc::SIG_DFL);
