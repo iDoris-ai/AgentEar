@@ -95,6 +95,9 @@ const TAG_RETENTION_BASE: isize = 200;
 const TAG_UI_LANG_BASE: isize = 300;
 const TAG_ASR_LANG_BASE: isize = 400;
 const TAG_MODE_BASE: isize = 500;
+const TAG_STYLE_BASE: isize = 600;
+const TAG_TONE_BASE: isize = 700;
+const TAG_VOICE_BASE: isize = 800;
 const TAG_CORRECT_TERMS: isize = 5;
 const TAG_OPEN_TERMS: isize = 6;
 const TAG_START_SIDECAR: isize = 7;
@@ -284,6 +287,102 @@ fn populate(menu: &NSMenu, mtm: MainThreadMarker, target: &MenuTarget) {
             .collect(),
     );
     menu.addItem(&mode_item);
+
+    // —— 说话（语系 / 语气 / 音色）——
+    //
+    // 放在模式后面：先决定「按一下键干什么」，再决定「它怎么说话」。
+    // ⚠️ 这三项**只在对话模式有意义**，但**不做条件隐藏**——菜单里少一项比多一项更容易
+    // 让人以为「功能没了」（v0.7.0 的「模式」就是这么被投诉的）。
+    let speech_item = item(mtm, target, i18n::t(lang, Key::SpeechSection), -1, false);
+    speech_item.setEnabled(true);
+    let style_item = item(mtm, target, i18n::t(lang, Key::StyleSection), -1, false);
+    style_item.setEnabled(true);
+    submenu(
+        mtm,
+        &style_item,
+        crate::talk::STYLE_OPTIONS
+            .iter()
+            .enumerate()
+            .map(|(i, opt)| {
+                item(
+                    mtm,
+                    target,
+                    crate::talk::option_label(opt, lang),
+                    TAG_STYLE_BASE + i as isize,
+                    cfg.tts_style == opt.0,
+                )
+            })
+            .collect(),
+    );
+    let tone_item = item(mtm, target, i18n::t(lang, Key::ToneSection), -1, false);
+    tone_item.setEnabled(true);
+    submenu(
+        mtm,
+        &tone_item,
+        crate::talk::TONE_OPTIONS
+            .iter()
+            .enumerate()
+            .map(|(i, opt)| {
+                item(
+                    mtm,
+                    target,
+                    crate::talk::option_label(opt, lang),
+                    TAG_TONE_BASE + i as isize,
+                    cfg.tts_tone == opt.0,
+                )
+            })
+            .collect(),
+    );
+    // 音色：**扫描音色库目录**（用户丢一个自己的 wav+json 进去就能选），
+    // 目录里没有时给一项「(无)」——不能给空子菜单，那看起来像坏了。
+    let voices = list_voices(&cfg, &store_root());
+    let voice_item = item(
+        mtm,
+        target,
+        &format!(
+            "{}: {}",
+            i18n::t(lang, Key::VoiceSection),
+            voices
+                .iter()
+                .find(|v| Some(v.as_str()) == cfg.tts_voice.as_deref())
+                .cloned()
+                .unwrap_or_else(|| i18n::t(lang, Key::VoiceDefault).to_string())
+        ),
+        -1,
+        false,
+    );
+    voice_item.setEnabled(true);
+    if voices.is_empty() {
+        submenu(
+            mtm,
+            &voice_item,
+            vec![item(mtm, target, i18n::t(lang, Key::VoiceNone), -1, false)],
+        );
+    } else {
+        submenu(
+            mtm,
+            &voice_item,
+            voices
+                .iter()
+                .enumerate()
+                .map(|(i, name)| {
+                    item(
+                        mtm,
+                        target,
+                        name,
+                        TAG_VOICE_BASE + i as isize,
+                        cfg.tts_voice.as_deref() == Some(name.as_str()),
+                    )
+                })
+                .collect(),
+        );
+    }
+    submenu(
+        mtm,
+        &speech_item,
+        vec![style_item, tone_item, voice_item],
+    );
+    menu.addItem(&speech_item);
 
     // —— 触发键 ——
     let trigger_item = item(mtm, target, i18n::t(lang, Key::TriggerSection), -1, false);
@@ -543,11 +642,62 @@ fn set_talk_mode(mode: config::TalkMode) {
     crate::set_mode(mode);
 }
 
+/// 数据目录。菜单里要用它把音色库目录解析成绝对路径。
+fn store_root() -> PathBuf {
+    let mut root = DATA_ROOT.get().cloned().unwrap_or_default();
+    if root.as_os_str().is_empty() {
+        root = crate::data_root().unwrap_or_default();
+    }
+    root
+}
+
+/// 音色库目录里的音色名（`<name>.wav`）。
+///
+/// **直接扫目录**，不在代码里写死清单：用户丢一个自己的 `my.wav` + `my.json` 进去，
+/// 重启后菜单里就能选。写死清单等于「支持自定义音色」这句话是假的。
+fn list_voices(cfg: &config::Config, root: &std::path::Path) -> Vec<String> {
+    let dir = cfg.voices_dir(root);
+    let mut names: Vec<String> = std::fs::read_dir(&dir)
+        .map(|rd| {
+            rd.filter_map(|e| e.ok())
+                .filter(|e| e.path().extension().map(|x| x == "wav").unwrap_or(false))
+                .filter_map(|e| e.path().file_stem().map(|s| s.to_string_lossy().into_owned()))
+                .collect()
+        })
+        .unwrap_or_default();
+    names.sort();
+    names
+}
+
 fn handle(tag: isize, mtm: MainThreadMarker) {
     // 模式切换单独处理：它的副作用不止改配置（要掐播放、要开关会话）。
     if let Some(mode) = mode_for_tag(tag) {
         set_talk_mode(mode);
         return;
+    }
+    // 语系 / 语气 / 音色：都只是改配置，下一轮生效（不需要重启任何东西）。
+    if let Some(i) = tag.checked_sub(TAG_STYLE_BASE) {
+        if let Some(opt) = crate::talk::STYLE_OPTIONS.get(i as usize) {
+            config::update(|c| c.tts_style = opt.0.to_string());
+            log::info!("语系：{}（{}）", opt.1, opt.0);
+            return;
+        }
+    }
+    if let Some(i) = tag.checked_sub(TAG_TONE_BASE) {
+        if let Some(opt) = crate::talk::TONE_OPTIONS.get(i as usize) {
+            config::update(|c| c.tts_tone = opt.0.to_string());
+            log::info!("语气：{}（{}）", opt.1, opt.0);
+            return;
+        }
+    }
+    if let Some(i) = tag.checked_sub(TAG_VOICE_BASE) {
+        let cfg = config::get();
+        if let Some(name) = list_voices(&cfg, &store_root()).get(i as usize) {
+            let name = name.clone();
+            config::update(|c| c.tts_voice = Some(name.clone()));
+            log::info!("音色：{name}");
+            return;
+        }
     }
     match tag {
         TAG_TOGGLE => crate::hotkey::trigger_now(),

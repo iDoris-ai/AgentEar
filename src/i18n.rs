@@ -54,6 +54,16 @@ pub enum Key {
     /// 模式这一节：输入法 / 对话。**放在最上面**——它决定按一下键会发生什么，
     /// 是这份菜单里唯一会改变「主行为」的开关。
     ModeSection,
+    /// 说话这一栏（语系/语气/音色）的父项。三项只在对话模式有意义，
+    /// 但**不做条件隐藏**——菜单里少一项比多一项更容易让人以为功能没了。
+    SpeechSection,
+    StyleSection,
+    ToneSection,
+    VoiceSection,
+    /// 音色那一栏标题里显示「默认」用。
+    VoiceDefault,
+    /// 音色库为空时的占位项。
+    VoiceNone,
     ModeInputMethod,
     ModeConversation,
     /// 短名，给菜单标题用（`模式：输入法` 这种）。**不要拿长文案当标题**——
@@ -106,6 +116,12 @@ pub fn t(lang: Lang, key: Key) -> &'static str {
         K::Transcribing => pick(lang, "◌ Transcribing…", "◌ 转写中……", "◌ กำลังถอดความ…"),
         K::TitleTranscribing => pick(lang, "◌ ASR", "◌ 转写中", "◌ ถอดความ"),
         K::ModeSection => pick(lang, "Mode", "模式", "โหมด"),
+        K::SpeechSection => pick(lang, "Voice Output", "说话", "เสียงพูด"),
+        K::StyleSection => pick(lang, "Dialect / Accent", "语系（方言/口音）", "สำเนียง"),
+        K::ToneSection => pick(lang, "Tone", "语气", "โทนเสียง"),
+        K::VoiceSection => pick(lang, "Voice", "音色", "เสียง"),
+        K::VoiceDefault => pick(lang, "default", "默认", "ค่าเริ่มต้น"),
+        K::VoiceNone => pick(lang, "(no voices found)", "（音色库里没有音色）", "（ไม่พบเสียง）"),
         K::ModeInputShort => pick(lang, "Input", "输入法", "พิมพ์"),
         K::ModeConversationShort => pick(lang, "Talk", "对话", "สนทนา"),
         // 文案要说清**按一下键会发生什么**，而不是丢两个抽象名词给用户。

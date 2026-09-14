@@ -235,6 +235,10 @@ pub struct HttpTts {
     url: String,
     transport: Arc<dyn AudioTransport>,
     timeout_secs: u64,
+    /// 默认音色（None = 用边车的默认）。菜单改配置，下一轮生效。
+    voice: Option<String>,
+    style: String,
+    tone: String,
 }
 
 impl HttpTts {
@@ -243,7 +247,18 @@ impl HttpTts {
             url: url.into(),
             transport,
             timeout_secs,
+            voice: None,
+            style: "zh".to_string(),
+            tone: "warm".to_string(),
         }
+    }
+
+    /// 带上音色 / 语系 / 语气（都来自配置，菜单改了下一轮生效）。
+    pub fn with_voice(mut self, voice: Option<String>, style: String, tone: String) -> Self {
+        self.voice = voice.filter(|v| !v.trim().is_empty());
+        self.style = style;
+        self.tone = tone;
+        self
     }
 }
 
@@ -257,7 +272,18 @@ impl TtsEngine for HttpTts {
     }
 
     fn synthesize(&self, text: &str, lang: TalkLang) -> Result<Vec<u8>> {
-        let body = serde_json::json!({"text": text, "lang": lang.as_str()}).to_string();
+        // 音色/语系/语气都随请求走：这样菜单改完**下一轮立刻生效**，
+        // 不用重启边车、也不用重启守护进程。
+        let mut payload = serde_json::json!({
+            "text": text,
+            "lang": lang.as_str(),
+            "style": self.style,
+            "tone": self.tone,
+        });
+        if let Some(voice) = &self.voice {
+            payload["voice"] = serde_json::Value::String(voice.clone());
+        }
+        let body = payload.to_string();
         let url = format!("{}/speak", self.url.trim_end_matches('/'));
         let bytes = self
             .transport
@@ -599,13 +625,16 @@ impl Engines {
         };
         let tts: Arc<dyn TtsEngine> = match cfg.talk_tts_engine.as_str() {
             "say" => Arc::new(SayTts::new(cfg.talk_timeout_secs)),
-            _ => Arc::new(HttpTts::new(
-                cfg.tts_url
-                    .clone()
-                    .unwrap_or_else(|| DEFAULT_TTS_URL.to_string()),
-                Arc::new(CurlAudio),
-                cfg.talk_timeout_secs,
-            )),
+            _ => Arc::new(
+                HttpTts::new(
+                    cfg.tts_url
+                        .clone()
+                        .unwrap_or_else(|| DEFAULT_TTS_URL.to_string()),
+                    Arc::new(CurlAudio),
+                    cfg.talk_timeout_secs,
+                )
+                .with_voice(cfg.tts_voice.clone(), cfg.tts_style.clone(), cfg.tts_tone.clone()),
+            ),
         };
         Self { llm, tts }
     }
@@ -901,6 +930,44 @@ pub fn shutdown_spawned() {
         let _ = child.wait();
     }
     clear_pids();
+}
+
+/// 语系/口音选项：`(键, 中文名, 英文名, 泰文名)`。
+///
+/// ⚠️ **这份清单必须与 `services/tts/backends.py` 的 `STYLE_INSTRUCTS` 一致**——
+/// 两边各有一份（菜单不能为了一次列表去发 HTTP，而边车也不能读 Rust 的常量）。
+/// 漂移了会怎样：菜单点得下去、边车回 400。所以两边各有一条测试钉住**完整键集**，
+/// 改一处就必须改另一处。
+pub const STYLE_OPTIONS: &[(&str, &str, &str, &str)] = &[
+    ("zh", "普通话", "Mandarin", "จีนกลาง"),
+    ("yue", "粤语（广东话）", "Cantonese", "กวางตุ้ง"),
+    ("henan", "河南话", "Henan", "เหอหนาน"),
+    ("sichuan", "四川话", "Sichuan", "เสฉวน"),
+    ("shandong", "山东话", "Shandong", "ซานตง"),
+    ("dongbei", "东北话", "Northeastern", "ตงเป่ย"),
+    ("tianjin", "天津话", "Tianjin", "เทียนจิน"),
+    ("en", "英语", "English", "อังกฤษ"),
+    ("en-gb", "英式英语", "British English", "อังกฤษบริเตน"),
+    ("en-us", "美式英语", "American English", "อังกฤษอเมริกัน"),
+    ("en-ca", "加拿大英语", "Canadian English", "อังกฤษแคนาดา"),
+    ("th", "泰语", "Thai", "ไทย"),
+];
+
+/// 语气选项，键与 `TONE_INSTRUCTS` 一致。
+pub const TONE_OPTIONS: &[(&str, &str, &str, &str)] = &[
+    ("warm", "亲切自然（默认）", "Warm & natural", "อบอุ่นเป็นธรรมชาติ"),
+    ("calm", "平静温和", "Calm", "สงบ"),
+    ("lively", "活泼明快", "Lively", "มีชีวิตชีวา"),
+    ("serious", "沉稳专业", "Serious", "จริงจัง"),
+];
+
+/// 按界面语言取选项名。
+pub fn option_label(option: &(&'static str, &'static str, &'static str, &'static str), lang: crate::i18n::Lang) -> &'static str {
+    match lang {
+        crate::i18n::Lang::Zh => option.1,
+        crate::i18n::Lang::En => option.2,
+        crate::i18n::Lang::Th => option.3,
+    }
 }
 
 pub const DEFAULT_LLM_URL: &str = "http://127.0.0.1:8794";
@@ -1214,6 +1281,46 @@ mod tests {
     #[test]
     fn spawning_an_empty_command_is_an_error_not_a_panic() {
         assert!(spawn_sidecar("LLM", &[]).is_err());
+    }
+
+    /// **跨语言契约**：语系/语气的键集必须与 `services/tts/backends.py` 的
+    /// `STYLE_INSTRUCTS` / `TONE_INSTRUCTS` 完全一致。
+    ///
+    /// 两边各有一份实现（菜单不能为列一次表去发 HTTP；边车也读不到 Rust 常量），
+    /// 漂移的后果是**菜单点得下去、边车回 400**——那种错很难查，所以两边各钉一条测试。
+    /// Python 侧的同名清单在 `services/tts/test_backends.py`。
+    #[test]
+    fn style_keys_match_the_sidecar_contract() {
+        let keys: Vec<&str> = STYLE_OPTIONS.iter().map(|o| o.0).collect();
+        assert_eq!(
+            keys,
+            vec![
+                "zh", "yue", "henan", "sichuan", "shandong", "dongbei", "tianjin", "en",
+                "en-gb", "en-us", "en-ca", "th"
+            ],
+            "改了这里就必须同时改 services/tts/backends.py 的 STYLE_INSTRUCTS"
+        );
+        let tones: Vec<&str> = TONE_OPTIONS.iter().map(|o| o.0).collect();
+        assert_eq!(
+            tones,
+            vec!["warm", "calm", "lively", "serious"],
+            "改这里就必须同时改 TONE_INSTRUCTS"
+        );
+    }
+
+    /// 三语名字都不许空——空标题的菜单项等于没有这一项。
+    #[test]
+    fn every_option_has_a_name_in_all_three_languages() {
+        for opt in STYLE_OPTIONS.iter().chain(TONE_OPTIONS.iter()) {
+            for lang in [crate::i18n::Lang::Zh, crate::i18n::Lang::En, crate::i18n::Lang::Th] {
+                assert!(
+                    !option_label(opt, lang).trim().is_empty(),
+                    "{} 缺 {:?} 的名字",
+                    opt.0,
+                    lang
+                );
+            }
+        }
     }
 
     #[test]

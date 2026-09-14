@@ -257,6 +257,24 @@ pub struct Config {
     /// 拉起 TTS 边车的命令。语义同上。
     #[serde(deserialize_with = "lenient")]
     pub talk_tts_start_command: Vec<String>,
+    /// 对话用哪个音色（`--voices-dir` 里的名字）。**空 = 用边车的默认音色。**
+    ///
+    /// 「声色飘忽」的直接解法：不指定时 VoxCPM2 每次随机换说话人。
+    #[serde(deserialize_with = "lenient")]
+    pub tts_voice: Option<String>,
+    /// 音色库目录（`<name>.wav` + `<name>.json`）。菜单从它列音色。
+    /// 空 = `~/.agentear/talk/voices`。
+    #[serde(deserialize_with = "lenient")]
+    pub tts_voices_dir: Option<String>,
+    /// 语系/口音：`zh`（普通话）/ `yue`（粤语）/ `henan`（河南话）/ … / `en-gb` / `th`。
+    #[serde(deserialize_with = "lenient")]
+    pub tts_style: String,
+    /// 语气/情绪：`warm`（亲切自然，默认）/ `calm` / `lively` / `serious`。
+    ///
+    /// ⚠️ **默认 `warm` 是实测挑出来的**：只写语种时 F0 起伏 3.53 半音、
+    /// 能量起伏 0.0736；加情绪描述后是 5.57 / 0.1196（+58%/+62%），而且更快。
+    #[serde(deserialize_with = "lenient")]
+    pub tts_tone: String,
     /// TTS 边车地址。留空 = `http://127.0.0.1:8765`。
     ///
     /// 端口写死在这里而不是从边车读：`sidecar.rs` 记过那个教训——
@@ -306,6 +324,14 @@ fn default_talk_tts_engine() -> String {
     "http".to_string()
 }
 
+fn default_tts_style() -> String {
+    "zh".to_string()
+}
+
+fn default_tts_tone() -> String {
+    "warm".to_string()
+}
+
 fn default_kb_enabled() -> bool {
     true
 }
@@ -335,6 +361,22 @@ impl Config {
     ///
     /// ⚠️ **写死的场景，不是实时天气**（ADR-0007 §4.6）。默认那句和
     /// 项目文档里的例子保持一致，用户改成自己的城市即可。
+    /// 音色库目录的绝对路径。相对路径按**数据目录**解释（同 `kb_root` 的理由）。
+    pub fn voices_dir(&self, data_root: &Path) -> PathBuf {
+        match self
+            .tts_voices_dir
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            Some(d) => {
+                let p = PathBuf::from(shellexpand_tilde(d));
+                if p.is_absolute() { p } else { data_root.join(p) }
+            }
+            None => data_root.join("talk/voices"),
+        }
+    }
+
     pub fn weather_fact(&self) -> String {
         match self
             .talk_weather_note
@@ -397,6 +439,10 @@ impl Default for Config {
             talk_llm_engine: default_talk_llm_engine(),
             talk_llm_url: None,
             talk_tts_engine: default_talk_tts_engine(),
+            tts_voice: None,
+            tts_voices_dir: None,
+            tts_style: default_tts_style(),
+            tts_tone: default_tts_tone(),
             talk_autostart: default_autostart(),
             talk_llm_start_command: Vec::new(),
             talk_tts_start_command: Vec::new(),

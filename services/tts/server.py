@@ -39,7 +39,7 @@ CONNECTION_TIMEOUT = 5
 
 
 def validate_request(payload):
-    """Return (text, lang, voice, style).
+    """Return (text, lang, voice, style, tone).
 
     Language is never guessed: an unknown value is a 400. ``voice`` / ``style``
     are optional per-request overrides of the backend defaults — that is what
@@ -52,18 +52,19 @@ def validate_request(payload):
     lang = payload.get("lang")
     voice = payload.get("voice")
     style = payload.get("style")
+    tone = payload.get("tone")
     if not isinstance(text, str) or not text.strip():
         raise TTSError(400, "text must be a non-empty string.")
     if not isinstance(lang, str) or lang not in SUPPORTED_LANGS:
         raise TTSError(400, "lang must be exactly one of: zh, en, th.")
-    for name, value in (("voice", voice), ("style", style)):
+    for name, value in (("voice", voice), ("style", style), ("tone", tone)):
         if value is not None and (not isinstance(value, str) or not value.strip()):
             raise TTSError(400, f"{name} must be a non-empty string when present.")
     try:
         text.encode("utf-8")
     except UnicodeEncodeError:
         raise TTSError(400, "text must contain valid Unicode.") from None
-    return text, lang, voice, style
+    return text, lang, voice, style, tone
 
 
 class TTSHandler(BaseHTTPRequestHandler):
@@ -97,7 +98,7 @@ class TTSHandler(BaseHTTPRequestHandler):
             # 免得菜单里写死一份、后端里再写一份，两边迟早对不上。
             payload = {"langs": self.server.engine.available_langs()}
             describe = self.server.engine.describe()
-            for key in ("voices", "styles", "default_voice", "default_style"):
+            for key in ("voices", "styles", "tones", "default_voice", "default_style", "default_tone"):
                 if key in describe:
                     payload[key] = describe[key]
             self.reply_json(200, payload)
@@ -134,8 +135,10 @@ class TTSHandler(BaseHTTPRequestHandler):
             self.reply_json(404, {"error": "Unknown endpoint."})
             return
         try:
-            text, lang, voice, style = validate_request(self.read_json())
-            wav_bytes = self.server.engine.synthesize(text, lang, voice=voice, style=style)
+            text, lang, voice, style, tone = validate_request(self.read_json())
+            wav_bytes = self.server.engine.synthesize(
+                text, lang, voice=voice, style=style, tone=tone
+            )
         except TTSError as error:
             self.reply_json(error.status, {"error": str(error)})
             return
@@ -207,6 +210,9 @@ def parse_args(argv=None):
         "--style", default=None, help="default dialect/accent style key (e.g. zh, yue, en-gb)"
     )
     parser.add_argument(
+        "--tone", default=None, help="default tone key: warm / calm / lively / serious"
+    )
+    parser.add_argument(
         "--queue-wait",
         type=float,
         default=0.0,
@@ -236,6 +242,7 @@ def main():
             voices_dir=args.voices_dir,
             default_voice=args.voice,
             default_style=args.style,
+            default_tone=args.tone,
         )
     except TTSError as error:
         print(f"Cannot start the {args.backend} backend: {error}", file=sys.stderr)
