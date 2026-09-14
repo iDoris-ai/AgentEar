@@ -91,6 +91,8 @@ pub enum Key {
     CorrectTermsOffline,
     /// 打开术语表文件供用户编辑。
     OpenTerms,
+    /// 打开语音指令表（`commands.json`）供用户编辑。
+    OpenCommands,
     /// 边车状态：可用 / 未启动 / 端口被别的程序占了。
     SidecarUp,
     SidecarDown,
@@ -199,6 +201,12 @@ pub fn t(lang: Lang, key: Key) -> &'static str {
             "แก้คำศัพท์เทคนิค (บริการยังไม่ทำงาน)",
         ),
         // 文案要说清**改完什么时候生效**：不说的话用户改完会以为要重启。
+        K::OpenCommands => pick(
+            lang,
+            "Open Voice Commands",
+            "打开语音指令表",
+            "เปิดตารางคำสั่งเสียง",
+        ),
         K::OpenTerms => pick(
             lang,
             "Edit Term List (applies next recording)",

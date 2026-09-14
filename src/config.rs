@@ -275,6 +275,14 @@ pub struct Config {
     /// 能量起伏 0.0736；加情绪描述后是 5.57 / 0.1196（+58%/+62%），而且更快。
     #[serde(deserialize_with = "lenient")]
     pub tts_tone: String,
+    /// 是否启用语音指令表（`<数据目录>/commands.json`）。
+    ///
+    /// **默认开**：命中的指令在本地 0ms 执行、不走模型；**没命中的照常走对话**，
+    /// 所以开着的代价只是「多查一次字符串前缀」。指令表在
+    /// `src/commands.rs` 的 `default_commands()` 里有一份开箱默认，
+    /// 用 `--add-command` 加 / 用菜单打开文件改。
+    #[serde(deserialize_with = "lenient")]
+    pub commands_enabled: bool,
     /// TTS 边车地址。留空 = `http://127.0.0.1:8765`。
     ///
     /// 端口写死在这里而不是从边车读：`sidecar.rs` 记过那个教训——
@@ -322,6 +330,10 @@ fn default_talk_llm_engine() -> String {
 
 fn default_talk_tts_engine() -> String {
     "http".to_string()
+}
+
+fn default_commands_enabled() -> bool {
+    true
 }
 
 fn default_tts_style() -> String {
@@ -439,6 +451,7 @@ impl Default for Config {
             talk_llm_engine: default_talk_llm_engine(),
             talk_llm_url: None,
             talk_tts_engine: default_talk_tts_engine(),
+            commands_enabled: default_commands_enabled(),
             tts_voice: None,
             tts_voices_dir: None,
             tts_style: default_tts_style(),

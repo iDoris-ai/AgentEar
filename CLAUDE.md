@@ -2,7 +2,7 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-## 当前状态：**v0.8.1 —— 音色/语系/语气菜单 + 峰值 RSS 自报**；M1/M2 已发布；**M3 通话链路已跑通，AEC / 自动打断未做**
+## 当前状态：**v0.9.0 —— 可配置语音指令表（本地快路径）**；M1/M2 已发布；**M3 通话链路已跑通，AEC / 自动打断未做**
 
 M1 完成；**知识库投递 + 全文检索默认开（v0.4.2）**；M2 理解层已发布（v0.4.0）但默认关；
 **v0.6.0 加了通话链路（说一句答一句、可按键打断）**，**v0.5.0 加了可切换的 ASR 后端**（`--asr-backend` / `config.json` 的 `asr_backend`，
@@ -111,6 +111,46 @@ M1 完成；**知识库投递 + 全文检索默认开（v0.4.2）**；M2 理解�
   - **`/health` 现在自报 `peak_rss_mb`**（`resource.getrusage`）：macOS 沙箱里
     `ps`/`top` 读不到别的进程内存，而仓库规矩要求「高资源档峰值 RSS 必须实测入库」。
     实测 4bit **2386MB** / 8bit **3266MB**。
+- **语音指令表（v0.9.0）= 本地快路径 + LLM 兜底的两段式**。
+  用户先说一句声明过的短语（「记一下…」「搜索…」「发邮件给…」），
+  **本地先查表**（`src/commands.rs`，纯字符串前缀匹配，0ms，断网也能用）；
+  **没命中就走对话模式那条 LLM 路**——开放式的句子本来就该由模型理解，
+  指令表只认用户声明过的那几条。表在 **`<数据目录>/commands.json`**，
+  文件不存在时给一份开箱默认（`default_commands()`），**坏文件报错、不静默退回默认**
+  （静默退回会让用户以为自己的指令还在）。
+  - **动作是一个三种的封闭集合**：`builtin`（style/tone/mode/note）、
+    `open_url`（**只允许 http / https / mailto**）、`http_post`（用户自己的 webhook）。
+    ⚠️ **绝不执行 shell**：语音识别错一个字就变成在你机器上执行命令，而且没有撤销键。
+    `validate()` 里拒掉 `file:` 之类，「打开 X」不能变成读本地文件。
+    「发邮件」用 `mailto:` **打开草稿让人确认**，不是替他发出去——误识别的代价是草稿。
+  - **匹配是「精确 + 去标点 + 归一大小写」，长的短语优先**
+    （否则「搜索 github」永远被「搜索」抢走）。⚠️ **繁简归一没做**——
+    没有离线表，不要写成「中英泰繁简都行」。
+  - **槽位（`rest`）取自原文，不是归一句子**。这一点踩过：
+    最初从归一句子截槽位，「帮我搜代码 talk.rs」变成搜 `talkrs`——
+    点没了、大写也没了，**而且当时的测试把这个坏行为钉住了**
+    （`rest == "rustasync"` 看着还挺像那么回事）。**归一只用于判断命中**。
+  - **URL 模板里的槽位要转义**（`fill` 按模板判断：`http/https/mailto` 才转，
+    JSON body 不转）。槽位是**语音听出来的任意内容**，
+    不转的话 `&` 能凭空多一个参数、`#` 会把后面整段吃掉。
+  - **入口三个**：菜单「打开指令表」（`TAG_OPEN_COMMANDS`，直接开 `commands.json`
+    给人改——ASR 会把短语听错，文件必须可编辑，否则用户得到一条永远匹配不上的指令）、
+    CLI `--add-command <短语>` / `--add-command-wav <wav>`（**录一句→ASR 成短语→写进表**）、
+    CLI `--commands`（列表）/ **`--match-command <一句话>`（干跑：只报命中，不执行）**。
+    `--match-command` 是**可验收性**入口：不必真录一条音、也不必真发一封邮件
+    就能验证匹配器——它上线当天就抓出了上面那个槽位 bug。
+  - 配置 `commands_enabled`（**默认开**）：开着的代价只是「多查一次字符串前缀」。
+  - ⚠️ **指令表在两种模式下都会触发，不限对话模式**——这是有意的：
+    「切换到对话模式」这条内置动作**只有在输入法模式下说才有意义**，
+    锁进对话模式等于把最有用的那条指令废掉。
+    **代价要认**：输入法模式下说了一句「恰好以某个已声明短语开头」的话，
+    它会**顺手多干一件事**（开浏览器 / 记一条 / 切音色），
+    **但文字照样进剪贴板、照样上屏，一个字节都不会丢**。
+    所以默认表的短语故意写得具体（「搜索」「帮我搜」「发邮件给」「记一下」），
+    而不是「打开」这种半句话。**不想要就 `commands_enabled: false`。**
+    ⚠️ 这条与「留在输入法模式时已发布用户行为不变」是**有冲突**的：
+    默认开 = 输入法用户也会遇到「多干一件事」。判断是**收益大于这个风险**
+    （文字不丢、动作可见、一句话能关掉），但**不要写成「输入法模式完全没变」**。
 - **边车与脚本**：`services/tts/backends.py`（新增 `SayBackend` + `VoxCpm2Backend`，
   HTTP 契约不变）、`services/tts/server.py`（`--backend {voxcpm2,say}`，**默认 voxcpm2**）、
   `scripts/setup-talk.sh`（按需下载两个模型，**不随包分发**）、
@@ -183,7 +223,7 @@ clippy **刻意不加 `-D warnings`**（既有 13 条警告，加了会让 CI �
 
 ```bash
 cargo build --release
-cargo test                                    # 239 passed / 0 failed / 6 ignored（源码共 245；ignored 6 条：4 条要边车、1 条要联网、1 条要能出声的环境）：提交协议、崩溃语义、token 过滤、i18n、下载协议、知识库投递、通话会话状态机
+cargo test                                    # 268 passed / 0 failed / 6 ignored（ignored 6 条：4 条要边车、1 条要联网、1 条要能出声的环境）：提交协议、崩溃语义、token 过滤、i18n、下载协议、知识库投递、通话会话状态机、语音指令表
 ./target/release/agentear                     # 守护进程，Ctrl+Shift+R 开始/停止录音
 ./target/release/agentear --transcribe x.wav  # 离线转写，不占麦克风，用于验证 ASR 链路
 ./target/release/agentear --diagnose          # 环境自检：权限、音频设备、ASR 依赖
@@ -195,6 +235,10 @@ cargo test                                    # 239 passed / 0 failed / 6 ignore
 ./target/release/agentear --say "你好"                    # 只测 TTS：合成 + 播放（跳过 ASR 和 LLM）
 ./target/release/agentear --ask "今天天气怎么样"           # 文字 → LLM → TTS → 播放（跳过 ASR）
 ./target/release/agentear --talk-turn q_zh.wav --lang zh   # **完整一轮**（ASR→会话→LLM→TTS→播放），走守护进程同一条路径
+./target/release/agentear --commands                       # 列出语音指令表（默认给一份开箱表）
+./target/release/agentear --add-command "记一下"            # 加一条指令（--action builtin|open_url|http_post）
+./target/release/agentear --add-command-wav my.wav          # **录一句**定义指令：先 ASR 成短语再写进表
+./target/release/agentear --match-command "搜索 talk.rs"    # 干跑：只报命中/槽位，**不执行**任何动作
 cargo test -- --ignored stop_playback         # 打断机制：真掐掉一段 5s 音频（需要能出声的环境）
 scripts/bundle.sh                             # 打 .app bundle → dist/
 
