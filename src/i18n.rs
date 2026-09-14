@@ -56,6 +56,10 @@ pub enum Key {
     ModeSection,
     ModeInputMethod,
     ModeConversation,
+    /// 短名，给菜单标题用（`模式：输入法` 这种）。**不要拿长文案当标题**——
+    /// 长到折行的标题在菜单栏里看不全。
+    ModeInputShort,
+    ModeConversationShort,
     TriggerSection,
     TriggerRightCommand,
     TriggerRightCommandNoPerm,
@@ -102,6 +106,8 @@ pub fn t(lang: Lang, key: Key) -> &'static str {
         K::Transcribing => pick(lang, "◌ Transcribing…", "◌ 转写中……", "◌ กำลังถอดความ…"),
         K::TitleTranscribing => pick(lang, "◌ ASR", "◌ 转写中", "◌ ถอดความ"),
         K::ModeSection => pick(lang, "Mode", "模式", "โหมด"),
+        K::ModeInputShort => pick(lang, "Input", "输入法", "พิมพ์"),
+        K::ModeConversationShort => pick(lang, "Talk", "对话", "สนทนา"),
         // 文案要说清**按一下键会发生什么**，而不是丢两个抽象名词给用户。
         K::ModeInputMethod => pick(
             lang,
@@ -116,11 +122,13 @@ pub fn t(lang: Lang, key: Key) -> &'static str {
             "โหมดสนทนา (ตอบด้วยเสียง)",
         ),
         K::TriggerSection => pick(lang, "Trigger Key", "触发键", "ปุ่มลัด"),
+        // 手势写进文案：菜单里唯一能告诉用户「双击 = 对话模式」的地方就是这里，
+        // 否则他只能猜（jason 2026-09-14 就是找不到入口才提的这条）。
         K::TriggerRightCommand => pick(
             lang,
-            "Tap Right Command",
-            "轻点右 Command",
-            "แตะปุ่ม Command ขวา",
+            "Right Command: tap = typing, double-tap = talk",
+            "右 Command：单击 = 输入法，双击 = 对话",
+            "Command ขวา: แตะ = พิมพ์, แตะสองครั้ง = สนทนา",
         ),
         K::TriggerRightCommandNoPerm => pick(
             lang,

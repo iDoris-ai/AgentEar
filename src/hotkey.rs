@@ -73,12 +73,77 @@ const OTHER_MODS: u64 = F_SHIFT | F_CONTROL | F_ALTERNATE | F_SECONDARY_FN | NX_
 const TAP_MAX: Duration = Duration::from_millis(500);
 
 pub struct Listener {
-    rx: Option<Receiver<()>>,
+    rx: Option<Receiver<Signal>>,
     pub trigger: Trigger,
     _carbon: Option<global_hotkey::GlobalHotKeyManager>,
 }
 
-static TX: OnceLock<Sender<()>> = OnceLock::new();
+static TX: OnceLock<Sender<Signal>> = OnceLock::new();
+
+/// 上一次「轻点」的松开时刻（毫秒，0 = 还没有过）。
+///
+/// 双击判据要的是**两次轻点之间的间隔**，所以记的是上一次的松开时刻。
+static LAST_TAP_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// 两次轻点的最大间隔。超过它就是两次独立的轻点（各算一次单击）。
+///
+/// 350ms 是个折中：太短会把「我确实点了两下」判成两次单击；
+/// 太长会让「点一下、想一下、再点一下」被吞成双击。
+pub const DOUBLE_TAP_MAX_MS: u64 = 350;
+
+/// 这一次是单击还是双击。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TapKind {
+    /// 单击：jason 定的语义是**输入法模式**。
+    Single,
+    /// 双击：**对话模式**。
+    Double,
+}
+
+/// 触发信号。**菜单里的「开始/停止录音」与按键走同一个通道，但语义不同**：
+/// 菜单那项是一个显式的 toggle，不该顺手改模式。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Signal {
+    Tap(TapKind),
+    /// 菜单或代码显式触发的一次 toggle。
+    ManualToggle,
+}
+
+/// 这次轻点离上次有多久 → 单击还是双击。**纯函数，便于钉真值表**：
+/// 真按键在单测里造不出来，而「双击被我写成两次单击」恰恰只能靠真按键发现。
+pub fn classify_tap(now_ms: u64, last_ms: Option<u64>) -> TapKind {
+    match last_ms {
+        Some(prev) if now_ms.saturating_sub(prev) <= DOUBLE_TAP_MAX_MS => TapKind::Double,
+        _ => TapKind::Single,
+    }
+}
+
+/// 一次触发该干什么。同样是纯函数——真值表有六种组合，逐个钉住。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Intent {
+    /// 开始一段录音。`set_conversation` 为 `None` = **不动模式**
+    /// （菜单里的显式 toggle 就是这种：它只是开始/停止，不该改模式）。
+    Begin { set_conversation: Option<bool> },
+    /// 结束当前录音。**不改模式**——这一点是承重的：如果「停止」也切模式，
+    /// 双击进来的对话模式会在松手那一下被顶回输入法，回答就不会念出来了。
+    End,
+    /// 正在录音时收到双击：**只切到对话模式，不要停**。
+    ///
+    /// 双击的第一次点击已经开了录音，第二次点击若按 toggle 处理会立刻停掉，
+    /// 于是「快速点两下」变成一段 0.2 秒的碎片录音（会被当噪音丢弃）。
+    SwitchToConversation,
+}
+
+pub fn intent(signal: Signal, recording: bool) -> Intent {
+    match (signal, recording) {
+        (Signal::ManualToggle, false) => Intent::Begin { set_conversation: None },
+        (Signal::ManualToggle, true) => Intent::End,
+        (Signal::Tap(TapKind::Single), false) => Intent::Begin { set_conversation: Some(false) },
+        (Signal::Tap(TapKind::Single), true) => Intent::End,
+        (Signal::Tap(TapKind::Double), false) => Intent::Begin { set_conversation: Some(true) },
+        (Signal::Tap(TapKind::Double), true) => Intent::SwitchToConversation,
+    }
+}
 
 /// 右 Command 当前是否按下。flagsChanged 按下/松开各来一次，靠它做边沿检测。
 static R_CMD_DOWN: AtomicBool = AtomicBool::new(false);
@@ -104,9 +169,9 @@ fn now_ms() -> u64 {
     START.get_or_init(Instant::now).elapsed().as_millis() as u64
 }
 
-fn fire() {
+fn fire(signal: Signal) {
     if let Some(tx) = TX.get() {
-        let _ = tx.send(());
+        let _ = tx.send(signal);
     }
 }
 
@@ -116,7 +181,7 @@ fn fire() {
 /// 各自维护一份状态而对不上。触发键失灵时这也是唯一能停下录音的出路。
 pub fn trigger_now() {
     log::debug!("菜单手动触发");
-    fire();
+    fire(Signal::ManualToggle);
 }
 
 impl Listener {
@@ -200,8 +265,17 @@ impl Listener {
                                 );
                                 let clean = CLEAN.load(Ordering::Relaxed);
                                 if is_tap(held, clean) {
-                                    log::debug!("→ 右 Command 轻点（{held}ms）");
-                                    fire();
+                                    // 分类要看**两次轻点之间的间隔**。
+                                    // 判成双击之后把上次时刻清零：否则三连击会被
+                                    // 当成「两次双击」，第二对又触发一次切模式。
+                                    let now = now_ms();
+                                    let prev = LAST_TAP_MS.swap(now, Ordering::Relaxed);
+                                    let kind = classify_tap(now, (prev != 0).then_some(prev));
+                                    if kind == TapKind::Double {
+                                        LAST_TAP_MS.store(0, Ordering::Relaxed);
+                                    }
+                                    log::debug!("→ 右 Command 轻点（{held}ms）→ {kind:?}");
+                                    fire(Signal::Tap(kind));
                                 } else if debug_keys() {
                                     log::debug!(
                                         "→ 右 Command 松开但不算轻点（{held}ms, clean={clean}）"
@@ -277,7 +351,8 @@ impl Listener {
             while let Ok(ev) = carbon_rx.recv() {
                 log::debug!("Carbon 事件: id={} state={:?}", ev.id, ev.state);
                 if ev.state == global_hotkey::HotKeyState::Pressed {
-                    fire();
+                    // 组合键没有「双击」这个维度：它是显式的 toggle，不改模式。
+                    fire(Signal::ManualToggle);
                 }
             }
         });
@@ -289,7 +364,7 @@ impl Listener {
         })
     }
 
-    pub fn take_receiver(&mut self) -> Receiver<()> {
+    pub fn take_receiver(&mut self) -> Receiver<Signal> {
         self.rx.take().expect("receiver 已被取走")
     }
 
@@ -340,6 +415,61 @@ pub fn is_tap(held_ms: u64, clean: bool) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **jason 2026-09-14 定的手势**：单击 = 输入法模式，双击 = 对话模式。
+    /// 这个真值表就是那条需求的可执行版本。
+    #[test]
+    fn tap_gestures_follow_jasons_spec() {
+        use Intent::*;
+        // 空闲时：单击开一段并切到输入法；双击开一段并切到对话
+        assert_eq!(
+            intent(Signal::Tap(TapKind::Single), false),
+            Begin { set_conversation: Some(false) }
+        );
+        assert_eq!(
+            intent(Signal::Tap(TapKind::Double), false),
+            Begin { set_conversation: Some(true) }
+        );
+        // 录音中：单击 = 停止，**且不改模式**（改了会把双击选出来的对话抹掉）
+        assert_eq!(intent(Signal::Tap(TapKind::Single), true), End);
+        // 录音中收到双击：**只切模式，不要停**——第一次点击已经开了录音，
+        // 第二次若按 toggle 处理会立刻停成 0.2 秒碎片
+        assert_eq!(
+            intent(Signal::Tap(TapKind::Double), true),
+            SwitchToConversation
+        );
+        // 菜单里的显式 toggle：只开始/停止，不动模式
+        assert_eq!(intent(Signal::ManualToggle, false), Begin { set_conversation: None });
+        assert_eq!(intent(Signal::ManualToggle, true), End);
+    }
+
+    /// **「停止」不许改模式**是承重的一条：`finish()` 是在松手那一刻读配置的，
+    /// 如果停止顺手切成输入法，双击进来的对话模式会在松手瞬间被顶掉，
+    /// 回答就不会念出来——而症状看起来像「双击没生效」。
+    #[test]
+    fn stopping_never_changes_the_mode() {
+        assert_eq!(intent(Signal::Tap(TapKind::Single), true), Intent::End);
+        assert_eq!(intent(Signal::ManualToggle, true), Intent::End);
+    }
+
+    /// 间隔落在窗口内外分别是双击与两次单击，边界要包含端点。
+    #[test]
+    fn double_tap_window_is_inclusive_at_the_edge() {
+        assert_eq!(classify_tap(1000, None), TapKind::Single, "第一次不可能是双击");
+        assert_eq!(classify_tap(1000, Some(900)), TapKind::Double);
+        assert_eq!(
+            classify_tap(1000 + DOUBLE_TAP_MAX_MS, Some(1000)),
+            TapKind::Double,
+            "正好卡在窗口边上算双击"
+        );
+        assert_eq!(
+            classify_tap(1001 + DOUBLE_TAP_MAX_MS, Some(1000)),
+            TapKind::Single,
+            "超过窗口就是两次独立单击"
+        );
+        // 时钟异常（倒退）不能让 saturating_sub 变成一次假双击
+        assert_eq!(classify_tap(500, Some(1000)), TapKind::Double);
+    }
 
     #[test]
     fn quick_clean_press_is_a_tap() {
