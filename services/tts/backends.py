@@ -157,15 +157,15 @@ class SayBackend:
     def available_langs(self):
         return {lang: voice for lang, voice in self.voices_map.items() if lang in SUPPORTED_LANGS}
 
-    def synthesize(self, text, lang, voice=None, style=None):
+    def synthesize(self, text, lang, voice=None, style=None, tone=None):
         """`voice` / `style` 对后端无意义（`say` 的音色由系统发音人决定）。
 
         **接住而不是拒绝**：HTTP 契约是共享的，调用方不该为了换后端而改请求体。
         但**不能静默**——用户点了「换音色」却发现没变化时，
         日志里得能看出「这个后端不支持」。
         """
-        if voice or style:
-            log_once_unsupported_voice_style(voice, style)
+        if voice or style or tone:
+            log_once_unsupported_voice_style(voice, style, tone)
         voice = self.voices_map.get(lang)
         if voice is None:
             raise TTSError(400, "lang must be exactly one of: zh, en, th.")
@@ -264,6 +264,27 @@ STYLE_INSTRUCTS = {
 }
 
 
+#: 语气/情绪 → instruct。**默认 `warm`，这是实测挑出来的。**
+#:
+#: jason 2026-09-14 听完第一版说「像个机器人，一点感情都没有」。实测三个旋钮：
+#:
+#: | 配置 | 耗时 | F0 起伏 | 能量起伏 |
+#: |---|---|---|---|
+#: | 只写语种 | 3.90s | 3.53 半音 | 0.0736 |
+#: | **加情绪描述** | 2.73s | **5.57** | **0.1196** |
+#: | 情绪 + steps=5 | 1.46s | 4.10 | 0.0630 |
+#: | 情绪 + steps=20 | 5.54s | 4.50 | 0.1012 |
+#:
+#: 结论：**加情绪描述是免费且显著的**（起伏 +58%/+62%），
+#: 而 `inference_timesteps` 降到 5 只快 1.9 倍、**明显变平** → 不降档。
+TONE_INSTRUCTS = {
+    "warm": "亲切自然，像跟朋友聊天，语气有起伏，带一点微笑",
+    "calm": "平静温和，语速平稳",
+    "lively": "活泼明快，语调起伏明显",
+    "serious": "沉稳专业，播报口吻",
+}
+
+
 class VoiceLibrary:
     """音色库：一个目录里成对的 `<name>.wav` + `<name>.json`。
 
@@ -317,14 +338,14 @@ _WARNED_NO_VOICE = threading.Event()
 _WARNED_UNSUPPORTED = threading.Event()
 
 
-def log_once_unsupported_voice_style(voice, style):
+def log_once_unsupported_voice_style(voice, style, tone=None):
     """`say` 后端不支持选音色/语系——喊一次，别让用户以为点了没生效。"""
     if not _WARNED_UNSUPPORTED.is_set():
         _WARNED_UNSUPPORTED.set()
         import sys
 
         print(
-            f"⚠️ say 后端不支持 voice/style（收到 voice={voice!r} style={style!r}）——"
+            f"⚠️ say 后端不支持 voice/style/tone（收到 voice={voice!r} style={style!r} tone={tone!r}）——"
             "那两个参数只有 voxcpm2 后端有效。",
             file=sys.stderr,
         )
@@ -389,11 +410,12 @@ class VoxCpm2Backend:
 
     def __init__(self, model=DEFAULT_VOXCPM2_MODEL, timeout=60, queue_wait=0.0,
                  load_timeout=600, voices_dir=None, default_voice=None,
-                 default_style=None):
+                 default_style=None, default_tone=None):
         self.model_id = str(model)
         # 音色库：**默认必须有一个**，否则就是用户抱怨的「每次换一个人」
         self.voices = VoiceLibrary(voices_dir, default_voice)
         self.default_style = default_style or "zh"
+        self.default_tone = default_tone or "warm"
         self._ref_cache = {}
         self.timeout = timeout
         self.queue_wait = queue_wait
@@ -423,18 +445,30 @@ class VoxCpm2Backend:
             "model": self.model_id,
             "sample_rate": self.sample_rate,
             "load_seconds": round(self.load_seconds, 3),
+            # **峰值 RSS 自报**：仓库规矩是「高资源档的峰值 RSS 必须实测入库」，
+            # 而在 macOS 沙箱里 `ps`/`top` 都读不到别人的内存——
+            # 让进程自己报才是最可靠的口径（ru_maxrss 在 macOS 上是字节）。
+            "peak_rss_mb": self.peak_rss_mb(),
             "default_voice": self.voices.default,
             "default_style": self.default_style,
+            "default_tone": self.default_tone,
+            "tones": sorted(TONE_INSTRUCTS),
             "voices": sorted(self.voices.entries),
             "styles": sorted(STYLE_INSTRUCTS),
             "loudness": {"target_rms": TARGET_RMS, "peak_ceiling": PEAK_CEILING},
         }
 
+    def peak_rss_mb(self):
+        """本进程峰值 RSS（MB）。macOS 上 `ru_maxrss` 单位是**字节**。"""
+        import resource
+
+        return round(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / (1024 * 1024))
+
     def available_langs(self):
         # Language is inferred from the text; no separate voice per language.
         return {lang: self.model_id for lang in SUPPORTED_LANGS}
 
-    def synthesize(self, text, lang, voice=None, style=None):
+    def synthesize(self, text, lang, voice=None, style=None, tone=None):
         if lang not in SUPPORTED_LANGS:
             raise TTSError(400, "lang must be exactly one of: zh, en, th.")
         entry = self.voices.get(voice)
@@ -445,6 +479,9 @@ class VoxCpm2Backend:
         style = style or self.default_style
         if style not in STYLE_INSTRUCTS:
             raise TTSError(400, f"unknown style {style!r}; known: {sorted(STYLE_INSTRUCTS)}")
+        tone = tone or self.default_tone
+        if tone not in TONE_INSTRUCTS:
+            raise TTSError(400, f"unknown tone {tone!r}; known: {sorted(TONE_INSTRUCTS)}")
         # The lock is what turns "second request arrives mid-synthesis" into an
         # explicit 503 instead of an unbounded queue.
         if not self._lock.acquire(timeout=self.queue_wait):
@@ -453,7 +490,7 @@ class VoxCpm2Backend:
             if self._stopping:
                 raise TTSError(503, "TTS service is stopping.")
             job = Future()
-            self._jobs.put((text, style, entry, job))
+            self._jobs.put((text, style, tone, entry, job))
             try:
                 return job.result(timeout=self.timeout)
             except FuturesTimeout:
@@ -488,9 +525,9 @@ class VoxCpm2Backend:
             job = self._jobs.get()
             if job is None:
                 return
-            text, style, entry, future = job
+            text, style, tone, entry, future = job
             try:
-                audio, sample_rate = self._generate(text, style, entry)
+                audio, sample_rate = self._generate(text, style, tone, entry)
                 future.set_result(
                     wav_from_float(normalize_loudness(audio), sample_rate or self.sample_rate)
                 )
@@ -508,7 +545,7 @@ class VoxCpm2Backend:
             self._ref_cache[key] = load_audio(key)
         return self._ref_cache[key], entry.get("ref_text")
 
-    def _generate(self, text, style, entry):
+    def _generate(self, text, style, tone, entry):
         """Collect every segment of the generator into one waveform.
 
         ``mlx_audio``'s ``generate`` is a **generator**, not a call returning one
@@ -521,7 +558,9 @@ class VoxCpm2Backend:
         sample_rate = None
         # **钉音色**：给了参考音频就走克隆模式，不给才会每次随机换人。
         ref_audio, ref_text = self._load_ref(entry)
-        instruct = STYLE_INSTRUCTS.get(style)
+        # instruct 是**拼接**的：语气在前、语系在后。
+        # 语系用 "zh"（标准普通话）时它只是一句约束，不冲突。
+        instruct = f"{TONE_INSTRUCTS[tone]}，{STYLE_INSTRUCTS[style]}"
         if ref_audio is None:
             log_once_no_voice()
         try:
@@ -572,7 +611,8 @@ def validate_wav_bytes(data):
 
 
 def build_backend(kind, model=None, timeout=None, queue_wait=0.0,
-                  voices_dir=None, default_voice=None, default_style=None):
+                  voices_dir=None, default_voice=None, default_style=None,
+                  default_tone=None):
     if kind == "say":
         return SayBackend(timeout=timeout if timeout is not None else 30)
     if kind == "voxcpm2":
@@ -583,6 +623,7 @@ def build_backend(kind, model=None, timeout=None, queue_wait=0.0,
             voices_dir=voices_dir,
             default_voice=default_voice,
             default_style=default_style,
+            default_tone=default_tone,
         )
     raise TTSError(500, f"unknown backend {kind!r}")
 

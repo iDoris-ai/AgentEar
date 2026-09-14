@@ -1433,7 +1433,7 @@ fn args_after<'a>(args: &'a [String], flag: &str) -> Vec<&'a str> {
     out
 }
 
-fn data_root() -> Result<PathBuf> {
+pub(crate) fn data_root() -> Result<PathBuf> {
     if let Ok(p) = std::env::var("AGENTEAR_DATA") {
         return Ok(PathBuf::from(p));
     }

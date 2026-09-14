@@ -115,6 +115,38 @@ class WavPackingTests(unittest.TestCase):
         self.assertEqual(caught.exception.status, 500)
 
 
+class ContractWithRustTests(unittest.TestCase):
+    """**跨语言契约**：这两张表的键集必须与 `src/talk.rs` 的
+    `STYLE_OPTIONS` / `TONE_OPTIONS` 一致（那边也有一条同名断言）。
+
+    漂移的后果是「菜单点得下去、边车回 400」——这种错只能靠两边各钉一条测试拦住。
+    """
+
+    def test_style_keys_match_the_app(self):
+        self.assertEqual(
+            sorted(backends.STYLE_INSTRUCTS),
+            sorted(["zh", "yue", "henan", "sichuan", "shandong", "dongbei", "tianjin",
+                    "en", "en-gb", "en-us", "en-ca", "th"]),
+        )
+
+    def test_tone_keys_match_the_app(self):
+        self.assertEqual(
+            sorted(backends.TONE_INSTRUCTS), sorted(["warm", "calm", "lively", "serious"])
+        )
+
+    def test_tone_and_style_both_reach_the_instruct(self):
+        """语气和语系都必须真的进 instruct。
+
+        菜单点了没效果、而日志里一切正常——这是最难查的一类（用户只会说
+        「选了没用」）。所以直接断言送进模型的 instruct 里两句都在。
+        """
+        backend, fake = voxcpm2_backend()
+        backend.synthesize("hi", "zh", tone="lively", style="yue")
+        instruct = fake.calls[0]["kwargs"].get("instruct", "")
+        self.assertIn(backends.TONE_INSTRUCTS["lively"], instruct, instruct)
+        self.assertIn(backends.STYLE_INSTRUCTS["yue"], instruct, instruct)
+
+
 class LoudnessTests(unittest.TestCase):
     """响度归一：直接治「声量飘忽」（实测不归一时 RMS 差 4.54 倍）。"""
 
@@ -240,15 +272,18 @@ class BackendSelectionTests(unittest.TestCase):
 
     def test_validate_request_only_accepts_the_three_languages(self):
         self.assertEqual(
-            server.validate_request({"text": "hi", "lang": "th"}), ("hi", "th", None, None)
+            server.validate_request({"text": "hi", "lang": "th"}), ("hi", "th", None, None, None)
         )
         # voice / style 是可选的逐请求覆盖（菜单和语音指令都走它）
         self.assertEqual(
-            server.validate_request({"text": "hi", "lang": "th", "voice": "f1", "style": "yue"}),
-            ("hi", "th", "f1", "yue"),
+            server.validate_request(
+                {"text": "hi", "lang": "th", "voice": "f1", "style": "yue", "tone": "warm"}
+            ),
+            ("hi", "th", "f1", "yue", "warm"),
         )
         for bad in ({"text": "hi", "lang": "th", "voice": ""},
-                    {"text": "hi", "lang": "th", "style": 7}):
+                    {"text": "hi", "lang": "th", "style": 7},
+                    {"text": "hi", "lang": "th", "tone": ""}):
             with self.subTest(bad=bad):
                 with self.assertRaises(backends.TTSError):
                     server.validate_request(bad)

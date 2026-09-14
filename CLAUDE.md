@@ -2,7 +2,7 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-## 当前状态：**v0.8.0 —— 音色钉住（女声）+ 响度归一**；M1/M2 已发布；**M3 通话链路已跑通，AEC / 自动打断未做**
+## 当前状态：**v0.8.1 —— 音色/语系/语气菜单 + 峰值 RSS 自报**；M1/M2 已发布；**M3 通话链路已跑通，AEC / 自动打断未做**
 
 M1 完成；**知识库投递 + 全文检索默认开（v0.4.2）**；M2 理解层已发布（v0.4.0）但默认关；
 **v0.6.0 加了通话链路（说一句答一句、可按键打断）**，**v0.5.0 加了可切换的 ASR 后端**（`--asr-backend` / `config.json` 的 `asr_backend`，
@@ -97,6 +97,20 @@ M1 完成；**知识库投递 + 全文检索默认开（v0.4.2）**；M2 理解�
   ——这是 V1 的打断入口；② 转写 / 上屏 / 知识库都走完之后，**若 `talk_mode` 是对话模式**
   则 `answer_out_loud()` 把回答念出来，**失败只记日志，不挡上屏**。
   模式是**每轮现读配置**的，所以菜单里切一下对下一轮立刻生效。
+- **语音输出三栏（v0.8.1）**：菜单 → **说话** → 语系（12 项）/ 语气（4 项）/ 音色（**扫目录**）。
+  配置 `tts_style` / `tts_tone` / `tts_voice` / `tts_voices_dir`；
+  `HttpTts` **逐请求**带上这三个参数，所以菜单改完下一轮立刻生效。
+  - ⚠️ 选项表在 Rust（`talk::STYLE_OPTIONS`/`TONE_OPTIONS`）和 Python
+    （`STYLE_INSTRUCTS`/`TONE_INSTRUCTS`）**各有一份**（菜单不能为列一次表去发 HTTP）。
+    **漂移的后果是「菜单点得下去、边车回 400」**，所以两边各有一条测试钉住**完整键集**，
+    改一处必须改另一处。
+  - **默认语气 `warm` 是实测挑的**：只写语种时 F0 起伏 3.53 半音 / 能量起伏 0.0736，
+    加情绪描述后 5.57 / 0.1196（+58%/+62%，且更快）。
+  - ⚠️ **`inference_timesteps` 不要降档**：实测 steps=5 快 1.9 倍但起伏掉到 4.10/0.0630
+    （最平），steps=20 只更慢（5.54s）。**默认 10 是甜点。**
+  - **`/health` 现在自报 `peak_rss_mb`**（`resource.getrusage`）：macOS 沙箱里
+    `ps`/`top` 读不到别的进程内存，而仓库规矩要求「高资源档峰值 RSS 必须实测入库」。
+    实测 4bit **2386MB** / 8bit **3266MB**。
 - **边车与脚本**：`services/tts/backends.py`（新增 `SayBackend` + `VoxCpm2Backend`，
   HTTP 契约不变）、`services/tts/server.py`（`--backend {voxcpm2,say}`，**默认 voxcpm2**）、
   `scripts/setup-talk.sh`（按需下载两个模型，**不随包分发**）、
