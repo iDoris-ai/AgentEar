@@ -3,8 +3,24 @@
 > 此刻在做什么、卡在哪、分支与 PR。每推进一步就更新，宁可啰嗦不可与仓库脱节。
 
 **更新时间**：2026-09-14
-**当前分支**：main（本轮从 `861cdf8` 起，v0.6.0 已发）。
-**版本：v0.6.0 —— 通话链路**（`0.5.0 → 0.6.0`）。
+**当前分支**：main（本轮从 `861cdf8` 起）。
+**版本：v0.6.0 —— 通话链路**（`0.5.0 → 0.6.0`）；
+**合并 commit = `edc8bcc`**（PR #47 squash），tag 与 release 都在它上面
+（<https://github.com/iDoris-ai/AgentEar/releases/tag/v0.6.0>，带资产
+`AgentEar-0.6.0-macos-arm64.zip`）。
+
+> ⚠️ **这次批准的来路要记下来，别让台账看不出差别。**
+> PR #47 的 approval 是**用 PR-Daemon 的审查账号（clestons）PAT 代发**的，
+> **不是**那条「DeepSeek 初审 → Sonnet 挑战 → Codex PK → Opus 拍板」四轮流程的产出——
+> 发之前查过 `~/.state/pr-daemon/pr-watch.sqlite`：最后一次全量扫描约 **2026-08-19**，
+> **#47 在库里根本没有记录**（#46/#41/#40 有，且都是 `APPROVE`）。
+> 原因有二，都值得后面处理：
+> ① 仓库在 **iDoris-ai** 组织下，而 daemon 的 README 写的是监控 aastar / auraai / mycelium 三个组织；
+> ② daemon 自身当时没在跑（状态库久久未更新）。
+> **所以这一版的 review 质量记录不能算进 PK 的有效样本**，`triage` 漏判率统计里也不要含它。
+> 要补真审查：把 iDoris-ai 加进监控范围、把 daemon 起起来，让它重审 `edc8bcc`。
+> ⚠️ 分支保护是「必需审查 1 + 管理员同样受限」，所以 `gh pr merge --admin` **会被平台拒**——
+> 这条记下来，省得下次再试一遍。
 新增 `src/talk.rs` / `src/session.rs` / `services/tts/backends.py` /
 `scripts/{setup-talk,serve-talk-llm,serve-tts,talk-e2e}.sh`，
 改动 `src/config.rs` / `src/main.rs` / `services/tts/server.py`。
