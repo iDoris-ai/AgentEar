@@ -318,25 +318,36 @@ fn populate(menu: &NSMenu, mtm: MainThreadMarker, target: &MenuTarget) {
     // 让人以为「功能没了」（v0.7.0 的「模式」就是这么被投诉的）。
     let speech_item = item(mtm, target, i18n::t(lang, Key::SpeechSection), -1, false);
     speech_item.setEnabled(true);
-    let style_item = item(mtm, target, i18n::t(lang, Key::StyleSection), -1, false);
-    style_item.setEnabled(true);
-    submenu(
-        mtm,
-        &style_item,
-        crate::talk::STYLE_OPTIONS
-            .iter()
-            .enumerate()
-            .map(|(i, opt)| {
-                item(
-                    mtm,
-                    target,
-                    crate::talk::option_label(opt, lang),
-                    TAG_STYLE_BASE + i as isize,
-                    cfg.tts_style == opt.0,
-                )
-            })
-            .collect(),
-    );
+    // **语言**与**方言**分成两栏（jason 2026-09-15）：
+    // 「切换男女声音一个菜单，切换方言单独一个菜单」。
+    // 两栏写的是同一个 `tts_style`，只是把 12 项按用途切开——
+    // 方言是高频低门槛的尝试项，混在语言里会让人找不到。
+    let mut speech_sections: Vec<Retained<NSMenuItem>> = Vec::new();
+    for (section, keys) in [
+        (Key::StyleSection, crate::talk::LANGUAGE_STYLES),
+        (Key::DialectSection, crate::talk::DIALECT_STYLES),
+    ] {
+        let sub = item(mtm, target, i18n::t(lang, section), -1, false);
+        sub.setEnabled(true);
+        submenu(
+            mtm,
+            &sub,
+            keys.iter()
+                .filter_map(|k| crate::talk::style_index(k).map(|i| (i, k)))
+                .map(|(i, key)| {
+                    let opt = crate::talk::STYLE_OPTIONS[i];
+                    item(
+                        mtm,
+                        target,
+                        crate::talk::option_label(&opt, lang),
+                        TAG_STYLE_BASE + i as isize,
+                        cfg.tts_style == opt.0,
+                    )
+                })
+                .collect(),
+        );
+        speech_sections.push(sub);
+    }
     let tone_item = item(mtm, target, i18n::t(lang, Key::ToneSection), -1, false);
     tone_item.setEnabled(true);
     submenu(
@@ -400,11 +411,11 @@ fn populate(menu: &NSMenu, mtm: MainThreadMarker, target: &MenuTarget) {
                 .collect(),
         );
     }
-    submenu(
-        mtm,
-        &speech_item,
-        vec![style_item, tone_item, voice_item],
-    );
+    // 顺序：先「说话用什么音色」→ 再「怎么说」（语言/方言/语气）。
+    // 音色在最前面，因为那是用户最常改的一项。
+    speech_sections.push(tone_item);
+    speech_sections.push(voice_item);
+    submenu(mtm, &speech_item, speech_sections);
     menu.addItem(&speech_item);
 
     // —— 触发键 ——
