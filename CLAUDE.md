@@ -2,7 +2,7 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-## 当前状态：**v0.12.1 —— 向外动作二次确认（+ 挑解释器的版本闸）**；M1/M2 已发布；**M3 通话链路已跑通，AEC / 自动打断未做**
+## 当前状态：**v0.13.0 —— 动作回执要真的回执（不再谎报成功）**；M1/M2 已发布；**M3 通话链路已跑通，AEC / 自动打断未做**
 
 M1 完成；**知识库投递 + 全文检索默认开（v0.4.2）**；M2 理解层已发布（v0.4.0）但默认关；
 **v0.6.0 加了通话链路（说一句答一句、可按键打断）**，**v0.5.0 加了可切换的 ASR 后端**（`--asr-backend` / `config.json` 的 `asr_backend`，
@@ -247,6 +247,28 @@ M1 完成；**知识库投递 + 全文检索默认开（v0.4.2）**；M2 理解�
     `--match-command` 也会报这条指令要不要确认。
   - ⚠️ **`mailto:` 的执行分支没有实跑验证过**（跑它会在你机器上打开邮件客户端）。
     已验证的是「它会问」以及 http_post 的完整链路。
+- **动作回执必须是真的（v0.13.0）。** 起因是 jason 人工测试（2026-09-15）后
+  问了一句「**你别骗我啊**」——查下去发现 `http_post` 分支有**两处报喜不报忧**：
+  - `stdout(Stdio::null())`：**把对方的响应体丢了**。而 Notion / n8n 写入成功后
+    回的正是新页面的 **URL**，所以用户问「写到哪了、网址给我看看」时，
+    **系统手里根本没有那个答案**（不是不给，是没有）。
+  - `let _ = child.wait();`：**不看退出码**。HTTP 401（token 过期）/ 500
+    也照样报「已发送到 …」。**没写进去却说写进去了，比失败更糟。**
+  现在：留着响应体并从中挑回执（`commands::summarize_response`：
+  `url` → `link` → `id` → 正文里的第一条链接 → 截断原文），
+  退出码非零就**报失败并带上服务端的解释**。
+  - ⚠️ 用 **`--fail-with-body` 而不是 `-f`**：`-f` 在 HTTP 出错时**一个字都不输出**，
+    于是最有用的一句被吞掉——而它往往正是「哪里配错了」。
+    实测 Notion 式 401 的返回体现在能带出来：
+    `没写进去（curl 退出码 Some(22)）：… 401 / {"message":"API token is invalid"}`。
+  - `open_url` 也等了退出码，但**语义要说准**：它表示「有没有把 URL 交出去」，
+    **不表示网页能打开**（实测 `open https://不存在的域名.invalid` 退出码是 0）。
+    **不要宣传成「验证了链接可达」。**
+- **通话回答正文进日志（v0.13.0 补）。** 流式改造（v0.10.0）时只留了「回答 N 字」，
+  把正文丢了——原来整句路径是会打出来的。后果是**事后查不了**：
+  jason 问「它刚才到底说了什么」，日志里只有字数。实测就是这么卡住的
+  （他复述模型说过「我无法访问外部链接」，我们从日志读不出这句，
+  只能重新打一遍模型才知道）。**这一行是可追溯性，不是调试噪音。**
 - **边车与脚本**：`services/tts/backends.py`（新增 `SayBackend` + `VoxCpm2Backend`，
   HTTP 契约不变）、`services/tts/server.py`（`--backend {voxcpm2,say}`，**默认 voxcpm2**）、
   `scripts/setup-talk.sh`（按需下载两个模型，**不随包分发**）、
@@ -319,7 +341,7 @@ clippy **刻意不加 `-D warnings`**（既有 13 条警告，加了会让 CI �
 
 ```bash
 cargo build --release
-cargo test                                    # 296 passed / 0 failed / 6 ignored（291 条单测 + 5 条钉脚本默认值的集成测试；ignored 6 条：4 条要边车、1 条要联网、1 条要能出声的环境）：提交协议、崩溃语义、token 过滤、i18n、下载协议、知识库投递、通话会话状态机、语音指令表
+cargo test                                    # 297 passed / 0 failed / 6 ignored（292 条单测 + 5 条钉脚本默认值的集成测试；ignored 6 条：4 条要边车、1 条要联网、1 条要能出声的环境）：提交协议、崩溃语义、token 过滤、i18n、下载协议、知识库投递、通话会话状态机、语音指令表
 ./target/release/agentear                     # 守护进程，Ctrl+Shift+R 开始/停止录音
 ./target/release/agentear --transcribe x.wav  # 离线转写，不占麦克风，用于验证 ASR 链路
 ./target/release/agentear --diagnose          # 环境自检：权限、音频设备、ASR 依赖
