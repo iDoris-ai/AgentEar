@@ -528,6 +528,8 @@ fn main() -> Result<()> {
             aliases: Vec::new(),
             action,
             note: None,
+            // `--add-command --confirm` 可以给「本来不用问」的动作加一道确认
+            confirm: args.iter().any(|a| a == "--confirm"),
         };
         cmd.validate().context("这条指令不合法")?;
         let mut all = commands::load(&dir)?;
@@ -541,6 +543,60 @@ fn main() -> Result<()> {
         if from_wav {
             println!("   ⚠️ 短语是 ASR 听出来的，**听错了就打开那个文件改**（菜单里也有「打开指令表」）");
         }
+        return Ok(());
+    }
+
+    // ---- 语音指令表：**走一遍完整流程**（含二次确认）----
+    //
+    // 和内建那条路用的是**同一个函数**（`run_command_turn`），所以它不是
+    // 「模拟」：它就是守护进程按一次录音键之后跑的东西。
+    // 加它的理由是这一层的性质——**确认逻辑错了就会把东西发出去**，
+    // 而「对着麦克风按键 + 说话」没法无人值守复现。
+    //
+    //   agentear --run-command "记到 notion 明天要测 AEC"
+    //     → 打印要确认什么，**不执行**
+    //   agentear --run-command "记到 notion 明天要测 AEC" --reply "确认"
+    //     → 第一轮问，第二轮答，然后才执行
+    if args.iter().any(|a| a == "--run-command") {
+        let text = args_after(&args, "--run-command")
+            .first()
+            .copied()
+            .ok_or_else(|| anyhow::anyhow!("--run-command 后面要跟一句话"))?
+            .to_string();
+        let hash = format!("dryrun-{}", std::process::id());
+        // CLI 路径上还没有 store（守护进程那条在 636 行才建），这里自己开一个：
+        // 只用来读指令表，不写任何东西。
+        let store = store::Store::open(&data_root)?;
+        println!("① 用户说：{text}");
+        let first = run_command_turn(&store, &cfg, &text, &hash);
+        match first {
+            CommandTurn::NotMine => {
+                println!("   → 没命中指令表（正常路径会走对话）");
+                return Ok(());
+            }
+            CommandTurn::Handled => {
+                println!("   → 已执行（这个动作不需要二次确认）");
+                return Ok(());
+            }
+            CommandTurn::Asked => println!("   → 等确认，**什么都没执行**"),
+        }
+        let reply = args_after(&args, "--reply").first().copied();
+        let Some(reply) = reply else {
+            println!("\n（要接着测确认，加 --reply \"确认\" / --reply \"取消\"）");
+            // 进程要退出了，把待确认丢掉，别留下一个「挂着」的假状态
+            drop_pending("命令行干跑结束");
+            return Ok(());
+        };
+        println!("\n② 用户回答：{reply}");
+        let verdict = commands::classify_confirmation(reply);
+        println!("   → 判定：{verdict:?}");
+        let outcome = run_command_turn(&store, &cfg, reply, &hash);
+        match outcome {
+            CommandTurn::Handled => println!("   → 处理完毕"),
+            CommandTurn::Asked => println!("   → 又要确认一次（回答里又命中了一条向外指令）"),
+            CommandTurn::NotMine => println!("   → 待确认已作废，这一轮按普通输入处理"),
+        }
+        drop_pending("命令行干跑结束");
         return Ok(());
     }
 
@@ -568,6 +624,17 @@ fn main() -> Result<()> {
                 println!("命中短语: {}", hit.phrase);
                 println!("剩下的:   {:?}", hit.rest);
                 println!("动作:     {:?}", hit.action);
+                let opt_in = all
+                    .iter()
+                    .find(|c| c.phrase == hit.phrase)
+                    .map(|c| c.confirm)
+                    .unwrap_or(false);
+                if commands::needs_confirm(&hit.action, opt_in) {
+                    println!("二次确认: **要**（向外动作，执行前会先问一句）");
+                    println!("问句:     {}", commands::confirm_prompt(&hit.action, &hit.rest, &text));
+                } else {
+                    println!("二次确认: 不要（本机动作 / 只打开网页）");
+                }
                 println!("（干跑：**没有执行**任何动作）");
             }
         }
@@ -897,6 +964,25 @@ fn finish(state: State, store: &store::Store, asr: &dyn engine::AsrEngine) -> Re
 
     let secs = session.duration_secs();
     if secs < 0.3 {
+        // **「按一下录音键」就是确认。**
+        //
+        // 推键式架构里，麦克风只在按键时开，所以「说确认」必须先从按键开始。
+        // 于是「按一下键（不说话）」和「按键 + 说确认」是同一串动作的前半截，
+        // 用一个很短、里面不可能有语音的录音把它们区分开：
+        //   · 短按 → 没说话 → 当成**按键确认**
+        //   · 按键后说话 → 有转写 → 交给 `classify_confirmation` 判词
+        // 这也正是原来「录音过短（<0.3s）丢弃」那条路的复用——
+        // 那个长度里本来就不可能有话。
+        if has_pending() {
+            let cfg = config::get();
+            if let Some(pending) = take_pending() {
+                log::info!("短按录音键 → 确认「{}」", pending.hit.phrase);
+                println!("✔ 已确认（按键）");
+                run_confirmed(store, &cfg, pending);
+                tray::set(tray::Status::Idle);
+                return Ok(State::Idle);
+            }
+        }
         log::warn!("录音过短（{secs:.1}s），丢弃");
         tray::set(tray::Status::Idle);
         return Ok(State::Idle);
@@ -1071,9 +1157,21 @@ fn finish(state: State, store: &store::Store, asr: &dyn engine::AsrEngine) -> Re
             // 开放式的句子本来就该由 LLM 理解，指令表只认用户声明过的那几条。
             //
             // ⚠️ **上屏/剪贴板在前面已经做完了**，所以指令轮次也不丢文字。
-            if cfg.commands_enabled && run_command_if_matched(store, &cfg, &text, &committed.content_hash) {
-                tray::set(tray::Status::Idle);
-                return Ok(State::Idle);
+            if cfg.commands_enabled {
+                match run_command_turn(store, &cfg, &text, &committed.content_hash) {
+                    CommandTurn::Handled => {
+                        tray::set(tray::Status::Idle);
+                        return Ok(State::Idle);
+                    }
+                    // 待确认的向外动作**已经念给用户了**，这一轮到此为止：
+                    // 不往下走 LLM（用户刚才是在下指令，不是聊天），
+                    // 也不当作没命中。
+                    CommandTurn::Asked => {
+                        tray::set(tray::Status::Idle);
+                        return Ok(State::Idle);
+                    }
+                    CommandTurn::NotMine => {}
+                }
             }
 
             // —— 通话形态：说一句、答一句 ——
@@ -1106,25 +1204,219 @@ fn finish(state: State, store: &store::Store, asr: &dyn engine::AsrEngine) -> Re
 ///
 /// ⚠️ **绝不执行 shell**：语音识别错一个字就变成在你机器上执行命令，而且没有撤销键。
 /// 所以动作是一个**三种的封闭集合**，不是「随便配个命令」。
-fn run_command_if_matched(
+/// 一轮语音进来以后，指令表这条线自己的结论。
+enum CommandTurn {
+    /// 已经执行完了（或执行失败），这一轮不再往下走。
+    Handled,
+    /// 需要二次确认，问句已经念出去了。**这一轮不执行任何东西。**
+    Asked,
+    /// 跟指令表无关，交给后面的对话/上屏流程。
+    NotMine,
+}
+
+/// 指令表这条线的入口：**先看是不是在回答上一个待确认**，再看是不是新指令。
+///
+/// 顺序是承重的：用户上一轮被问了「要发到 Notion 吗」，
+/// 这一轮说「确认」——那句话要是先拿去查表，就可能被当成一条新指令。
+fn run_command_turn(
     store: &store::Store,
     cfg: &config::Config,
     text: &str,
     content_hash: &str,
-) -> bool {
+) -> CommandTurn {
+    // ① 有待确认的动作吗？这一轮可能是在回答它
+    if has_pending() {
+        match commands::classify_confirmation(text) {
+            commands::Reply::Confirm => {
+                let Some(pending) = take_pending() else {
+                    return CommandTurn::NotMine;
+                };
+                log::info!("用户确认了「{}」", pending.hit.phrase);
+                run_confirmed(store, cfg, pending);
+                return CommandTurn::Handled;
+            }
+            commands::Reply::Cancel => {
+                drop_pending("用户说了取消");
+                println!("⛔ 已取消，没有发出去");
+                return CommandTurn::Handled;
+            }
+            commands::Reply::Other => {
+                // ⚠️ **别的话一律作废待确认**，然后把这一轮当正常输入/对话。
+                // 「不吭声也算」是最危险的默认值：一个走神的「嗯」就能发出去。
+                drop_pending("用户说了别的话，不是确认");
+                println!("（刚才那条待确认已作废）");
+            }
+        }
+    }
+
+    // ② 新指令？
+    match decide_command(store, text) {
+        Decision::None => CommandTurn::NotMine,
+        Decision::AskFirst(hit) => {
+            let prompt = stash_pending(hit, content_hash, text, cfg);
+            announce_pending(cfg, &prompt);
+            CommandTurn::Asked
+        }
+        Decision::RunNow(hit) => {
+            let rest = hit.rest.clone();
+            match execute_command(store, cfg, &hit, &rest, content_hash) {
+                Ok(msg) => {
+                    log::info!("指令执行完成：{msg}");
+                    println!("⚡ {msg}");
+                }
+                // 失败**不挡上屏**：文字已经在剪贴板里了
+                Err(e) => log::error!("指令执行失败（不影响上屏）: {e:#}"),
+            }
+            CommandTurn::Handled
+        }
+    }
+}
+
+/// 指令命中之后**要做什么**：立刻执行，还是先问一句。
+enum Decision {
+    /// 本地动作，或者用户已经确认过——直接干。
+    RunNow(commands::Hit),
+    /// 向外动作：**不执行**，把内容念给用户听，等第二次确认。
+    AskFirst(commands::Hit),
+    /// 没命中。
+    None,
+}
+
+/// 只做「查表 + 判断要不要确认」，**不产生任何副作用**。
+///
+/// 拆出这一步是因为「确认」要跨轮次：命中的那个 `Hit` 得先存起来，
+/// 等下一轮用户点头了再执行。把匹配和执行揉在一起就没法延迟执行。
+fn decide_command(store: &store::Store, text: &str) -> Decision {
     let commands = match commands::load(store.root()) {
-        Ok(c) => c,
+        Ok(list) => list,
         Err(e) => {
             log::error!("读指令表失败，这一轮按普通对话处理: {e:#}");
-            return false;
+            return Decision::None;
         }
     };
     let Some(hit) = commands::match_text(&commands, text) else {
-        return false;
+        return Decision::None;
     };
-    log::info!("指令命中「{}」→ {:?}（槽位 {:?}）", hit.phrase, hit.action, hit.rest);
+    let opt_in = commands
+        .iter()
+        .find(|c| c.phrase == hit.phrase)
+        .map(|c| c.confirm)
+        .unwrap_or(false);
+    log::info!(
+        "指令命中「{}」→ {:?}（槽位 {:?}，需确认 {}）",
+        hit.phrase,
+        hit.action,
+        hit.rest,
+        commands::needs_confirm(&hit.action, opt_in)
+    );
+    if commands::needs_confirm(&hit.action, opt_in) {
+        Decision::AskFirst(hit)
+    } else {
+        Decision::RunNow(hit)
+    }
+}
 
+// ------------------------------------------------- 待确认的向外动作
+//
+// **全局的**，因为确认要跨轮次：这一轮把内容念出来，下一轮用户才点头。
+// 和 `talk::PLAYING` 一个道理——不为一次跨轮次的「等你确认」引入一整套
+// 消息通道，一个互斥锁足够了。
+//
+// ⚠️ **只留一条**。挂两条待确认，用户说「确认」时我们会不知道他确认的是哪条，
+// 而猜错的代价是**把错的东西发出去**。新的命中直接顶掉旧的（并把旧的作废记日志）。
+static PENDING_CONFIRM: std::sync::Mutex<Option<commands::Pending>> =
+    std::sync::Mutex::new(None);
+
+/// 存一条待确认，返回它的问句（调用方负责念/打印）。
+fn stash_pending(
+    hit: commands::Hit,
+    content_hash: &str,
+    text: &str,
+    cfg: &config::Config,
+) -> String {
+    let ttl = std::time::Duration::from_secs(cfg.command_confirm_secs.max(5));
+    // 问句由 `Pending` 自己生成：**念的和以后发的同源**，不给它们分叉的机会。
+    let pending = commands::Pending::new(hit, content_hash.to_string(), text, ttl);
+    let prompt = pending.prompt.clone();
+    let mut slot = PENDING_CONFIRM.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(old) = slot.replace(pending) {
+        // 顶掉旧的要**说出来**：静默替换会让用户以为他确认的是上一条。
+        log::warn!("上一条待确认（{}）被新的顶掉，已作废", old.hit.phrase);
+    }
+    tray::set_pending(true);
+    prompt
+}
+
+/// 取一条**还没过期**的待确认。过期的当场丢掉——一个挂着的向外动作
+/// 比没有更危险。
+fn take_pending() -> Option<commands::Pending> {
+    let mut slot = PENDING_CONFIRM.lock().unwrap_or_else(|e| e.into_inner());
+    match slot.take() {
+        Some(p) if p.is_fresh() => Some(p),
+        Some(p) => {
+            log::info!("待确认的「{}」已过期（没等到确认），作废", p.hit.phrase);
+            tray::set_pending(false);
+            None
+        }
+        None => None,
+    }
+}
+
+/// 放弃待确认（用户说了别的话 / 说了取消）。
+fn drop_pending(reason: &str) {
+    let mut slot = PENDING_CONFIRM.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(p) = slot.take() {
+        log::info!("待确认的「{}」被丢弃：{reason}", p.hit.phrase);
+    }
+    tray::set_pending(false);
+}
+
+fn has_pending() -> bool {
+    PENDING_CONFIRM
+        .lock()
+        .map(|s| s.as_ref().map(|p| p.is_fresh()).unwrap_or(false))
+        .unwrap_or(false)
+}
+
+/// 把确认问句**念出来**（对话模式才有声音），并打印。
+///
+/// ⚠️ 念是这层的核心动作，不是日志：用户要确认的东西**必须先被告知**。
+/// 输入法模式下没有声音，所以至少要落到 stdout 和日志里，别让它变成隐形状态。
+fn announce_pending(cfg: &config::Config, prompt: &str) {
+    log::info!("需要二次确认（{} 秒内有效）：{prompt}", cfg.command_confirm_secs);
+    println!("❓ {prompt}");
+    if cfg.talk_mode == config::TalkMode::Conversation {
+        let engines = talk::Engines::from_config(cfg);
+        if let Err(e) = talk::speak(&engines, prompt, cfg.talk_lang) {
+            log::error!("确认问句没能念出来（不影响状态，待确认仍有效）: {e:#}");
+        }
+    }
+}
+
+/// 执行一个已确认的待确认动作。
+fn run_confirmed(store: &store::Store, cfg: &config::Config, pending: commands::Pending) {
+    tray::set_pending(false);
+    // ⚠️ 用 `pending.text`——**就是刚才念给用户的那份正文**，不重新推导。
+    match execute_command(store, cfg, &pending.hit, &pending.text, &pending.content_hash) {
+        Ok(msg) => {
+            log::info!("（已确认）指令执行完成：{msg}");
+            println!("⚡ {msg}");
+        }
+        Err(e) => log::error!("（已确认）指令执行失败: {e:#}"),
+    }
+}
+
+/// 执行一个已经命中的动作。**这是唯一有副作用的地方。**
+fn execute_command(
+    store: &store::Store,
+    cfg: &config::Config,
+    hit: &commands::Hit,
+    text: &str,
+    content_hash: &str,
+) -> Result<String> {
     let outcome: Result<String> = match &hit.action {
+        // 这些分支原样保留（见下），此处只加注释：内容已在上面查过表
+
         commands::Action::OpenUrl { url } => {
             let target = commands::fill(url, &hit.rest, text);
             std::process::Command::new("/usr/bin/open")
@@ -1213,15 +1505,7 @@ fn run_command_if_matched(
             Err(e) => Err(e),
         },
     };
-    match outcome {
-        Ok(msg) => {
-            log::info!("指令执行完成：{msg}");
-            println!("⚡ {msg}");
-        }
-        // 失败**不挡上屏**：文字已经在剪贴板里了
-        Err(e) => log::error!("指令执行失败（不影响上屏）: {e:#}"),
-    }
-    true
+    outcome
 }
 
 /// 切模式。**按键和菜单都走这里**，副作用只有一份实现。

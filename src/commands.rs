@@ -116,6 +116,13 @@ pub struct Command {
     /// 备注，给用户自己看。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
+    /// **强制二次确认**（除了「本来就必须确认」的那些）。
+    ///
+    /// 「会把内容送出这台机器」的动作（`http_post`、`mailto:`）**总是**要确认，
+    /// 不看这个字段；这个字段是给**其余动作**用的额外保险，比如你想让
+    /// 「搜索 ▁▁」也问一句。默认 `false`。
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub confirm: bool,
 }
 
 impl Command {
@@ -229,14 +236,27 @@ fn template_is_url(template: &str) -> bool {
     t.starts_with("http://") || t.starts_with("https://") || t.starts_with("mailto:")
 }
 
+/// 把 `{rest}` / `{text}` **原样**填进模板（不转义）。
+///
+/// 给「念给用户听」用：`mailto:a@b.com%20%E8%AE%A8...` 这种是给机器看的，
+/// 念出来或印出来都没法读，而确认的关键恰恰是**用户能读懂要发什么**。
+pub fn fill_raw(template: &str, rest: &str, text: &str) -> String {
+    template.replace("{rest}", rest).replace("{text}", text)
+}
+
 /// 把 `{rest}` / `{text}` 填进模板。两者都是**原文**（见 `Hit` 的注释）。
+///
+/// ⚠️ 与 `fill_raw` 的关系要看清：**转义是运输层的编码，不是内容的改变**
+/// （`%20` 解出来就是空格）。所以「念给用户的那份」与「发出去的那份」
+/// 内容仍然一致——`confirm_prompt` 用 `fill_raw` 只是为了可读，
+/// **不是**为了显示别的东西。
 pub fn fill(template: &str, rest: &str, text: &str) -> String {
     let (rest, text) = if template_is_url(template) {
         (url_encode(rest), url_encode(text))
     } else {
         (rest.to_string(), text.to_string())
     };
-    template.replace("{rest}", &rest).replace("{text}", &text)
+    fill_raw(template, &rest, &text)
 }
 
 /// 百分号转义。保留非保留字（`A-Za-z0-9-_.~`）与 `@` `:` `/`——
@@ -255,6 +275,205 @@ fn url_encode(s: &str) -> String {
         }
     }
     out
+}
+
+// ------------------------------------------------------- 向外动作的二次确认
+//
+// ## 为什么这一层必须有
+//
+// 「写 Notion / 发邮件」这一类动作有两个性质：
+// **① 出了这台机器 ② 大多数不可撤**。而触发它们的是**语音识别**——
+// 一个会听错的东西。听错一次描述、代价是「重说一遍」；
+// 听错一次写出去，代价是别人收到了错的东西，而且**没有撤销键**。
+// 所以这一类动作不靠「识别得准」，靠**执行前再问一次**。
+//
+// ## 为什么是「念出来 + 等你一句话」，而不是弹窗
+//
+// V1 是推键式：麦克风只在按键时开。弹窗要用户离开键盘去点，
+// 在这个产品里等于把语音闭环打断两次。所以确认走**同一套语音回路**：
+// 把「将要做什么、内容是什么」念出来，用户**按一下录音键**或者说「确认」。
+// ⚠️ **必须把内容念出来**：只说「确认吗」的确认是假确认——
+// 用户没法确认一个他不知道的东西。
+
+/// 用户对「待确认动作」的答复。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Reply {
+    /// 明确同意 → 执行。
+    Confirm,
+    /// 明确不同意 → 丢弃。
+    Cancel,
+    /// 别的话 → **既不算同意也不算拒绝**：丢弃这一条，并照常当新的一轮处理。
+    Other,
+}
+
+/// 肯定词。⚠️ 只认**独立的短答复**，不要在长句里认——
+/// 「我确认一下天气」不是同意发邮件。
+const YES: &[&str] = &[
+    "确认", "确定", "对的", "对", "好的", "好", "是的", "是", "发送", "发出", "发吧", "可以",
+    "行", "没问题", "yes", "ok", "send", "confirm",
+];
+
+/// 否定词。
+const NO: &[&str] = &[
+    "取消", "不用", "不要", "别发", "不发", "算了", "停下", "停", "no", "cancel", "算了",
+];
+
+/// 同意只在**短答复**里认（归一化后的字数上限）。
+///
+/// ⚠️ 这条是必需的，不是保守：**提到「确认」的长句通常不是同意**
+/// （「我刚才确认过了吗」「帮我确认一下明天的会」）。
+/// 只做子串匹配的话，这两句都会被当成「同意发送」。
+/// 7 个字够放 `ok` / `yes` / `send` / `confirm` / 「好的发吧」「没问题」。
+const MAX_CONSENT_CHARS: usize = 7;
+
+/// 否定前缀。**肯定词前面挂一个它，就是否定**。
+///
+/// 光靠一张否定词表挡不住「不确认」「不要发」这类——它们含的是肯定词，
+/// 而 `不`/`别` 只是一个前缀。这里按「前缀 + 肯定词」组合判，
+/// 因为真正会出事的方向只有这一个：**误判成同意就发出去了**。
+const NEG_PREFIXES: &[&str] = &["不", "别", "没", "勿", "无须", "不用", "不要"];
+
+/// 一个词怎么算命中：**单字必须整句相等**，多字才允许包含。
+///
+/// 单字放行包含匹配会出人命类的问题：`嗯`、`对`、`行` 出现在
+/// 「嗯……那个……对，我是说搜索」这种句子里时，用户显然不是在确认。
+fn word_hits(normalized: &str, word: &str) -> bool {
+    if word.chars().count() <= 1 {
+        normalized == word
+    } else {
+        normalized.contains(word)
+    }
+}
+
+/// 把「用户说的那句话」判成确认 / 取消 / 其它。
+///
+/// ⚠️ **否定必须先判。** 「不确认」「不要发」里都**含着肯定词**
+/// （`确认` / `发`），先判肯定就会把「别发」执行成「发」——
+/// 这是这一层唯一会真正出事的方向，所以顺序是承重的，有用例钉住。
+pub fn classify_confirmation(text: &str) -> Reply {
+    let n = normalize(text);
+    if n.is_empty() {
+        // 空转写**不是同意**：那是「按了键但没说话」，
+        // 交给调用方按「按键确认」处理（见 `main.rs` 里那段）。
+        return Reply::Other;
+    }
+    // ① 否定词表（拒绝**不设长度限制**：误判成拒绝只是重说一遍，
+    //    误判成同意就发出去了 —— 这个方向的不对称是有意的）
+    if NO.iter().any(|w| word_hits(&n, w)) {
+        return Reply::Cancel;
+    }
+    // ② 否定前缀 + 肯定词（「不确认」「别发」「不好」）
+    for w in YES {
+        for neg in NEG_PREFIXES {
+            if n.contains(&format!("{neg}{w}")) {
+                return Reply::Cancel;
+            }
+        }
+    }
+    // ③ 同意：**必须在短答复里**，否则「提到确认」的长句会被当成同意
+    if n.chars().count() <= MAX_CONSENT_CHARS && YES.iter().any(|w| word_hits(&n, w)) {
+        return Reply::Confirm;
+    }
+    Reply::Other
+}
+
+fn is_mailto(url: &str) -> bool {
+    url.trim_start().to_ascii_lowercase().starts_with("mailto:")
+}
+
+/// 这个动作执行前要不要问一句。
+///
+/// 判据是「**会不会把内容送出这台机器**」：
+/// - `http_post` → 出去，而且大多数不可撤 → **一定问**
+/// - `mailto:` → 把内容交给邮件客户端（虽然只到草稿，但内容已经出去了）→ **一定问**
+/// - 打开网页（GET）→ 默认不问（搜索是高频动作，每次都问会让人把确认点成肌肉记忆，
+///   那等于没有确认）；想让它也问就 `confirm: true`
+/// - 本地内置动作 → 默认不问（切音色、切模式都在本机，且可逆）
+pub fn needs_confirm(action: &Action, opt_in: bool) -> bool {
+    match action {
+        Action::HttpPost { .. } => true,
+        Action::OpenUrl { url } => is_mailto(url) || opt_in,
+        Action::Builtin { .. } => opt_in,
+    }
+}
+
+/// 给用户念的确认问句：**说清要做什么，以及内容是什么**。
+///
+/// ⚠️ 不要写成「确认执行吗」——用户没法确认一个没被告知的东西。
+pub fn confirm_prompt(action: &Action, rest: &str, text: &str) -> String {
+    match action {
+        Action::HttpPost { url, body } => {
+            let payload = fill(body, rest, text);
+            let shown: String = if payload.chars().count() > 120 {
+                payload.chars().take(120).collect::<String>() + "…"
+            } else {
+                payload
+            };
+            format!("要把这条发到 {url}，内容是「{shown}」。确认就按一下键，或者说「确认」。")
+        }
+        Action::OpenUrl { url } if is_mailto(url) => {
+            // 收件人/主题用**原文**展示：`mailto:a@b.com%20%E8%AE%A8` 没法读，
+            // 而这一步的全部意义就是让用户看清收件人是谁。
+            // `rest` 就是「发给谁 + 说什么」，直接念它比念一个 mailto: URL 有用。
+            let shown = if rest.trim().is_empty() {
+                fill_raw(url, rest, text)
+            } else {
+                rest.to_string()
+            };
+            format!("要打开邮件草稿：{shown}。确认就按一下键，或者说「确认」。")
+        }
+        Action::OpenUrl { url } => {
+            let target = fill_raw(url, rest, text);
+            format!("要打开 {target}。确认就按一下键，或者说「确认」。")
+        }
+        Action::Builtin { name, .. } => {
+            format!("要执行 {name}。确认就按一下键，或者说「确认」。")
+        }
+    }
+}
+
+/// 待确认的动作。**带截止时间**：没人确认就作废，不能一直挂着。
+#[derive(Debug, Clone)]
+pub struct Pending {
+    /// 念给用户听的那句话（含内容）。
+    pub prompt: String,
+    /// 命中时用来执行的原件。
+    pub hit: Hit,
+    /// 这一轮的完整正文。执行时**必须用它**，和 `prompt` 同源。
+    pub text: String,
+    /// 这一轮录音的 hash（执行时写 routes 用）。
+    pub content_hash: String,
+    pub deadline: std::time::Instant,
+}
+
+impl Pending {
+    /// ⚠️ **问句和以后要执行的正文必须来自同一个 `text`。**
+    ///
+    /// 这一点是承重的：如果念给用户的是 A、真正发出去的是 B，
+    /// 那这个「二次确认」就是走过场——**用户确认的必须正是要执行的东西**。
+    /// 所以 `text` 存在这里，执行时用它，不重新推导。
+    pub fn new(
+        hit: Hit,
+        content_hash: String,
+        text: impl Into<String>,
+        ttl: std::time::Duration,
+    ) -> Self {
+        let text = text.into();
+        let prompt = confirm_prompt(&hit.action, &hit.rest, &text);
+        Self {
+            prompt,
+            hit,
+            text,
+            content_hash,
+            deadline: std::time::Instant::now() + ttl,
+        }
+    }
+
+    /// 还没过期吗。**过期即作废**：一个挂着的向外动作比没有更危险。
+    pub fn is_fresh(&self) -> bool {
+        std::time::Instant::now() < self.deadline
+    }
+
 }
 
 /// 指令表落盘位置：`<数据目录>/commands.json`。
@@ -304,6 +523,7 @@ pub fn default_commands() -> Vec<Command> {
                 url: "https://www.google.com/search?q={rest}".into(),
             },
             note: Some("打开浏览器搜索。{rest} 是短语后面的内容".into()),
+            confirm: false,
         },
         Command {
             phrase: "搜代码".into(),
@@ -312,6 +532,7 @@ pub fn default_commands() -> Vec<Command> {
                 url: "https://github.com/search?q={rest}".into(),
             },
             note: None,
+            confirm: false,
         },
         Command {
             phrase: "发邮件给".into(),
@@ -320,6 +541,7 @@ pub fn default_commands() -> Vec<Command> {
                 url: "mailto:{rest}".into(),
             },
             note: Some("只打开邮件草稿，发送仍由你自己确认".into()),
+            confirm: false,
         },
         Command {
             phrase: "记一下".into(),
@@ -329,6 +551,7 @@ pub fn default_commands() -> Vec<Command> {
                 value: None,
             },
             note: Some("把后面的内容记一条到 kb/".into()),
+            confirm: false,
         },
         Command {
             phrase: "切换对话模式".into(),
@@ -338,6 +561,7 @@ pub fn default_commands() -> Vec<Command> {
                 value: Some("conversation".into()),
             },
             note: None,
+            confirm: false,
         },
         Command {
             phrase: "切换输入法模式".into(),
@@ -347,6 +571,7 @@ pub fn default_commands() -> Vec<Command> {
                 value: Some("input_method".into()),
             },
             note: None,
+            confirm: false,
         },
         Command {
             phrase: "说粤语".into(),
@@ -356,6 +581,7 @@ pub fn default_commands() -> Vec<Command> {
                 value: Some("yue".into()),
             },
             note: None,
+            confirm: false,
         },
         Command {
             phrase: "说普通话".into(),
@@ -365,6 +591,7 @@ pub fn default_commands() -> Vec<Command> {
                 value: Some("zh".into()),
             },
             note: None,
+            confirm: false,
         },
         Command {
             phrase: "说英语".into(),
@@ -374,6 +601,7 @@ pub fn default_commands() -> Vec<Command> {
                 value: Some("en".into()),
             },
             note: None,
+            confirm: false,
         },
     ]
 }
@@ -388,6 +616,7 @@ mod tests {
             aliases: vec![],
             action,
             note: None,
+            confirm: false,
         }
     }
 
@@ -432,6 +661,7 @@ mod tests {
                 value: None,
             },
             note: None,
+            confirm: false,
         }];
         assert!(match_text(&commands, "帮我搜一下 Rust").is_some());
         assert!(match_text(&commands, "今天天气怎么样").is_none());
@@ -526,6 +756,185 @@ mod tests {
             fill("https://x/?q={rest}", "a&admin=1 #frag", ""),
             "https://x/?q=a%26admin%3D1%20%23frag"
         );
+    }
+
+    // -------------------------------------------- 向外动作的二次确认
+
+    /// **会把内容送出去的动作一定要问。** 这是这一层的全部意义。
+    #[test]
+    fn outward_actions_always_need_confirmation() {
+        let post = Action::HttpPost {
+            url: "https://hooks.example.com/x".into(),
+            body: String::new(),
+        };
+        assert!(needs_confirm(&post, false), "http_post 一定要问");
+
+        let mail = Action::OpenUrl {
+            url: "mailto:{rest}".into(),
+        };
+        assert!(needs_confirm(&mail, false), "mailto 一定要问（内容已经交出去了）");
+    }
+
+    /// 高频的「打开网页」默认不问，但用户可以给单条指令加 `confirm: true`。
+    ///
+    /// 理由写在这里：**每次都问的确认会变成肌肉记忆**，
+    /// 用户会条件反射地按下去，那等于没有确认，还把搜索变慢了一倍。
+    #[test]
+    fn opening_a_page_is_not_confirmed_unless_opted_in() {
+        let search = Action::OpenUrl {
+            url: "https://www.google.com/search?q={rest}".into(),
+        };
+        assert!(!needs_confirm(&search, false));
+        assert!(needs_confirm(&search, true), "单条指令可以自己要求确认");
+
+        let local = Action::Builtin {
+            name: "style".into(),
+            value: Some("yue".into()),
+        };
+        assert!(!needs_confirm(&local, false), "切音色在本机、可逆，不必问");
+    }
+
+    /// ⚠️ **否定必须先判**：这条是承重用例。
+    ///
+    /// 「不确认」「不要发」里**含着肯定词**（`确认` / `发`）。
+    /// 先判肯定就会把「别发」执行成「发」——这一层唯一会真正出事的方向。
+    #[test]
+    fn negation_is_checked_before_agreement() {
+        assert_eq!(classify_confirmation("不确认"), Reply::Cancel);
+        assert_eq!(classify_confirmation("不要发"), Reply::Cancel);
+        assert_eq!(classify_confirmation("别发出去"), Reply::Cancel);
+        assert_eq!(classify_confirmation("算了，取消"), Reply::Cancel);
+        assert_eq!(classify_confirmation("no"), Reply::Cancel);
+    }
+
+    #[test]
+    fn plain_agreement_is_a_confirm() {
+        for yes in ["确认", "确定", "对", "好的", "好", "是", "发送", "可以", "行", "ok"] {
+            assert_eq!(classify_confirmation(yes), Reply::Confirm, "{yes} 应当算同意");
+        }
+        // 带标点、带语气也认（匹配走归一化）
+        assert_eq!(classify_confirmation("确认。"), Reply::Confirm);
+        assert_eq!(classify_confirmation("好的，发吧"), Reply::Confirm);
+    }
+
+    /// **别的话既不是同意也不是拒绝** —— 调用方要按「新的一轮」处理，
+    /// 而不是偷偷执行。
+    #[test]
+    fn anything_else_is_not_consent() {
+        assert_eq!(classify_confirmation("今天天气怎么样"), Reply::Other);
+        assert_eq!(classify_confirmation(""), Reply::Other, "空转写不是同意");
+        assert_eq!(classify_confirmation("   "), Reply::Other);
+        // 单字肯定词**不许在长句里命中**：「嗯」出现在句首的犹豫句里不是同意
+        assert_eq!(classify_confirmation("嗯那个我是说搜索"), Reply::Other);
+        // 提到「确认」但在说别的事 —— **长句里不认同意**
+        assert_eq!(classify_confirmation("我刚才确认过了吗"), Reply::Other);
+        assert_eq!(classify_confirmation("帮我确认一下明天的会"), Reply::Other);
+    }
+
+    /// 单字必须整句相等，多字才允许包含。
+    #[test]
+    fn single_character_agreement_must_be_the_whole_utterance() {
+        assert_eq!(classify_confirmation("对"), Reply::Confirm);
+        assert_eq!(classify_confirmation("对的"), Reply::Confirm);
+        // 疑问句含「不对」→ 判成拒绝。**语义上不精确，方向是安全的**：
+        // 待确认动作不会执行，用户再说一次就行。下面钉的是这条性质。
+        assert_ne!(classify_confirmation("对不对"), Reply::Confirm, "疑问句绝不能算同意");
+        // 「行不行」是疑问句。它落成 Cancel 而不是 Other（含「不行」）——
+        // **语义上不精确，但方向是安全的**：待确认动作不会被执行，
+        // 用户再说一次「确认」就行。所以这里钉的是**性质**（绝不是同意），
+        // 不是那个标签本身。
+        assert_ne!(
+            classify_confirmation("行不行"),
+            Reply::Confirm,
+            "疑问句绝不能算同意"
+        );
+    }
+
+    /// 确认问句必须**带上内容**——只说「确认吗」的确认是假确认。
+    #[test]
+    fn the_prompt_tells_the_user_what_will_be_sent() {
+        let post = Action::HttpPost {
+            url: "https://hooks.example.com/notion".into(),
+            body: r#"{"title":"{rest}"}"#.into(),
+        };
+        let prompt = confirm_prompt(&post, "明天要测 AEC", "记一下 明天要测 AEC");
+        assert!(prompt.contains("hooks.example.com"), "{prompt}");
+        assert!(prompt.contains("明天要测 AEC"), "必须念出内容：{prompt}");
+
+        let mail = Action::OpenUrl {
+            url: "mailto:{rest}".into(),
+        };
+        let prompt = confirm_prompt(&mail, "a@b.com", "发邮件给 a@b.com");
+        assert!(prompt.contains("a@b.com"), "{prompt}");
+        assert!(
+            !prompt.contains("{rest}") && !prompt.contains("mailto:"),
+            "给用户看的不该是模板或 mailto: 前缀（要能读懂收件人）：{prompt}"
+        );
+    }
+
+    /// 超长的 body 要截断——念给用户听的东西不能无限长。
+    #[test]
+    fn a_huge_payload_is_truncated_in_the_prompt() {
+        let post = Action::HttpPost {
+            url: "https://x/y".into(),
+            body: "{text}".into(),
+        };
+        let long = "很长的内容".repeat(80);
+        let prompt = confirm_prompt(&post, "", &long);
+        assert!(prompt.chars().count() < 220, "念出来要短：{}", prompt.chars().count());
+        assert!(prompt.ends_with("。") || prompt.contains('…'), "{prompt}");
+    }
+
+    /// **念给用户的 == 将要发出去的。** 这条不成立的话，
+    /// 「二次确认」就只是让用户点了个头，内容却可以不是他看到的那份。
+    #[test]
+    fn the_prompt_uses_the_same_text_that_will_be_sent() {
+        let hit = Hit {
+            phrase: "记到notion".into(),
+            rest: "明天要测 AEC".into(),
+            action: Action::HttpPost {
+                url: "https://hooks.example.com/n".into(),
+                body: r#"{"title":"{rest}","full":"{text}"}"#.into(),
+            },
+        };
+        let text = "记到notion 明天要测 AEC";
+        let pending = Pending::new(hit, "h".into(), text, std::time::Duration::from_secs(30));
+        // 执行侧会对同一个 body 模板做同样的 fill
+        let payload = fill(r#"{"title":"{rest}","full":"{text}"}"#, &pending.hit.rest, &pending.text);
+        assert!(payload.contains("明天要测 AEC"), "{payload}");
+        assert!(payload.contains("记到notion"), "`{{text}}` 要拿到整句：{payload}");
+        assert!(
+            pending.prompt.contains("明天要测 AEC"),
+            "问句里必须有要发的内容：{}",
+            pending.prompt
+        );
+    }
+
+    /// 待确认是会**过期**的：一个永远挂着的向外动作比没有更危险。
+    #[test]
+    fn a_pending_action_expires() {
+        let hit = Hit {
+            phrase: "发邮件给".into(),
+            rest: "a@b.com".into(),
+            action: Action::OpenUrl {
+                url: "mailto:{rest}".into(),
+            },
+        };
+        let fresh = Pending::new(
+            hit.clone(),
+            "h".into(),
+            "发邮件给 a@b.com",
+            std::time::Duration::from_secs(30),
+        );
+        assert!(fresh.is_fresh());
+        assert!(
+            fresh.prompt.contains("a@b.com"),
+            "问句要自己从 hit 和 text 生成：{}",
+            fresh.prompt
+        );
+
+        let expired = Pending::new(hit, "h".into(), "发邮件给 a@b.com", std::time::Duration::ZERO);
+        assert!(!expired.is_fresh(), "不能留一个永不过期的待确认");
     }
 
     #[test]
