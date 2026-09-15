@@ -248,19 +248,37 @@ class SayBackend:
 #: `benchmarks-m3.md` §6.2.2 已经记过——方言到底生没生效，**当前没有客观判据**
 #: （`language-id` 只到语言级，区分不了中文内部方言）。所以这里的每一条
 #: 都只是「让模型朝那个方向走」，**必须在文档里写明未经人耳验收**。
+#: 这几种是**方言**：文档要求控制指令只写方言名，且正文必须是方言本身。
+DIALECT_STYLES = frozenset({"yue", "henan", "sichuan", "shandong", "dongbei", "tianjin"})
+
 STYLE_INSTRUCTS = {
-    "zh": "标准普通话",
-    "yue": "用粤语（广东话）说，地道广州口音",
-    "henan": "用河南话说，地道河南口音",
-    "sichuan": "用四川话说，地道四川口音",
-    "shandong": "用山东话说，地道山东口音",
-    "dongbei": "用东北话说，地道东北口音",
-    "tianjin": "用天津话说，地道天津口音",
-    "en": "natural English",
-    "en-gb": "British English accent",
-    "en-us": "American English accent",
-    "en-ca": "Canadian English accent",
-    "th": "natural Thai, native speaker",
+    # ⚠️ **控制指令只写名字，不要写描述。**
+    #
+    # 官方 cookbook 的 "Keep Instructions Simple" 明说：
+    #   In the Control Instruction, **simply type the dialect name**（例如 `Cantonese`）。
+    #   **Adding too many complex voice instructions might spoil the broth.**
+    #
+    # 我们原来写的是「用四川话说，地道四川口音」——正是它警告的那类啰嗦描述。
+    # 实测（jason 2026-09-15）：那么写出来的**根本不是四川话**；
+    # 换成 `(四川话)` 之后才出四川腔。
+    #
+    # ⚠️ **但方言的决定性因素是正文**：usage guide 的 Dialect tips 写着
+    #   「write the target text in that dialect's own vocabulary and expressions,
+    #    not in standard Mandarin」——同一个 `(四川话)` 下，
+    #   正文是地道四川话就出四川腔，正文是普通话就出普通话。
+    #   所以这一栏只是**开关**，不能把普通话变成方言。
+    "zh": "普通话",
+    "yue": "广东话",
+    "henan": "河南话",
+    "sichuan": "四川话",
+    "shandong": "山东话",
+    "dongbei": "东北话",
+    "tianjin": "天津话",
+    "en": "English",
+    "en-gb": "British English",
+    "en-us": "American English",
+    "en-ca": "Canadian English",
+    "th": "Thai",
 }
 
 
@@ -576,9 +594,18 @@ class VoxCpm2Backend:
         sample_rate = None
         # **钉音色**：给了参考音频就走克隆模式，不给才会每次随机换人。
         ref_audio, ref_text = self._load_ref(entry)
-        # instruct 是**拼接**的：语气在前、语系在后。
-        # 语系用 "zh"（标准普通话）时它只是一句约束，不冲突。
-        instruct = f"{TONE_INSTRUCTS[tone]}，{STYLE_INSTRUCTS[style]}"
+        # ⚠️ **方言档只给方言名，不拼语气描述。**
+        #
+        # 文档的 "Keep Instructions Simple" 警告：控制指令里加太多复杂描述
+        # 「might spoil the broth」。而 jason 实测认可的那一版四川话（2026-09-15）
+        # 用的正文前缀就只有 `(四川话)` 三个字、**没有**任何语气描述。
+        #
+        # 所以：方言（含粤语等）→ instruct = 方言名本身；
+        # 其余语系（普通话/英/泰）→ 保留「语气，语系」的拼法（语气是实测调出来的）。
+        if style in DIALECT_STYLES:
+            instruct = STYLE_INSTRUCTS[style]
+        else:
+            instruct = f"{TONE_INSTRUCTS[tone]}，{STYLE_INSTRUCTS[style]}"
         if ref_audio is None:
             log_once_no_voice()
         try:

@@ -1115,6 +1115,30 @@ pub const STYLE_OPTIONS: &[(&str, &str, &str, &str)] = &[
     ("th", "泰语", "Thai", "ไทย"),
 ];
 
+/// **语言**档：助手用哪种语言回答。菜单「说话 → 语言」用这一组。
+///
+/// ⚠️ 与 `DIALECT_STYLES` 的分组**只是菜单呈现**：两者都是 `STYLE_OPTIONS` 的键，
+/// 走同一个 `tts_style` 配置、同一条 HTTP 参数。分成两个菜单是 jason 2026-09-15 的要求
+/// （「切换男女声音一个菜单，切换方言单独一个菜单」）。
+///
+/// 默认是 `zh`（普通话）——**这是他明确拍的默认**。
+pub const LANGUAGE_STYLES: &[&str] = &["zh", "en", "th"];
+
+/// **方言 / 口音**档。菜单「说话 → 方言」用这一组。
+///
+/// ⚠️ **方言靠正文、不靠这一项**：官方 usage guide 的 Dialect tips 写着
+/// 「write the target text in that dialect's own vocabulary and expressions」——
+/// 同一个 `(四川话)` 下，正文是地道四川话才出四川腔，正文是普通话就还是普通话。
+/// 这一栏只是**开关**。CLI/文档里不要写成「选了四川话就会说四川话」。
+pub const DIALECT_STYLES: &[&str] = &[
+    "yue", "henan", "sichuan", "shandong", "dongbei", "tianjin", "en-gb", "en-us", "en-ca",
+];
+
+/// 按 key 找 `STYLE_OPTIONS` 里的下标（菜单 tag 要用它）。
+pub fn style_index(key: &str) -> Option<usize> {
+    STYLE_OPTIONS.iter().position(|o| o.0 == key)
+}
+
 /// 语气选项，键与 `TONE_INSTRUCTS` 一致。
 pub const TONE_OPTIONS: &[(&str, &str, &str, &str)] = &[
     ("warm", "亲切自然（默认）", "Warm & natural", "อบอุ่นเป็นธรรมชาติ"),
@@ -1854,6 +1878,27 @@ mod tests {
     /// Python 侧的同名清单在 `services/tts/test_backends.py`。
     #[test]
     fn style_keys_match_the_sidecar_contract() {
+        // 菜单把 12 项分成「语言 / 方言」两组：**两组加起来必须正好是全集**，
+        // 漏一项 = 菜单里少一个可选项；重一项 = 同一项出现两次。
+        {
+            let mut grouped: Vec<&str> = LANGUAGE_STYLES
+                .iter()
+                .chain(DIALECT_STYLES.iter())
+                .copied()
+                .collect();
+            grouped.sort_unstable();
+            let mut all: Vec<&str> = STYLE_OPTIONS.iter().map(|o| o.0).collect();
+            all.sort_unstable();
+            assert_eq!(grouped, all, "语言组 + 方言组必须正好覆盖 STYLE_OPTIONS");
+            assert!(LANGUAGE_STYLES.contains(&"zh"), "普通话必须在语言组里");
+            assert_eq!(
+                STYLE_OPTIONS
+                    .iter()
+                    .find(|o| o.0 == "zh")
+                    .map(|o| o.0),
+                Some("zh")
+            );
+        }
         let keys: Vec<&str> = STYLE_OPTIONS.iter().map(|o| o.0).collect();
         assert_eq!(
             keys,

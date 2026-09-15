@@ -58,6 +58,8 @@ pub enum Key {
     /// 但**不做条件隐藏**——菜单里少一项比多一项更容易让人以为功能没了。
     SpeechSection,
     StyleSection,
+    /// 说话 → 方言（与「语言」分开的另一栏）。
+    DialectSection,
     ToneSection,
     VoiceSection,
     /// 音色那一栏标题里显示「默认」用。
@@ -119,7 +121,8 @@ pub fn t(lang: Lang, key: Key) -> &'static str {
         K::TitleTranscribing => pick(lang, "◌ ASR", "◌ 转写中", "◌ ถอดความ"),
         K::ModeSection => pick(lang, "Mode", "模式", "โหมด"),
         K::SpeechSection => pick(lang, "Voice Output", "说话", "เสียงพูด"),
-        K::StyleSection => pick(lang, "Dialect / Accent", "语系（方言/口音）", "สำเนียง"),
+        K::StyleSection => pick(lang, "Language", "语言", "ภาษา"),
+        K::DialectSection => pick(lang, "Dialect / Accent", "方言 / 口音", "สำเนียง"),
         K::ToneSection => pick(lang, "Tone", "语气", "โทนเสียง"),
         K::VoiceSection => pick(lang, "Voice", "音色", "เสียง"),
         K::VoiceDefault => pick(lang, "default", "默认", "ค่าเริ่มต้น"),
