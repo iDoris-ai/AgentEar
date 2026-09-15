@@ -613,6 +613,49 @@ fn main() -> Result<()> {
             .ok_or_else(|| anyhow::anyhow!("--match-command 后面要跟一句话"))?
             .to_string();
         let all = commands::load(&dir)?;
+        // ---- 给宿主程序（Agent24）的机器可读输出 ----
+        //
+        // ⚠️ **这是 AgentEar 与外壳之间冻结的那条边界**（见 ADR-0008）：
+        // AgentEar 只**提出**一个动作，**执行由宿主做**。
+        // 所以这里**绝不执行**任何东西，只把「命中了什么、要不要确认、
+        // 对象是谁」结构化交出去。
+        //
+        // 为什么是「提出」而不是「执行」：确认界面、执行、回执展示、凭据管理
+        // 全在宿主那一侧（jason 2026-09-15 拍板）——AgentEar 是推键式一问一答，
+        // 没有界面，也**已经停止**在这条线上继续开发。
+        if args.iter().any(|a| a == "--json") {
+            let hit = commands::match_text(&all, &text);
+            let opt_in = hit
+                .as_ref()
+                .and_then(|h| all.iter().find(|c| c.phrase == h.phrase))
+                .map(|c| c.confirm)
+                .unwrap_or(false);
+            let needs_confirm = hit
+                .as_ref()
+                .map(|h| commands::needs_confirm(&h.action, opt_in))
+                .unwrap_or(false);
+            let payload = serde_json::json!({
+                "schema": "agentear.proposal/1",
+                "text": text,
+                "normalized": commands::normalize(&text),
+                "matched": hit.as_ref().map(|h| h.phrase.clone()),
+                "rest": hit.as_ref().map(|h| h.rest.clone()),
+                "action": hit.as_ref().map(|h| &h.action),
+                "needs_confirm": needs_confirm,
+                // ⚠️ **只有真要确认时才有 prompt**：宿主不该拿到一句
+                // 「要执行 style」这种内部动作名去显示（那是写给人看的问句，
+                // 不是通用的动作描述）。契约收紧成「有确认才有问句」。
+                "prompt": if needs_confirm {
+                    hit.as_ref().map(|h| commands::confirm_prompt(&h.action, &h.rest, &text))
+                } else {
+                    None
+                },
+                "command_count": all.len(),
+                "commands_path": commands::path_in(&dir).display().to_string(),
+            });
+            println!("{}", serde_json::to_string_pretty(&payload)?);
+            return Ok(());
+        }
         println!("原文:     {text}");
         println!("归一后:   {}", commands::normalize(&text));
         match commands::match_text(&all, &text) {
