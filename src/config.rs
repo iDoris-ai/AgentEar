@@ -283,6 +283,12 @@ pub struct Config {
     /// 用 `--add-command` 加 / 用菜单打开文件改。
     #[serde(deserialize_with = "lenient")]
     pub commands_enabled: bool,
+    /// 「向外动作」二次确认的有效期（秒）。默认 30。
+    ///
+    /// **过期即作废**，而且**宁可短**：一个挂着的向外动作比没有更危险
+    /// （用户以为早忘了，结果一按键就发出去了）。最短 5 秒。
+    #[serde(deserialize_with = "lenient")]
+    pub command_confirm_secs: u64,
     /// TTS 边车地址。留空 = `http://127.0.0.1:8765`。
     ///
     /// 端口写死在这里而不是从边车读：`sidecar.rs` 记过那个教训——
@@ -334,6 +340,10 @@ fn default_talk_tts_engine() -> String {
 
 fn default_commands_enabled() -> bool {
     true
+}
+
+fn default_command_confirm_secs() -> u64 {
+    30
 }
 
 fn default_tts_style() -> String {
@@ -452,6 +462,7 @@ impl Default for Config {
             talk_llm_url: None,
             talk_tts_engine: default_talk_tts_engine(),
             commands_enabled: default_commands_enabled(),
+            command_confirm_secs: default_command_confirm_secs(),
             tts_voice: None,
             tts_voices_dir: None,
             tts_style: default_tts_style(),

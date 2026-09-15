@@ -18,7 +18,7 @@
 //! 重新枚举——这也是 AppKit 里做动态菜单的正规姿势。
 
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Mutex, OnceLock};
 
 use objc2::rc::Retained;
@@ -126,6 +126,21 @@ pub fn set_data_root(p: PathBuf) {
 
 /// 菜单栏标题。语言显式传入——只有主线程调用它（0.5s 定时器），
 /// 工作线程只更新上面那两个原子量，不碰文案。
+/// 有没有一个「正在等你确认」的向外动作。
+///
+/// 和 `STATUS` 一样是**原子变量**：工作线程在确认流程里改它，
+/// 主线程读它画菜单栏，中间不该为这几个字节引一条通道。
+static PENDING: AtomicBool = AtomicBool::new(false);
+
+/// 待确认状态变了。**必须让它在菜单栏可见**：
+/// 一个「等着你点头、不点头就作废」的动作，如果界面上毫无痕迹，
+/// 用户只会觉得「说了没反应」，而其实三秒后它自己作废了。
+pub fn set_pending(on: bool) {
+    // 只存原子量：标题由主线程那个 0.5s 定时器统一刷新（和 `set` 同一个套路），
+    // 工作线程不碰 AppKit。
+    PENDING.store(on, Ordering::Relaxed);
+}
+
 fn title(lang: Lang) -> String {
     let base = match STATUS.load(Ordering::Relaxed) {
         1 => format!("● {}s", SECS.load(Ordering::Relaxed)),
@@ -140,9 +155,16 @@ fn title(lang: Lang) -> String {
     //
     // 放在**后面**而不是前面：前面那个 🎙 表达「我在录音」这件更急的事，
     // 不能因为切模式就把它挤走。
-    match config::get().talk_mode {
+    let base = match config::get().talk_mode {
         config::TalkMode::Conversation => format!("{base}💬"),
         config::TalkMode::InputMethod => base,
+    };
+    // **待确认标记**：比模式标记更急（它有时限），所以放最后、
+    // 而且和模式标记用的是不同的符号，一眼能分辨是「等问题」还是「等确认」。
+    if PENDING.load(Ordering::Relaxed) {
+        format!("{base}❓")
+    } else {
+        base
     }
 }
 

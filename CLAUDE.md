@@ -2,7 +2,7 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-## 当前状态：**v0.11.0 —— 量化档可选（默认 4bit）+ 开箱默认音色库**；M1/M2 已发布；**M3 通话链路已跑通，AEC / 自动打断未做**
+## 当前状态：**v0.12.0 —— 向外动作必须二次确认**；M1/M2 已发布；**M3 通话链路已跑通，AEC / 自动打断未做**
 
 M1 完成；**知识库投递 + 全文检索默认开（v0.4.2）**；M2 理解层已发布（v0.4.0）但默认关；
 **v0.6.0 加了通话链路（说一句答一句、可按键打断）**，**v0.5.0 加了可切换的 ASR 后端**（`--asr-backend` / `config.json` 的 `asr_backend`，
@@ -211,6 +211,42 @@ M1 完成；**知识库投递 + 全文检索默认开（v0.4.2）**；M2 理解�
     两套起法行为不同，这也是它一直没被发现的原因）。
   - **两道兜底**：数据目录没有音色库时回退到仓库里那份（clone 出来就有，不用下载）；
     钉哪条音色要在库里真存在才钉——钉一条不存在的会让边车回 400，用户听到「没声音」。
+- **向外动作的二次确认（v0.12.0，jason 2026-09-15 拍板：「所有向外输出的内容
+  （写 Notion、发邮件……）都要二次确认」）**。
+  - **判据是「会不会把内容送出这台机器」**（`commands::needs_confirm`）：
+    `http_post`（Notion / webhook）**一定问**；`mailto:` **一定问**；
+    打开网页（GET）**默认不问**，想让它也问就给那条指令加 `"confirm": true`。
+    ⚠️ 「打开网页默认不问」是**有意的**：搜索是高频动作，每次都问会让用户
+    把确认按成肌肉记忆——**那等于没有确认，还把搜索慢了一倍**。
+  - **两条确认路径**（推键式下这两条必须共存）：
+    **① 短按录音键**（<0.3s，里面不可能有语音）→ 确认；
+    **② 按键后说「确认 / 对 / 好的」** → 确认。
+    两者用「这一轮有没有转写」区分，不抢同一个动作。
+  - **实现要点（每条都有用例钉住）**：
+    - **念出来的内容 == 将要发出去的内容**：问句由 `Pending` 自己从
+      `hit` + `text` 生成，执行时用同一个 `pending.text`，**不各算一遍**。
+      念 A 发 B 的话，这个「二次确认」就是走过场。
+    - **否定必须先判**：「不确认」「不要发」里**含着肯定词**——
+      先判肯定就会把「别发」执行成「发」。这是唯一会真正出事的方向。
+    - **带否定前缀的组合**（`不`/`别`/`没` + 肯定词）也要判成否定：
+      光靠一张否定词表挡不住「不确认」。
+    - **同意只在短答复里认**（≤7 字）：提到了「确认」的长句通常不是同意
+      （「我刚才确认过了吗」「帮我确认一下明天的会」）。
+      **拒绝不设长度限制**——这个不对称是有意的（误判成拒绝只是重说一遍，
+      误判成同意就发出去了）。
+    - **别的话一律作废待确认**，不偷偷执行；**空转写不算同意**
+      （空 = 用户按键确认那条路，见上）。
+    - **待确认会过期**（`command_confirm_secs`，默认 30s，最短 5s）：
+      一个永远挂着的向外动作比没有更危险。**同时只留一条**，
+      新的顶掉旧的并记日志——挂两条时用户说「确认」我们不知道他确认的是哪条，
+      而猜错的代价是把错的东西发出去。
+  - **入口**：菜单栏状态项加 `❓`（待确认在界面上必须可见，否则用户只会觉得
+    「说了没反应」，其实三秒后它自己作废了）；CLI **`--run-command <文本>
+    [--reply <答复>]`** ——它和守护进程走**同一个 `run_command_turn`**，
+    不是模拟，专门为了无人值守地验确认逻辑（对着麦克风按键没法自动复现）。
+    `--match-command` 也会报这条指令要不要确认。
+  - ⚠️ **`mailto:` 的执行分支没有实跑验证过**（跑它会在你机器上打开邮件客户端）。
+    已验证的是「它会问」以及 http_post 的完整链路。
 - **边车与脚本**：`services/tts/backends.py`（新增 `SayBackend` + `VoxCpm2Backend`，
   HTTP 契约不变）、`services/tts/server.py`（`--backend {voxcpm2,say}`，**默认 voxcpm2**）、
   `scripts/setup-talk.sh`（按需下载两个模型，**不随包分发**）、
@@ -283,7 +319,7 @@ clippy **刻意不加 `-D warnings`**（既有 13 条警告，加了会让 CI �
 
 ```bash
 cargo build --release
-cargo test                                    # 285 passed / 0 failed / 6 ignored（281 条单测 + 4 条钉脚本默认值的集成测试；ignored 6 条：4 条要边车、1 条要联网、1 条要能出声的环境）：提交协议、崩溃语义、token 过滤、i18n、下载协议、知识库投递、通话会话状态机、语音指令表
+cargo test                                    # 295 passed / 0 failed / 6 ignored（291 条单测 + 4 条钉脚本默认值的集成测试；ignored 6 条：4 条要边车、1 条要联网、1 条要能出声的环境）：提交协议、崩溃语义、token 过滤、i18n、下载协议、知识库投递、通话会话状态机、语音指令表
 ./target/release/agentear                     # 守护进程，Ctrl+Shift+R 开始/停止录音
 ./target/release/agentear --transcribe x.wav  # 离线转写，不占麦克风，用于验证 ASR 链路
 ./target/release/agentear --diagnose          # 环境自检：权限、音频设备、ASR 依赖
@@ -300,6 +336,8 @@ cargo test                                    # 285 passed / 0 failed / 6 ignore
 ./target/release/agentear --add-command "记一下"            # 加一条指令（--action builtin|open_url|http_post）
 ./target/release/agentear --add-command-wav my.wav          # **录一句**定义指令：先 ASR 成短语再写进表
 ./target/release/agentear --match-command "搜索 talk.rs"    # 干跑：只报命中/槽位，**不执行**任何动作
+./target/release/agentear --run-command "记到notion 明天要测 AEC"        # 走完整流程（会问，不执行）
+./target/release/agentear --run-command "记到notion 明天要测 AEC" --reply 确认   # 两轮：先问、再确认，才执行
 cargo test -- --ignored stop_playback         # 打断机制：真掐掉一段 5s 音频（需要能出声的环境）
 scripts/bundle.sh                             # 打 .app bundle → dist/
 
