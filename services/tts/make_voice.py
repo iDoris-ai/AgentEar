@@ -140,6 +140,12 @@ def main():
         default=None,
         help="直接用一段**真人录音**当参考，不做自举（推荐：自举出来的参考会叠加合成感）",
     )
+    ap.add_argument(
+        "--ref-text-file",
+        default=None,
+        help="参考音频的**逐字稿文件**：有就用它，别用 ASR —— 实测 ASR 会把"
+        "技术词听错（macOS 听成 mic OS），而 ref_text 错了会带偏克隆",
+    )
     args = ap.parse_args()
 
     out = pathlib.Path(os.path.expanduser(args.out))
@@ -155,7 +161,18 @@ def main():
         import shutil
 
         shutil.copyfile(src, out)
-        ref_text = transcribe(out)
+        # ⚠️ **有逐字稿就用逐字稿。** 实测（2026-09-15）拿一段技术口播当参考时，
+        # 我们的 ASR 把「macOS 自带的 bash」听成「mic OS自带的be」、
+        # 「花括号」听成「画括号」——而 ref_text 与参考音频对不上会**带偏音色**。
+        # 录制方通常已经有稿子（MediaBot 的 `videos/.voice/reference.txt` 就是），
+        # 那份是权威的，比我们事后听写准。
+        if args.ref_text_file:
+            ref_text = pathlib.Path(os.path.expanduser(args.ref_text_file)).read_text(
+                encoding="utf-8"
+            ).strip()
+            print(f"（用逐字稿 {args.ref_text_file}，跳过 ASR）")
+        else:
+            ref_text = transcribe(out)
         st = analyze(read_wav(out))
         out.with_suffix(".json").write_text(
             json.dumps(
@@ -166,6 +183,9 @@ def main():
                     "semitone_std": round(st["semitone_std"], 2),
                     "rms": round(st["rms"], 4),
                     "source": f"真人录音 {src}",
+                    "ref_text_from": (
+                        f"稿子 {args.ref_text_file}" if args.ref_text_file else "ASR 听写"
+                    ),
                 },
                 ensure_ascii=False,
                 indent=2,
