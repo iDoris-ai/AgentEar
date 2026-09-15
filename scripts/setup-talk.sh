@@ -91,11 +91,32 @@ else
   NEW_VENV="$TALK_DIR/venv"
   if ! venv_ok "$NEW_VENV"; then
     note "没有可用的环境，新建 $NEW_VENV"
+    # ⚠️ **挑解释器要真的验版本，不能只看名字存不存在。**
+    #
+    # 踩点（jason 这台机器，2026-09-15）：他的默认 `python3` 是 **pyenv 的 3.11.9**
+    # （`~/.pyenv/version`），但 **pyenv 只在交互式 shell 里生效**——
+    # 从 launchd / GUI / 非交互 shell 启动时 `python3` 落到
+    # `/usr/bin/python3` = **Xcode 的 3.9.6**，而 mlx 要 3.11+，
+    # 那个解释器连 `import mlx_lm` 都做不到。
+    # 所以：`python3` 也进候选，但**必须过版本闸**；
+    # 而下面这些带版本号的名字也一律验一遍，名字不等于版本。
+    #
+    # ⚠️ 顺序保持原样（3.12 优先）。**3.14 在清单里但未验证**——
+    # mlx 的 wheel 覆盖到哪一版要现查；我们实测在用的是 **3.11.15**
+    # （`~/.agentear/llm/venv`，uv 装的）。真在只有 3.14 的机器上装失败，
+    # 先怀疑这里，别怀疑模型。
     PY=""
-    for candidate in python3.12 python3.13 python3.14 python3.11; do
-      command -v "$candidate" >/dev/null && { PY="$candidate"; break; }
+    for candidate in python3.12 python3.13 python3.14 python3.11 python3; do
+      command -v "$candidate" >/dev/null || continue
+      # `python3 -c` 里判版本：避免依赖 `python3 -V` 的输出格式
+      if "$candidate" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 11) else 1)' 2>/dev/null; then
+        PY="$candidate"
+        break
+      fi
+      echo "   跳过 $candidate（$("$candidate" -V 2>&1) 低于 3.11）"
     done
-    [ -n "$PY" ] || die "找不到 Python 3.11+（mlx-lm / mlx-audio 的最低要求）"
+    [ -n "$PY" ] || die "找不到 Python 3.11+（mlx-lm / mlx-audio 的最低要求）；
+   注意 pyenv 之类只在交互式 shell 里生效——非交互环境下先 export PATH，或直接用绝对路径"
     mkdir -p "$TALK_DIR"
     [ -d "$NEW_VENV" ] || "$PY" -m venv "$NEW_VENV"
     "$NEW_VENV/bin/python" -m pip install -q --upgrade pip
