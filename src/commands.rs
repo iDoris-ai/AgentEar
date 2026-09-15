@@ -432,6 +432,53 @@ pub fn confirm_prompt(action: &Action, rest: &str, text: &str) -> String {
     }
 }
 
+/// 从 webhook 的响应里挑出**最该给用户看的那一句**。
+///
+/// 存在的理由：Notion / n8n 这类服务写入成功后回的正是**新页面的 URL 或 id**，
+/// 而 v0.12.x 之前我们把整个响应体丢掉了（`Stdio::null()`）——
+/// 于是用户问「你写入到哪了、网址给我看看」时，**系统手里根本没有那个答案**。
+/// 用户那句「你别骗我」是有道理的：没有回执的"已完成"就是一种骗。
+///
+/// 优先级：`url` → `link` → `id` → 正文里的第一个 http 链接 → 截断的原文。
+/// 认不出结构也不算失败——那是**对方服务**的响应格式问题，不该让我们报错。
+pub fn summarize_response(body: &str) -> Option<String> {
+    let body = body.trim();
+    if body.is_empty() {
+        return None;
+    }
+    if let Ok(v) = serde_json::from_str::<serde_json::Value>(body) {
+        for key in ["url", "link", "html_url", "id", "page_id"] {
+            if let Some(val) = v.get(key) {
+                let text = match val {
+                    serde_json::Value::String(s) => s.clone(),
+                    other => other.to_string(),
+                };
+                if !text.trim().is_empty() {
+                    return Some(text.trim().to_string());
+                }
+            }
+        }
+    }
+    // 正文里裸着一条链接也认（很多自建服务的返回就是一行 URL）
+    if let Some(start) = body.find("http") {
+        let rest = &body[start..];
+        let end = rest
+            .find(|c: char| c.is_whitespace() || c == '"' || c == '<' || c == '\\' || c == '}')
+            .unwrap_or(rest.len());
+        let url = &rest[..end];
+        if url.len() > 8 {
+            return Some(url.to_string());
+        }
+    }
+    // 实在认不出就截一段原文——**总比什么都不给用户看好**
+    let short: String = body.chars().take(200).collect();
+    Some(if body.chars().count() > 200 {
+        format!("{short}…")
+    } else {
+        short
+    })
+}
+
 /// 待确认的动作。**带截止时间**：没人确认就作废，不能一直挂着。
 #[derive(Debug, Clone)]
 pub struct Pending {
@@ -908,6 +955,35 @@ mod tests {
             "问句里必须有要发的内容：{}",
             pending.prompt
         );
+    }
+
+    /// **回执**：写入成没成、写到哪了，要从对方服务的响应里读出来给用户。
+    ///
+    /// 这条是「你别骗我」那句抱怨的落点：没有回执的「已完成」就是一种骗。
+    #[test]
+    fn the_webhook_reply_is_read_back_for_the_user() {
+        // Notion / n8n 这类服务写入成功后回的就是 URL 或 id
+        assert_eq!(
+            summarize_response(r#"{"url":"https://notion.so/abc123","id":"abc123"}"#).unwrap(),
+            "https://notion.so/abc123"
+        );
+        assert_eq!(
+            summarize_response(r#"{"object":"page","id":"abc-123"}"#).unwrap(),
+            "abc-123"
+        );
+        // 自建服务常常就回一行裸 URL
+        assert_eq!(
+            summarize_response("ok https://example.com/new/1\n").unwrap(),
+            "https://example.com/new/1"
+        );
+        // 认不出结构也不报错，截一段原文（**总比什么都不给好**）
+        let long = "好".repeat(300);
+        let short = summarize_response(&long).unwrap();
+        assert!(short.chars().count() <= 201, "要截断：{}", short.chars().count());
+        assert!(short.ends_with('…'));
+        // 空响应就是没有回执，不要编一个出来
+        assert!(summarize_response("").is_none());
+        assert!(summarize_response("   \n ").is_none());
     }
 
     /// 待确认是会**过期**的：一个永远挂着的向外动作比没有更危险。

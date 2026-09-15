@@ -1419,14 +1419,28 @@ fn execute_command(
 
         commands::Action::OpenUrl { url } => {
             let target = commands::fill(url, &hit.rest, text);
-            std::process::Command::new("/usr/bin/open")
+            // ⚠️ **`spawn()` 成功 ≠ 这条 URL 交出去了。** `spawn()` 只说明
+            // `/usr/bin/open` 这个进程起来了。`open` 很快就返回（它只是把请求
+            // 交给 LaunchServices），所以等一下退出码是值得的。
+            //
+            // ⚠️ **但退出码的语义要说准**：它表示「有没有把 URL 交出去」，
+            // **不表示那个网页能打开**。实测：`open https://不存在的域名.invalid`
+            // 退出码是 **0** —— 浏览器照常打开，然后自己显示错误页。
+            // 所以这里能抓到的是「没有应用处理这个 scheme」之类的失败，
+            // **不要把它宣传成「验证了链接可达」**。
+            let out = std::process::Command::new("/usr/bin/open")
                 .arg(&target)
                 .stdin(std::process::Stdio::null())
                 .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .spawn()
-                .map(|_| format!("已打开 {target}"))
-                .map_err(|e| anyhow::anyhow!("打开 URL 失败: {e}"))
+                .stderr(std::process::Stdio::piped())
+                .output()
+                .map_err(|e| anyhow::anyhow!("打开 URL 失败: {e}"))?;
+            if !out.status.success() {
+                let err = String::from_utf8_lossy(&out.stderr);
+                let err = err.trim();
+                anyhow::bail!("打开失败（open 退出码 {:?}）：{err}", out.status.code());
+            }
+            Ok(format!("已打开 {target}"))
         }
         commands::Action::HttpPost { url, body } => {
             let target = commands::fill(url, &hit.rest, text);
@@ -1436,8 +1450,24 @@ fn execute_command(
             } else {
                 payload
             };
-            let mut cmd = std::process::Command::new("/usr/bin/curl");
-            cmd.arg("-fsS")
+            // ⚠️ 这里原来有两处「报喜不报忧」，都是用户那句「你别骗我」的落点：
+            // ① `stdout(Stdio::null())` —— **把对方的响应体丢了**，
+            //    而 Notion 这类服务写入成功后回的正是新页面的 URL；
+            //    用户问「写哪了、网址给我」时，我们手里根本没有那个答案。
+            // ② `let _ = child.wait();` —— **不看退出码**，于是 HTTP 500 /
+            //    401（token 过期）也照样报「已发送到 …」。没写进去却说写进去了，
+            //    比失败更糟：用户会以为事情成了。
+            let mut child = std::process::Command::new("/usr/bin/curl")
+                // ⚠️ **`--fail-with-body` 而不是 `-f`**：`-f` 在 HTTP 出错时
+                // **一个字都不输出**，于是服务端最有用的一句话被吞掉了——
+                // 而那句话往往正是「哪里配错了」：
+                // Notion 回 `{"message":"API token is invalid"}` /
+                // `{"message":"Could not find database"}`。
+                // 没有它，用户只能看到 `curl: (22) ... error: 401`，
+                // 然后来问我们「为什么写不进去」。
+                // （macOS 自带的 curl 8.7.1 支持，7.76+ 就有。）
+                .arg("--fail-with-body")
+                .arg("-sS")
                 .arg("--max-time")
                 .arg(cfg.talk_timeout_secs.to_string())
                 .arg("-X")
@@ -1448,18 +1478,37 @@ fn execute_command(
                 .arg("@-")
                 .arg(&target)
                 .stdin(std::process::Stdio::piped())
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null());
-            match cmd.spawn() {
-                Ok(mut child) => {
-                    use std::io::Write;
-                    if let Some(mut stdin) = child.stdin.take() {
-                        let _ = stdin.write_all(payload.as_bytes());
-                    }
-                    let _ = child.wait();
-                    Ok(format!("已发送到 {target}"))
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .spawn()
+                .map_err(|e| anyhow::anyhow!("webhook 调用失败: {e}"))?;
+            {
+                use std::io::Write;
+                if let Some(mut stdin) = child.stdin.take() {
+                    let _ = stdin.write_all(payload.as_bytes());
                 }
-                Err(e) => Err(anyhow::anyhow!("webhook 调用失败: {e}")),
+            }
+            let out = child
+                .wait_with_output()
+                .map_err(|e| anyhow::anyhow!("等待 webhook 返回失败: {e}"))?;
+            let body = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            if !out.status.success() {
+                let err = String::from_utf8_lossy(&out.stderr);
+                let err = err.trim();
+                // 把响应体也带上：很多服务把错误原因放在 body 里而不是 stderr
+                let detail = if body.is_empty() {
+                    err.to_string()
+                } else {
+                    format!("{err} / {body}")
+                };
+                // curl 用 `-f` 时 HTTP 错误会以非零退出，这里就是它抓到的
+                anyhow::bail!("没写进去（curl 退出码 {:?}）：{detail}", out.status.code());
+            }
+            log::info!("webhook 返回（{} 字节）：{body}", body.len());
+            // **回执要给用户看**：优先 URL / id，其次正文截断
+            match commands::summarize_response(&body) {
+                Some(receipt) => Ok(format!("已发送到 {target}；返回：{receipt}")),
+                None => Ok(format!("已发送到 {target}（对方没有返回内容）")),
             }
         }
         commands::Action::Builtin { name, value } => match commands::BuiltinAction::parse(name) {
