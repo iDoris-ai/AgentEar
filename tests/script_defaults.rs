@@ -81,6 +81,31 @@ fn the_tts_sidecar_is_pointed_at_a_voice_library() {
     );
 }
 
+/// 挑 Python 解释器**必须过版本闸**，不能只看命令名存不存在。
+///
+/// 踩点（jason 这台机器，2026-09-15）：默认 `python3` 是 pyenv 的 **3.11.9**，
+/// 但 **pyenv 只在交互式 shell 里生效**——launchd / GUI / 非交互 shell 里
+/// `python3` 落到 `/usr/bin/python3` = **Xcode 3.9.6**，而 mlx 要 3.11+。
+/// 所以「名字存在」和「能不能装 mlx」是两件事，必须真的问一次版本。
+#[test]
+fn the_interpreter_picker_checks_the_version() {
+    let body = read("scripts/setup-talk.sh");
+    assert!(
+        body.contains("3, 11"),
+        "setup-talk.sh 要真的验 Python ≥ 3.11，而不是只看命令名"
+    );
+    assert!(
+        body.contains("sys.version_info"),
+        "版本闸应该问解释器自己（sys.version_info），不要解析 `python3 -V` 的字符串"
+    );
+    // `python3` 必须进候选：只有 pyenv、没有 python3.11 这种别名的机器上，
+    // 早先的清单会直接报「找不到 Python 3.11+」——明明有可用的。
+    assert!(
+        body.contains("python3.11 python3"),
+        "候选里要有裸 `python3`（有些机器只有它）"
+    );
+}
+
 /// 随包的默认音色库必须真的在仓库里，而且成对（`.wav` + `.json` 缺一不可）。
 ///
 /// `.json` 里的 `ref_text` 是克隆模式**必须**的：参考音频和它的文本对不上，

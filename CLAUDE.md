@@ -319,7 +319,7 @@ clippy **刻意不加 `-D warnings`**（既有 13 条警告，加了会让 CI �
 
 ```bash
 cargo build --release
-cargo test                                    # 295 passed / 0 failed / 6 ignored（291 条单测 + 4 条钉脚本默认值的集成测试；ignored 6 条：4 条要边车、1 条要联网、1 条要能出声的环境）：提交协议、崩溃语义、token 过滤、i18n、下载协议、知识库投递、通话会话状态机、语音指令表
+cargo test                                    # 296 passed / 0 failed / 6 ignored（291 条单测 + 5 条钉脚本默认值的集成测试；ignored 6 条：4 条要边车、1 条要联网、1 条要能出声的环境）：提交协议、崩溃语义、token 过滤、i18n、下载协议、知识库投递、通话会话状态机、语音指令表
 ./target/release/agentear                     # 守护进程，Ctrl+Shift+R 开始/停止录音
 ./target/release/agentear --transcribe x.wav  # 离线转写，不占麦克风，用于验证 ASR 链路
 ./target/release/agentear --diagnose          # 环境自检：权限、音频设备、ASR 依赖
@@ -376,6 +376,28 @@ There is no Stream(cpu, 1) in current thread.
 **不会触发求值**——所以探针可能「通过」而 bug 还在（本轮最初的探针就是这样）。
 修法：**load + generate + numpy 转换全放在同一条专用线程上**，HTTP 工作线程
 通过队列投递（`services/tts/backends.py::VoxCpm2Backend._mlx_thread`）。
+
+### 这台机器上的 Python（jason 2026-09-15 交代：「默认 python 是 3.11.9」）
+
+- **交互式 shell 里** `python3` = **pyenv 的 3.11.9**（`~/.pyenv/version`，
+  `eval "$(pyenv init - zsh)"` 在 `~/.zshrc` 里）。他说的就是这一条。
+- ⚠️ **非交互环境里完全不是这个**：`~/.zshrc` 不加载 → pyenv 不在 PATH →
+  `python3` 落到 `/usr/bin/python3` = **Xcode 的 3.9.6**，而 **`python3.11` 直接找不到**。
+  受影响的是 launchd / GUI 启动的进程、CI、以及 agent 自己起的 shell。
+  **3.9.6 连 `import mlx_lm` 都做不到**（mlx 要 3.11+），
+  所以「裸调 `python3`」在本仓库是一条会安静走错解释器的路。
+- **结论：脚本一律不许裸调 `python3`。** 现状是对的——
+  `serve-tts.sh` / `serve-talk-llm.sh` 都钉 `$VENV/bin/python`，
+  而 `~/.agentear/llm/venv` 是 **uv 的 cpython 3.11.15**，与 pyenv 无关、也不受它影响。
+- **`setup-talk.sh` 挑解释器要过版本闸**（2026-09-15 加）：
+  早先只判「这个名字存在吗」，于是 `python3.14`（Homebrew 3.14.6，**未验证**）
+  会排在 3.11 前面被选中；而 `python3` 根本没进候选，
+  在 pyenv-only 的机器上会直接报「找不到 Python 3.11+」——明明有可用的。
+  现在每个候选都跑一次 `sys.version_info >= (3, 11)` 才算数，低于的打一行日志跳过。
+  **这条有测试钉住**（`tests/script_defaults.rs::the_interpreter_picker_checks_the_version`）。
+- 本机实测（两种 shell 都验过）：非交互 → **python3.12**（Homebrew 3.12.13）；
+  交互 → 同样选 3.12（3.12 在清单里排在 3.11 前面），所以**pyenv 那份 3.11.9
+  实际上没被 setup 用到**。别以为「默认 python 是 3.11.9」= 边车跑在 3.11.9 上。
 
 数据落在 `~/.agentear/`（`AGENTEAR_DATA` 可覆盖）；ASR 二进制与模型在 `vendor/`（`AGENTEAR_VENDOR` 可覆盖，**不入库**）。
 
