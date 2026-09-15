@@ -2,7 +2,7 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-## 当前状态：**v0.13.0 —— 动作回执要真的回执（不再谎报成功）**；M1/M2 已发布；**M3 通话链路已跑通，AEC / 自动打断未做**
+## 当前状态：**v0.14.0 —— 边界固化：AgentEar = 语音前端，下游交给 Agent24**；M1/M2 已发布；**M3 通话链路已跑通，AEC / 自动打断未做**
 
 M1 完成；**知识库投递 + 全文检索默认开（v0.4.2）**；M2 理解层已发布（v0.4.0）但默认关；
 **v0.6.0 加了通话链路（说一句答一句、可按键打断）**，**v0.5.0 加了可切换的 ASR 后端**（`--asr-backend` / `config.json` 的 `asr_backend`，
@@ -276,6 +276,21 @@ M1 完成；**知识库投递 + 全文检索默认开（v0.4.2）**；M2 理解�
   端口 8794）、`scripts/serve-tts.sh`（用带 mlx-audio 的 venv 起 `server.py`）、
   `scripts/talk-e2e.sh`（端到端验收）。
 
+### ⛔ 职责边界（jason 2026-09-15 拍板，见 **ADR-0008**）
+
+**AgentEar 只做「听见」和「说出」。命令执行、确认 UI、回执展示、
+初始化配置、凭据管理 —— 全部归宿主 Agent24。**
+
+- **冻结的接口**：`agentear --match-command <文本> --json` → `agentear.proposal/1`
+  （**只提出动作，绝不执行**）。字段表与两条硬约束见 ADR-0008 §3。
+- **最基础的逻辑验证**：`scripts/agent24-standin.py`（假宿主：问 → 显示 → 确认 →
+  **自己执行** → 自己展示回执）。它**故意不调 `--run-command`**。
+- ⛔ **在这条线上停止开发**：不要再加初始化向导 / 凭据管理 / 回执界面 / 历史列表。
+  已做出来的语音二次确认（v0.12.0）与回执读取（v0.13.0）**保留**——
+  AgentEar 单独跑时仍然有用。
+- ⏳ **等 Agent24 回答 6 个问题**（ADR-0008 §5）：事件通道、热键归属、
+  麦克风/播放归属、配置归属、TCC 权限、回执留档。**没有答案之前不要再往下做。**
+
 **⚠️ M3 这轮的诚实边界（不要美化、也不要外推）**：
 
 > 本轮的实测明细在 **`docs/benchmarks-talk.md`**（**MLX 4bit 路径**：
@@ -358,6 +373,8 @@ cargo test                                    # 297 passed / 0 failed / 6 ignore
 ./target/release/agentear --add-command "记一下"            # 加一条指令（--action builtin|open_url|http_post）
 ./target/release/agentear --add-command-wav my.wav          # **录一句**定义指令：先 ASR 成短语再写进表
 ./target/release/agentear --match-command "搜索 talk.rs"    # 干跑：只报命中/槽位，**不执行**任何动作
+./target/release/agentear --match-command "发邮件给 a@b.com" --json   # **给宿主用的契约**（agentear.proposal/1）
+scripts/agent24-standin.py "发邮件给 a@b.com"   # 假宿主：验证「提出 → 确认 → 宿主执行 → 回执」
 ./target/release/agentear --run-command "记到notion 明天要测 AEC"        # 走完整流程（会问，不执行）
 ./target/release/agentear --run-command "记到notion 明天要测 AEC" --reply 确认   # 两轮：先问、再确认，才执行
 cargo test -- --ignored stop_playback         # 打断机制：真掐掉一段 5s 音频（需要能出声的环境）
