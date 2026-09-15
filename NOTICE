@@ -27,3 +27,11 @@ FSMN-VAD  (`fsmn-vad.gguf`)
 --------------------------------------------------------------------------------
 
 Rust 依赖的许可信息见 `Cargo.toml` 与各 crate 自身声明。
+
+--------------------------------------------------------------------------------
+
+默认音色库  (`assets/talk-voices/*.wav`)
+  来源：**由 VoxCPM2 生成**（`services/tts/make_voice.py` 自举：生成候选 →
+        按 F0 / 浊音帧 / RMS 挑），不是真人录音，没有第三方人格权问题。
+  上游模型：https://huggingface.co/mlx-community/VoxCPM2-4bit
+  许可：Apache License 2.0
