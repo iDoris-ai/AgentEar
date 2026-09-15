@@ -7,23 +7,64 @@
 #
 # 两个模型都**按需下载、不随包分发**（jason 2026-08-22 拍板的那条规矩）。
 #
-# 用法：scripts/setup-talk.sh [目录]     默认 ~/.agentear/talk
+# 用法：scripts/setup-talk.sh [目录] [--tts-quant 4bit|8bit]
 #   跑完用 scripts/serve-talk-llm.sh 和 scripts/serve-tts.sh 启动
 #
 # 环境变量：
 #   AGENTEAR_TALK_VENV   复用哪个 venv（默认 ~/.agentear/llm/venv，见下）
 #   AGENTEAR_TALK_DIR    模型与清单放哪（默认 ~/.agentear/talk）
+#   AGENTEAR_TTS_QUANT   TTS 量化档，默认 4bit（见下）
+#
+# ## ⚠️ 默认必须是 4bit，这不是随手定的
+#
+# 权重体积（HF 实测 2026-09-14）：**4bit 2.30 GB / 8bit 3.22 GB**；
+# 边车进程峰值 RSS：**4bit 约 2.4–2.5 GB / 8bit 约 3.3 GB**。
+# 发布的普通人电脑内存没这么大，**所以默认档只能是 4bit**。
+# 8bit 是给「内存宽裕、自己显式要」的人用的：
+#   AGENTEAR_TTS_QUANT=8bit scripts/setup-talk.sh
+#   AGENTEAR_TTS_QUANT=8bit scripts/serve-tts.sh
+# ⚠️ **实测没有检出 4bit 与 8bit 的输出质量差异**（见 ADR-0007 §6 与
+# benchmarks-talk.md）：花掉的那 1 GB 内存**目前买不到可测的音质**。
+# 想要更好的音色，先试「换参考音频」那条路（services/tts/make_voice.py）。
+#
+# ## ⚠️ 同时装一份**默认音色库**（这不是可选项）
+#
+# VoxCPM2 是**零样本克隆**：不给参考音频就**每次合成随机换一个说话人**
+# （边车自己会告警：实测 F0 极差 65%、音量差 4.5 倍）。而 v0.10.0 的
+# 句子级流水线让一次回答切成好几句、每句各发一次请求 ——
+# 没有参考音频就是**一句话里换好几个人**在说。
+# 所以这里把仓库里那两条实测挑过的参考音频（`assets/talk-voices/`，
+# **VoxCPM2 自举生成的**，1.9 MB）装进数据目录，让开箱就有稳定音色。
 
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-TALK_DIR="${1:-${AGENTEAR_TALK_DIR:-$HOME/.agentear/talk}}"
+
+# 参数解析：位置参数是目录，`--tts-quant` 是档位。手写不引 getopts——
+# 仓库里所有脚本都是这个形状，保持一致。
+TALK_DIR_ARG=""
+QUANT="${AGENTEAR_TTS_QUANT:-4bit}"
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --tts-quant) QUANT="${2:-}"; shift 2 ;;
+    --tts-quant=*) QUANT="${1#--tts-quant=}"; shift ;;
+    -h|--help) sed -n '2,30p' "$0"; exit 0 ;;
+    -*) echo "!! 不认识的参数：$1" >&2; exit 2 ;;
+    *) TALK_DIR_ARG="$1"; shift ;;
+  esac
+done
+case "$QUANT" in
+  4bit|8bit) ;;
+  *) echo "!! --tts-quant 只认 4bit / 8bit，收到：$QUANT" >&2; exit 2 ;;
+esac
+
+TALK_DIR="${TALK_DIR_ARG:-${AGENTEAR_TALK_DIR:-$HOME/.agentear/talk}}"
 MODELS="$TALK_DIR/models"
 LLM_MODEL_DIR="$MODELS/minicpm5-2b-4bit"
-TTS_MODEL_DIR="$MODELS/voxcpm2-4bit"
+TTS_MODEL_DIR="$MODELS/voxcpm2-$QUANT"
 
 LLM_REPO="${AGENTEAR_TALK_LLM_REPO:-mlx-community/MiniCPM5-2B-mlx-4Bit}"
-TTS_REPO="${AGENTEAR_TALK_TTS_REPO:-mlx-community/VoxCPM2-4bit}"
+TTS_REPO="${AGENTEAR_TALK_TTS_REPO:-mlx-community/VoxCPM2-$QUANT}"
 
 die() { echo "!! $*" >&2; exit 1; }
 note() { echo "==> $*"; }
@@ -100,7 +141,7 @@ note "下载 LLM：面壁 MiniCPM5-2B（4bit MLX，HF 计数 1.4 GB / du 显示 
 fetch_repo "$LLM_REPO" "$LLM_MODEL_DIR" \
   config.json model.safetensors tokenizer.json tokenizer_config.json
 
-note "下载 TTS：VoxCPM2（4bit MLX，HF 计数 2.3 GB / du 显示 2.1G）"
+note "下载 TTS：VoxCPM2（${QUANT} MLX）"
 fetch_repo "$TTS_REPO" "$TTS_MODEL_DIR" \
   config.json model.safetensors tokenizer.json tokenizer_config.json
 
@@ -108,13 +149,43 @@ fetch_repo "$TTS_REPO" "$TTS_MODEL_DIR" \
 LLM_MB="$(du -sm "$LLM_MODEL_DIR" | cut -f1)"
 TTS_MB="$(du -sm "$TTS_MODEL_DIR" | cut -f1)"
 [ "$LLM_MB" -gt 1000 ] || die "LLM 目录只有 ${LLM_MB} MB，没下完"
-[ "$TTS_MB" -gt 1500 ] || die "TTS 目录只有 ${TTS_MB} MB，没下完"
+# 下界按档位定：4bit 权重 2.30 GB、8bit 3.22 GB（都按 du 计）。
+# ⚠️ 这里**不能只写一个数**——8bit 的守卫要是沿用 4bit 的下界，
+# 一个只下了一半的 8bit 目录（1.6 GB）会被当成完整的放过去。
+case "$QUANT" in
+  4bit) TTS_MIN_MB=1500 ;;
+  8bit) TTS_MIN_MB=2400 ;;
+esac
+[ "$TTS_MB" -ge "$TTS_MIN_MB" ] || die "TTS（$QUANT）目录只有 ${TTS_MB} MB（应 ≥ ${TTS_MIN_MB}），没下完"
+
+# ------------------------------------------------------------ 默认音色库
+#
+# 已存在就**不覆盖**：用户可能自己造过更好的（make_voice.py），
+# 升级时把他的音色顶掉是最讨厌的一类行为。
+VOICES_DIR="$TALK_DIR/voices"
+if [ -n "$(ls -A "$VOICES_DIR" 2>/dev/null)" ]; then
+  note "音色库已存在，保持不动：$VOICES_DIR"
+else
+  note "装默认音色库（VoxCPM2 自举生成的参考音频，1.9 MB）"
+  mkdir -p "$VOICES_DIR"
+  for f in "$ROOT/assets/talk-voices"/*.wav "$ROOT/assets/talk-voices"/*.json; do
+    [ -f "$f" ] && cp "$f" "$VOICES_DIR/"
+  done
+fi
+VOICE_COUNT="$(ls "$VOICES_DIR"/*.wav 2>/dev/null | wc -l | tr -d ' ')"
+[ "$VOICE_COUNT" -gt 0 ] || die "音色库里一条参考音频都没有——没有它每句都会换说话人"
 
 note "完成"
 echo "    环境   $VENV"
 echo "    LLM    $LLM_MODEL_DIR (${LLM_MB} MB)   $LLM_REPO"
-echo "    TTS    $TTS_MODEL_DIR (${TTS_MB} MB)   $TTS_REPO"
+echo "    TTS    $TTS_MODEL_DIR (${TTS_MB} MB)   $TTS_REPO  [${QUANT}]"
+echo "    音色   $VOICES_DIR (${VOICE_COUNT} 条)"
 echo
 echo "    启动 LLM 边车：scripts/serve-talk-llm.sh"
+if [ "$QUANT" != "4bit" ]; then
+  echo
+  echo "    ⚠️ 启边车时也要指同一档，否则它会去找 4bit 的目录："
+  echo "       AGENTEAR_TTS_QUANT=$QUANT scripts/serve-tts.sh"
+fi
 echo "    启动 TTS 边车：scripts/serve-tts.sh"
 echo "    端到端自测：  scripts/talk-e2e.sh --text '今天天气怎么样'"

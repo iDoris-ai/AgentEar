@@ -2,7 +2,7 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-## 当前状态：**v0.10.0 —— 句子级流水线：边出边合成**；M1/M2 已发布；**M3 通话链路已跑通，AEC / 自动打断未做**
+## 当前状态：**v0.11.0 —— 量化档可选（默认 4bit）+ 开箱默认音色库**；M1/M2 已发布；**M3 通话链路已跑通，AEC / 自动打断未做**
 
 M1 完成；**知识库投递 + 全文检索默认开（v0.4.2）**；M2 理解层已发布（v0.4.0）但默认关；
 **v0.6.0 加了通话链路（说一句答一句、可按键打断）**，**v0.5.0 加了可切换的 ASR 后端**（`--asr-backend` / `config.json` 的 `asr_backend`，
@@ -186,6 +186,31 @@ M1 完成；**知识库投递 + 全文检索默认开（v0.4.2）**；M2 理解�
   - **打断**：`play_blocking` 被打断时返回的时长与「播完」长得一样，
     所以流式用**打断计数器**（`talk::interrupts()`）区分，打断后不再合成、
     不再播后面的句子。
+- **TTS 量化档：默认 4bit，8bit 要显式要**（jason 2026-09-15 拍板）。
+  `scripts/setup-talk.sh --tts-quant 4bit|8bit`（或 `AGENTEAR_TTS_QUANT`）、
+  `scripts/serve-tts.sh` 同名的档位开关。权重体积（HF 实测）：
+  **4bit 2.30 GB / 8bit 3.22 GB**；边车进程**峰值 RSS 4bit 约 2.4–2.5 GB /
+  8bit 约 3.3 GB**（8bit 实测 3268 MB，与上一轮 3266 MB 复现）。
+  - ⚠️ **默认档只能是 4bit**：发布的普通人电脑没这么大内存。
+    这条**有测试钉住**（`tests/script_defaults.rs`），别人改默认档会红。
+  - ⚠️ **实测没有检出 4bit 与 8bit 的输出质量差异**（差异在噪声里）。
+    所以「为了更好的音质上 8bit」**目前买不到可测的东西**——
+    想要更好的音色，走**换参考音频**那条路（`services/tts/make_voice.py`）。
+    **不要把 8bit 说成「音质档」。**
+  - ⚠️ **每个档位有自己的下载完成下界**（4bit 1500 MB / 8bit 2400 MB）：
+    沿用同一个数，一份只下到一半的 8bit（约 1.6 GB）会被当成完整的放过去。
+- **开箱默认音色库（v0.11.0）**：`assets/talk-voices/`（**入库**，1.9 MB，
+  VoxCPM2 自举生成的参考音频，不是真人录音），`setup-talk.sh` 装进
+  `<数据目录>/talk/voices/`（**已存在就不覆盖**——用户可能自己造过更好的）。
+  - ⚠️ **这条修的是一个真 bug，不是锦上添花**：VoxCPM2 是**零样本克隆**，
+    **没有参考音频就每次合成随机换一个说话人**（边车自己会告警：实测
+    F0 极差 65%、音量差 4.5 倍）。而 v0.10.0 的句子级流水线把一次回答切成
+    好几句、**每句各发一次请求**——于是「音色飘」升级成「一句话里换好几个人」。
+    旧版 `serve-tts.sh` **压根没传 `--voices-dir`**，所以只要边车是被守护进程
+    按配置拉起来的，就一直是这个状态（手工带 `--voices-dir` 起的那个是好的，
+    两套起法行为不同，这也是它一直没被发现的原因）。
+  - **两道兜底**：数据目录没有音色库时回退到仓库里那份（clone 出来就有，不用下载）；
+    钉哪条音色要在库里真存在才钉——钉一条不存在的会让边车回 400，用户听到「没声音」。
 - **边车与脚本**：`services/tts/backends.py`（新增 `SayBackend` + `VoxCpm2Backend`，
   HTTP 契约不变）、`services/tts/server.py`（`--backend {voxcpm2,say}`，**默认 voxcpm2**）、
   `scripts/setup-talk.sh`（按需下载两个模型，**不随包分发**）、
@@ -258,7 +283,7 @@ clippy **刻意不加 `-D warnings`**（既有 13 条警告，加了会让 CI �
 
 ```bash
 cargo build --release
-cargo test                                    # 281 passed / 0 failed / 6 ignored（ignored 6 条：4 条要边车、1 条要联网、1 条要能出声的环境）：提交协议、崩溃语义、token 过滤、i18n、下载协议、知识库投递、通话会话状态机、语音指令表
+cargo test                                    # 285 passed / 0 failed / 6 ignored（281 条单测 + 4 条钉脚本默认值的集成测试；ignored 6 条：4 条要边车、1 条要联网、1 条要能出声的环境）：提交协议、崩溃语义、token 过滤、i18n、下载协议、知识库投递、通话会话状态机、语音指令表
 ./target/release/agentear                     # 守护进程，Ctrl+Shift+R 开始/停止录音
 ./target/release/agentear --transcribe x.wav  # 离线转写，不占麦克风，用于验证 ASR 链路
 ./target/release/agentear --diagnose          # 环境自检：权限、音频设备、ASR 依赖
@@ -279,7 +304,8 @@ cargo test -- --ignored stop_playback         # 打断机制：真掐掉一段 5
 scripts/bundle.sh                             # 打 .app bundle → dist/
 
 # 通话链路（M3）的两个边车 + 端到端验收，都要单独起，都**不随包分发**：
-scripts/setup-talk.sh                         # 首次：下 MiniCPM5-2B-4bit（LLM）与 VoxCPM2-4bit（TTS）
+scripts/setup-talk.sh                         # 首次：下 MiniCPM5-2B-4bit（LLM）与 VoxCPM2-4bit（TTS）+ 默认音色库
+scripts/setup-talk.sh --tts-quant 8bit         # 同上但 TTS 用 8bit（3.22GB 权重 / 约 3.3GB 内存，要自己显式要）
 scripts/serve-talk-llm.sh                     # 每次：LLM 边车，默认 127.0.0.1:8794
 scripts/serve-tts.sh                          # 每次：TTS 边车，默认 127.0.0.1:8765（--backend voxcpm2）
 scripts/talk-e2e.sh --text '今天天气怎么样' --lang zh   # 全链路：ASR → LLM → TTS → 音频文件
