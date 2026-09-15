@@ -535,15 +535,33 @@ class VoxCpm2Backend:
                 future.set_exception(error)
 
     def _load_ref(self, entry):
-        """参考音频只解码一次，缓存住——它每次合成都要用。"""
+        """把参考音频交给模型——**给路径，不给数组**。
+
+        ⚠️ **这里踩过一个很隐蔽的坑（2026-09-15 定位）**：原来用
+        `mlx_audio.utils.load_audio(path)` 预解码成数组缓存起来，看着是优化，
+        实际是错的 ——
+
+        - `load_audio(path)` 的默认目标是 **24 kHz**，它会把 48 kHz 的参考
+          重采样到 24 kHz 再返回；
+        - 返回的是**裸 mx.array，不带采样率**；
+        - 而模型的 `_encode_wav` 拿到数组时**只能按它自己假定的速率解释**，
+          拿到**路径**时才会自己正确解码 + 重采样。
+
+        后果：参考音频被按错误速率解释 → **克隆出来的音高整体偏了一个八度**。
+        实测同一条 48 kHz 参考（F0 142.4 Hz）：
+
+            给路径（正确）→ 输出 147.7 / 133.7 / 150.5 Hz  ✅ 跟住
+            给数组（原做法）→ 输出 287.4 Hz                ❌ 高了一倍
+
+        这就是「换成谁的参考都是同一个机器人声」的真正原因 ——
+        跟参考音频的质量、跟 instruct、跟量化档都无关。
+
+        代价：每次合成都让模型重新读一次参考 wav（约 1 MB / 10.9 秒；98 秒的
+        约 9 MB）。相对一次 2.4–6 s 的合成，这点 IO 可以忽略；**正确性优先**。
+        """
         if entry is None:
             return None, None
-        key = str(entry["wav"])
-        if key not in self._ref_cache:
-            from mlx_audio.utils import load_audio
-
-            self._ref_cache[key] = load_audio(key)
-        return self._ref_cache[key], entry.get("ref_text")
+        return str(entry["wav"]), entry.get("ref_text")
 
     def _generate(self, text, style, tone, entry):
         """Collect every segment of the generator into one waveform.
