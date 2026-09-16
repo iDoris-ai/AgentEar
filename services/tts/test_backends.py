@@ -182,7 +182,6 @@ def _has_numpy():
     return True
 
 
-@unittest.skipUnless(_has_numpy(), "需要 numpy：没有它 normalize_loudness 是恒等函数，这三条测不到东西")
 class CacheLimitTests(unittest.TestCase):
     """缓存上限「到底设上了没有」。
 
@@ -261,6 +260,7 @@ class CacheLimitTests(unittest.TestCase):
         self.assertIn("boom", report["cache_limit_error"])
 
 
+@unittest.skipUnless(_has_numpy(), "需要 numpy：没有它 normalize_loudness 是恒等函数，这三条测不到东西")
 class LoudnessTests(unittest.TestCase):
     """响度归一：直接治「声量飘忽」（实测不归一时 RMS 差 4.54 倍）。
 
