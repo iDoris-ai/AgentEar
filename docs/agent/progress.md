@@ -21,6 +21,40 @@
 > 要补真审查：把 iDoris-ai 加进监控范围、把 daemon 起起来，让它重审 `edc8bcc`。
 > ⚠️ 分支保护是「必需审查 1 + 管理员同样受限」，所以 `gh pr merge --admin` **会被平台拒**——
 > 这条记下来，省得下次再试一遍。
+## 本轮（2026-09-16，不发版）：把「被引用的东西」搬进仓库
+
+起因是**换机器**（jason 要在 Mac mini 上继续开发）：我说「都推完了」，
+但那是**仓库内**的说法。核了一遍才发现真正的问题不在没推的 commit
+（一个都没有），而在**我先前的工作产物有一部分躺在 gitignore 的目录里**：
+
+- `services/tts/backends.py` 与 `services/tts/make_voice.py` **引用
+  `measure_f0.py` 的数字当实测来源**（「不归一时 RMS 差 4.54 倍」那条），
+  而它当时在 `vendor/models/talk/` 下 —— **`vendor/models/` 被 gitignore**。
+  新克隆的仓库里没有它，**那些数字就没有可复现的来源**，
+  而编译、测试、CI **全都不会报错**（没有任何一处会去查这个文件在不在）。
+- 历次 release notes 同样在 `vendor/models/talk/release/`，一起搬了。
+
+**处理**：`measure_f0.py` → `scripts/measure-f0.py`（并把两处引用改到仓库内路径）；
+18 份 notes → `docs/releases/`（+ `README.md` 说明权威源仍是 GitHub release）。
+**加了一条钉子**：`tests/script_defaults.rs::cited_measurement_tools_are_in_the_repo`
+—— 断言那个工具在仓库里、断言两处源码写的是**仓库内路径**、并禁止再引用
+`vendor/models/talk/measure*` 与 `vendor/models/talk/release`。
+`script_defaults` 5 → **6 条**。
+搬完实跑验证（新位置）：`scripts/measure-f0.py` 对两条开箱音色给出
+F0 189.0 / 174.5 Hz、RMS 1.10× —— 工具真的能跑，不只是文件在。
+
+⚠️ **这是「搬运」不是「发版」**：`scripts/` 与 `docs/` **都不随包分发**
+（实测 `unzip -l dist/AgentEar-0.18.0-macos-arm64.zip | grep -c scripts/` = **0**），
+所以 v0.18.0 的发布件不受影响，**没有发新版本**。
+
+⚠️ 仓库里**确实还有一批我的丢弃式探针**没入库（`vendor/models/talk/`
+下的 `ab_*.py` / `measure_f0_v2.py` / `measure_prosody.py` / `measure_voice.py`）。
+**它们没有任何已入库文件引用**，按仓库「spike 用完即删」的规矩留在外面——
+**换机器时不会跟过去**，这是有意的。
+
+**测试**：`cargo test` **298 passed / 0 failed / 6 ignored**（比上一版多那条钉子）；
+Python 侧 **46 passed**。
+
 ## 本轮（2026-09-15，v0.18.0）：边车内存可观测 + 修两条测试 + 补上漏掉的 CI 闸
 
 **代码改动很小，但三件事都值得记。**

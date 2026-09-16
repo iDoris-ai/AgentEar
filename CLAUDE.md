@@ -491,6 +491,19 @@ python3 -m unittest discover -s services/tts -p 'test_*.py'   # 46 passed（TTS 
 #    但**别把 skip 当成通过**——本机三个解释器都有 numpy，正常应当 46 passed。
 ```
 
+**release notes 在 `docs/releases/`**（一版一个 `v0.x.y-notes.md`，内容就是 release 正文）。
+⚠️ 2026-09-16 才从 `vendor/models/talk/release/` 搬进来——那个目录**被 gitignore**，
+所以新克隆的仓库里根本没有历次 notes。**权威源仍是 GitHub release**
+（资产、发布时间、tag 指向只有那边有），这里放正文，为的是离线可查、可 diff。
+`docs/releases/README.md` 里写了来龙去脉。
+
+⚠️ **`scripts/measure-f0.py` 同理**：它原来是 `vendor/models/talk/measure_f0.py`，
+而 `services/tts/backends.py` 与 `services/tts/make_voice.py` **引用它的数字当实测来源**
+（「不归一时 RMS 差 4.54 倍」）——**被引用的实测工具不能躺在 gitignore 的目录里**，
+否则新克隆的仓库里那些数字**没有可复现的来源**，而编译/测试/CI 都不会报错。
+这条现在有测试钉住（`tests/script_defaults.rs::cited_measurement_tools_are_in_the_repo`）。
+**凡是「源码里引用了某个文件」，那个文件就必须在仓库内。**
+
 日志同时写 stderr 和 `~/.agentear/agentear.log`。
 
 ⚠️ **`--transcribe` 的 `--lang` 只认 `th` / `auto`**（实测传 `zh` 会被参数解析拒绝，exit 1；

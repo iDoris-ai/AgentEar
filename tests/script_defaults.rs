@@ -135,3 +135,34 @@ fn the_bundled_voice_library_is_complete() {
         "随包的音色库里必须有 female_zh_02（实测挑的那条，F0 174.5 Hz / 半音起伏 4.22）"
     );
 }
+
+/// **被源码引用的实测工具必须真的在仓库里。**
+///
+/// 这条钉的是一次真实的错：`services/tts/backends.py` 与
+/// `services/tts/make_voice.py` 都引用 `measure_f0.py` 的数字当实测来源
+/// （「不归一时 RMS 差 4.54 倍」），而它当时在 `vendor/models/talk/` 下
+/// ——**那个目录被 gitignore**。于是新克隆的仓库里没有这个文件，
+/// 那些数字**没有可复现的来源**，而编译、测试、CI 全都不会报错。
+/// 2026-09-16 把它搬进 `scripts/`。
+///
+/// ⚠️ 关键点是**引用的路径必须落在仓库内**：只断言「文件存在」不够，
+/// 因为 `vendor/` 下的文件在开发机上确实存在、在别人机器上不存在。
+#[test]
+fn cited_measurement_tools_are_in_the_repo() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let tool = "scripts/measure-f0.py";
+    assert!(
+        root.join(tool).is_file(),
+        "{tool} 不在仓库里 —— 引用它的源码就成了不可复现的声明"
+    );
+    for src in ["services/tts/backends.py", "services/tts/make_voice.py"] {
+        let body = read(src);
+        assert!(body.contains(tool), "{src} 引用实测来源时必须写仓库内的路径 {tool}");
+        for ignored in ["vendor/models/talk/measure", "vendor/models/talk/release"] {
+            assert!(
+                !body.contains(ignored),
+                "{src} 不许把 gitignore 的 {ignored} 当实测来源/文档路径"
+            );
+        }
+    }
+}
