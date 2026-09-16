@@ -38,7 +38,7 @@ cd ~/Dev/tools/AgentEar
 #    (b) 按 README「从源码构建」那段的 curl 从上游装（**本次未复跑**，
 #        URL 会随上游漂移；`external-links.yml` 每周查的就是这类资产还在不在）
 #    (c) 从旧机器直接拷
-gh release download v0.18.0 --pattern '*macos-arm64.zip' -D /tmp
+gh release download --pattern '*macos-arm64.zip' -D /tmp   # 不带 tag = 取最新一版
 unzip -q /tmp/AgentEar-0.18.0-macos-arm64.zip -d /tmp/ae
 cp -R /tmp/ae/AgentEar.app/Contents/Resources/vendor ~/Dev/tools/AgentEar/vendor
 
@@ -56,12 +56,15 @@ cargo build --release
 
 ### 1.3 配置里的绝对路径要改
 
-`~/.agentear/config.json` 里有**指向本机仓库的绝对路径**（实测两条）：
+`~/.agentear/config.json` 里有**指向本机仓库的绝对路径**（实测两条，形如）：
 
 ```
-/Users/jason/Dev/tools/AgentEar/scripts/serve-tts.sh
-/Users/jason/Dev/tools/AgentEar/scripts/serve-talk-llm.sh
+$REPO/scripts/serve-tts.sh
+$REPO/scripts/serve-talk-llm.sh
 ```
+
+（`$REPO` = 你 clone 下来的仓库绝对路径。**这个文件不入库**，
+这里也不把开发机的真实路径写进文档——见下面的「关于示例」。）
 
 新机器上**用户名或 clone 路径不同就必须改**，否则守护进程切到对话模式时
 「拉不起边车」（命令默认是空的时只连不拉、日志里会打出该跑哪条命令，不静默）。
@@ -107,6 +110,16 @@ scripts/serve-tts.sh & sleep 5; curl -s localhost:8765/health  # 看 mlx.cache_l
 本机三个解释器（3.9.6 / 3.11.15 / 3.12.13）都有 numpy，正常应当 **46 passed**。
 ⚠️ **CI 的 `python3` 没有 numpy**，所以响度 3 条在 CI 里永远是 skip，
 CI 覆盖不到它们。
+
+---
+
+### 1.7 关于示例（PR-Daemon R1 审出来的两条）
+
+- **不写死开发机的绝对路径**：`/Users/<某人>/...` 进仓库会泄露本机环境，
+  示例一律用 `$REPO` / `~` / `$HOME` 占位。
+- **示例里的版本号不钉死**：`gh release download` 不带 tag 就是最新版；
+  钉死某一版会在下一版发布后变成过期指令。需要具体版本时从
+  [`docs/releases/`](releases/) 或 GitHub release 页面取。
 
 ---
 
@@ -180,7 +193,7 @@ allow_force_pushes / deletions: false
 | 事实 | 证据 |
 |---|---|
 | `iDoris-ai` **在**它的扫描范围里 | `scripts/scan_scope.py` 的兜底组织列表含 `iDoris-ai`，另有 `config/candidate-orgs.conf` |
-| 四轮所需的 CLI **都在** | `claude`、`codex` 都在 `/Users/jason/.local/bin/`；`PR_DAEMON_REVIEWER_CLI=claude`；`.env` 里各段 key 齐全 |
+| 四轮所需的 CLI **都在** | `claude`、`codex` 都在 `~/.local/bin/`；`PR_DAEMON_REVIEWER_CLI=claude`；`.env` 里各段 key 齐全 |
 | **但它没在跑** | 它的库 `pr-watch.sqlite` 里 `last_full_sync_epoch` = **2026-08-19** |
 | 它的「0 待审」**不是事实** | AgentEar 在它库里只到 **PR #46**（#47–#78 从没进去过）；`review_queue.py` 那句 `queue empty — all open PRs reviewed at head ✓` 是**过期账本的产物** |
 
