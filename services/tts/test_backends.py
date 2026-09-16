@@ -183,6 +183,84 @@ def _has_numpy():
 
 
 @unittest.skipUnless(_has_numpy(), "需要 numpy：没有它 normalize_loudness 是恒等函数，这三条测不到东西")
+class CacheLimitTests(unittest.TestCase):
+    """缓存上限「到底设上了没有」。
+
+    ⚠️ 这组测试的存在理由是一次**报喜不报忧**：v0.17.0 的 `/health` 把
+    **我们想要的** 256 当成事实报出去，而 MLX 根本没有 `get_cache_limit()`
+    可以读回（实测 0.32.2：两个命名空间都没有）。调用失败时它照样报 256。
+    而且失败**真的会发生**：`mx.metal.*` 已废弃，将来被删就静默失效。
+    """
+
+    def _mlx_with(self, setter=None, metal_setter=None, with_metal=True):
+        core = types.ModuleType("mlx.core")
+        if setter is not None:
+            core.set_cache_limit = setter
+        if with_metal:
+            core.metal = types.SimpleNamespace(set_cache_limit=metal_setter)
+        # `_mlx_memory()` 要读这三个数：缺了它会走 except 返回 None（那是它
+        # 「读数拿不到」的正常行为），于是测试以看不懂的 TypeError 失败，
+        # 而不是告诉你「假模块不够真」。
+        core.get_active_memory = lambda: 100 * 1024 * 1024
+        core.get_cache_memory = lambda: 0
+        core.get_peak_memory = lambda: 200 * 1024 * 1024
+        return {"mlx": types.ModuleType("mlx"), "mlx.core": core}
+
+    def test_the_current_api_wins_over_the_deprecated_one(self):
+        """两个都在时必须走 `mx.set_cache_limit`（`mx.metal.*` 会被删）。"""
+        calls = []
+        modules = self._mlx_with(
+            setter=lambda n: calls.append(("new", n)),
+            metal_setter=lambda n: calls.append(("deprecated", n)),
+        )
+        with patch.dict(sys.modules, modules):
+            api, error = backends.install_cache_limit()
+        self.assertEqual(api, "mx.set_cache_limit")
+        self.assertIsNone(error)
+        self.assertEqual(calls, [("new", backends.CACHE_LIMIT_BYTES)])
+        self.assertTrue(backends.CACHE_LIMIT_STATE["installed"])
+
+    def test_the_deprecated_api_still_works_for_old_mlx(self):
+        """老 mlx 只有 `mx.metal`：还得能设上，但**要能看出是谁设的**。"""
+        calls = []
+        modules = self._mlx_with(metal_setter=lambda n: calls.append(n))
+        with patch.dict(sys.modules, modules):
+            api, _ = backends.install_cache_limit()
+        self.assertEqual(api, "mx.metal.set_cache_limit")
+        self.assertEqual(calls, [backends.CACHE_LIMIT_BYTES])
+        self.assertEqual(backends.CACHE_LIMIT_STATE["api"], "mx.metal.set_cache_limit")
+
+    def test_a_failure_is_recorded_and_never_reported_as_success(self):
+        """设不上时必须留痕 —— 这是这条测试唯一在守的东西。"""
+        def boom(_):
+            raise AttributeError("no such method")
+
+        modules = self._mlx_with(setter=boom, metal_setter=boom)
+        with patch.dict(sys.modules, modules):
+            api, error = backends.install_cache_limit()
+        self.assertIsNone(api)
+        self.assertIsNotNone(error)
+        self.assertFalse(backends.CACHE_LIMIT_STATE["installed"])
+        self.assertIn("no such method", backends.CACHE_LIMIT_STATE["error"])
+
+    def test_health_says_whether_the_limit_is_actually_in_place(self):
+        """`/health` 里那三个字段必须跟着真实结果走。"""
+        backend, _ = voxcpm2_backend()
+        with patch.dict(sys.modules, self._mlx_with(setter=lambda n: None)):
+            backends.install_cache_limit()
+            report = backend._mlx_memory()
+        self.assertTrue(report["cache_limit_set"])
+        self.assertEqual(report["cache_limit_api"], "mx.set_cache_limit")
+        self.assertIsNone(report["cache_limit_error"])
+
+        with patch.dict(sys.modules, self._mlx_with(setter=lambda n: (_ for _ in ()).throw(OSError("boom")))):
+            backends.install_cache_limit()
+            report = backend._mlx_memory()
+        self.assertFalse(report["cache_limit_set"])
+        self.assertIsNone(report["cache_limit_api"])
+        self.assertIn("boom", report["cache_limit_error"])
+
+
 class LoudnessTests(unittest.TestCase):
     """响度归一：直接治「声量飘忽」（实测不归一时 RMS 差 4.54 倍）。
 

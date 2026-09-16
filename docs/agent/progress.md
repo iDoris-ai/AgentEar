@@ -51,6 +51,27 @@
      `~/.pyenv/versions/3.11.9` 在该路径下不存在。所以**不要照抄
      「非交互 python3 没有 numpy」**——这条没验证，反例就在眼前。
 
+1b. **同一个字段里揪出一个「报喜不报忧」**（同一天，v0.18.0 一起发）。
+   上面那个 `mlx` 块**第一版把 `cache_limit_mb: 256` 当事实报出去了** ——
+   那个数是**我们自己填的常数**，不是从 MLX 读回来的。实测确认 mlx 0.32.2
+   **根本没有 `get_cache_limit()`**（`mx.get_cache_limit` 与
+   `mx.metal.get_cache_limit` 都不存在），所以「上限真的生效了吗」**读不回来**；
+   而 `install_cache_limit()` 失败时只是 `log_once` 一行，`/health` 照样报 256
+   ——**调用失败与成功在接口上长得一模一样**，这正是 v0.13.0 那条规矩
+   （「没写进去却说写进去了，比失败更糟」）同一个错误。
+   - 现在报**调用结果**：`cache_limit_set` / `cache_limit_api` / `cache_limit_error`，
+     外加三条测试钉住（失败必须留痕、必须是 `False` 而不是 256）。
+   - ⚠️ 顺带发现 **`mx.metal.set_cache_limit` 已废弃**（0.32 运行时会打
+     "will be removed… Use mx.set_cache_limit"）。老写法一旦被删就会**静默失效**、
+     池子重新变成无上限。所以优先调 `mx.set_cache_limit`，`mx.metal` 只作退路，
+     并**把哪个 API 生效的记进 `/health`**。
+   - 真实 mlx 验证：`install_cache_limit()` → `('mx.set_cache_limit', None)`；
+     重启边车后 `/health` = `active 3072 / cache 0 / peak 3072` +
+     `cache_limit_set true` / `api "mx.set_cache_limit"`。
+   - ⚠️ **口径要说准**：`cache_mb` 长期为 0 证明的是**第二道闸**
+     （每次合成后 `clear_cache()`）；**上限被 MLX 真正执行**这一点**没有直接证据**
+     （没有读回 API）——只能说「调用没报错」。
+
 3. **补上 CI 里漏掉的那道闸**：`.github/workflows/ci.yml` 原来只跑
    build + clippy + cargo test，**Python 边车测试根本不在 CI 里**。
    后果是真的：v0.16.0 那条测试变红之后**红着发布了两版没人知道**。
@@ -59,8 +80,12 @@
    本机三个解释器都有 numpy，正常应报 **42 passed**。
 
 **测试**：`cargo test` **297 passed / 0 failed / 6 ignored**；
-Python 侧 `python3 -m unittest discover -s services/tts -p 'test_*.py'` **42 passed**
+Python 侧 `python3 -m unittest discover -s services/tts -p 'test_*.py'` **46 passed**
 （CLAUDE.md 里原来记的 34 已过期）。
+⚠️ **CI 的 macos-latest 那份 python3 没有 numpy**，所以 CI 日志里会看到
+`sss`（响度 3 条 skip）+ 一条 `MLX 缓存上限没设上…no attribute 'metal'`——
+**后者是测试里那个假 `mlx.core` 模块造成的，不是真失败**（假模块只做了
+合成路径需要的最小面）。
 
 新增 `src/talk.rs` / `src/session.rs` / `services/tts/backends.py` /
 `scripts/{setup-talk,serve-talk-llm,serve-tts,talk-e2e}.sh`，

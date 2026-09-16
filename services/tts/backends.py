@@ -258,6 +258,59 @@ DIALECT_STYLES = frozenset({"yue", "henan", "sichuan", "shandong", "dongbei", "t
 #: 反而更慢——**这是个折中，不是越小越好**。
 CACHE_LIMIT_BYTES = 256 * 1024 * 1024
 
+#: 上限**到底设上了没有**。`{"installed": bool, "api": str|None, "error": str|None}`。
+#:
+#: ⚠️ **MLX 没有 `get_cache_limit()`**（实测 mlx 0.32.2：`mx.get_cache_limit` 与
+#: `mx.metal.get_cache_limit` 都不存在），所以「上限真的生效了吗」**读不回来**。
+#: v0.17.0 的 `/health` 直接把想要的 256 当成事实报出去——那正是本仓库最忌讳的
+#: **报喜不报忧**：调用失败时它照样报 256。现在改成**记录调用结果**。
+#:
+#: ⚠️ 而且这个失败是**会真的发生**的：`mx.metal.*` 在 0.32 已经废弃
+#: （运行时会打 "will be removed in a future version. Use mx.set_cache_limit"），
+#: 将来被删掉时，老写法会静默失效、池子重新变成无上限。所以**优先用新名字**，
+#: 老名字只作为旧版本 mlx 的退路。
+CACHE_LIMIT_STATE = {"installed": False, "api": None, "error": None}
+
+
+def install_cache_limit():
+    """给 MLX 缓冲池设上限。返回 `(api, error)`，并把结果记进 `CACHE_LIMIT_STATE`。
+
+    两道闸里的第一道（第二道是每次合成后的 `clear_cache()`，见 `_release_mlx_cache`）。
+    设不上**不影响合成**，但内存可能不回收——所以**必须留下痕迹**，不能静默。
+    """
+    CACHE_LIMIT_STATE.update({"installed": False, "api": None, "error": None})
+    try:
+        import mlx.core as mx
+    except ImportError as error:
+        CACHE_LIMIT_STATE["error"] = f"没有 mlx：{error}"
+        return None, error
+
+    # 顺序不能反：新名字在前，`mx.metal` 只是老 mlx 的退路。
+    candidates = [("mx.set_cache_limit", getattr(mx, "set_cache_limit", None))]
+    metal = getattr(mx, "metal", None)
+    if metal is not None:
+        candidates.append(("mx.metal.set_cache_limit", getattr(metal, "set_cache_limit", None)))
+
+    errors = []
+    for api, setter in candidates:
+        if setter is None:
+            errors.append(f"{api} 不存在")
+            continue
+        try:
+            setter(CACHE_LIMIT_BYTES)
+        except Exception as error:  # noqa: BLE001 - 调用失败不许影响合成
+            errors.append(f"{api}: {error}")
+            continue
+        CACHE_LIMIT_STATE.update({"installed": True, "api": api})
+        return api, None
+
+    message = "；".join(errors) or "mlx 里没有任何 set_cache_limit"
+    CACHE_LIMIT_STATE["error"] = message
+    log_once(
+        "MLX 缓存上限**没设上**（不影响合成，但内存可能不回收，池子会只增不减）: " + message
+    )
+    return None, RuntimeError(message)
+
 STYLE_INSTRUCTS = {
     # ⚠️ **控制指令只写名字，不要写描述。**
     #
@@ -492,7 +545,11 @@ class VoxCpm2Backend:
         }
 
     def _mlx_memory(self):
-        """`{"active_mb":…, "cache_mb":…, "peak_mb":…}`；没装 mlx / 老版本时给 None。"""
+        """`{"active_mb":…, "cache_mb":…, "peak_mb":…, "cache_limit_*":…}`；没 mlx 时 None。
+
+        `active/cache/peak` 是 MLX 自己报的**事实**；`cache_limit_*` 是**意图 + 调用结果**
+        （MLX 不给读回上限，见 `CACHE_LIMIT_STATE` 的注释）。
+        """
         try:
             import mlx.core as mx
 
@@ -500,7 +557,13 @@ class VoxCpm2Backend:
                 "active_mb": mx.get_active_memory() // (1024 * 1024),
                 "cache_mb": mx.get_cache_memory() // (1024 * 1024),
                 "peak_mb": mx.get_peak_memory() // (1024 * 1024),
+                # ⚠️ 这是**我们想要的值**，不是读回来的——MLX 没有
+                # `get_cache_limit()`（实测 0.32.2 两个命名空间都没有）。
+                # 「设上了没有」看下面两项，别把这个数当成事实。
                 "cache_limit_mb": CACHE_LIMIT_BYTES // (1024 * 1024),
+                "cache_limit_set": CACHE_LIMIT_STATE["installed"],
+                "cache_limit_api": CACHE_LIMIT_STATE["api"],
+                "cache_limit_error": CACHE_LIMIT_STATE["error"],
             }
         except Exception:  # noqa: BLE001 - 读数拿不到不是错误
             return None
@@ -567,12 +630,7 @@ class VoxCpm2Backend:
             #   说明增长来自重负荷路径：98 秒长参考 + 长文本）。
             #
             # 两道闸：① 缓存上限（超了 MLX 自己回收）；② 每次合成后主动 clear_cache。
-            try:
-                import mlx.core as mx
-
-                mx.metal.set_cache_limit(CACHE_LIMIT_BYTES)
-            except Exception as error:  # noqa: BLE001 - 老版本没有这个 API 也不算错
-                log_once(f"MLX 缓存上限没设上（不影响合成，但内存可能不回收）: {error}")
+            install_cache_limit()
 
             from mlx_audio.tts.utils import load_model
 
