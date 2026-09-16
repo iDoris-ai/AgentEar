@@ -481,7 +481,29 @@ class VoxCpm2Backend:
             "voices": sorted(self.voices.entries),
             "styles": sorted(STYLE_INSTRUCTS),
             "loudness": {"target_rms": TARGET_RMS, "peak_ceiling": PEAK_CEILING},
+            # ⚠️ **MLX 自己报的内存**（v0.18.0 补进 /health）。
+            #
+            # 为什么非要有它：`peak_rss_mb` 是 `ru_maxrss`（历史峰值，只增不减），
+            # 而 `ps` 的 RSS 会被 macOS 回收/压缩 —— **两个都看不出"现在是不是在涨"**。
+            # MLX 的 active/cache 才是它真正持有的量：
+            #   cache 应该被 CACHE_LIMIT_BYTES(256MB) 压着；active 应当稳定。
+            # 这次内存暴涨排查时就是因为没有这组数，只能靠猜。
+            "mlx": self._mlx_memory(),
         }
+
+    def _mlx_memory(self):
+        """`{"active_mb":…, "cache_mb":…, "peak_mb":…}`；没装 mlx / 老版本时给 None。"""
+        try:
+            import mlx.core as mx
+
+            return {
+                "active_mb": mx.get_active_memory() // (1024 * 1024),
+                "cache_mb": mx.get_cache_memory() // (1024 * 1024),
+                "peak_mb": mx.get_peak_memory() // (1024 * 1024),
+                "cache_limit_mb": CACHE_LIMIT_BYTES // (1024 * 1024),
+            }
+        except Exception:  # noqa: BLE001 - 读数拿不到不是错误
+            return None
 
     def peak_rss_mb(self):
         """本进程峰值 RSS（MB）。macOS 上 `ru_maxrss` 单位是**字节**。"""

@@ -46,3 +46,12 @@ jobs:
 
       - name: 测试
         run: cargo test --locked
+
+      # Python 边车（services/tts）的测试。**这一步原来是漏的**，代价实测到了：
+      # v0.16.0 把方言 instruct 改成「只写方言名」时有一条测试当场变红，
+      # 而 CI 只看 cargo，于是**红着发布了两版**，直到 v0.18.0 才发现
+      # （那条测试当时还把旧行为钉着，翻绿反而是错的）。
+      # 测试只用标准库 + 可选 numpy：没有 numpy 时响度那 3 条会 **skip**
+      # ——skip 不等于通过，本机三个解释器都有 numpy，正常应报 42 passed。
+      - name: TTS 边车测试
+        run: python3 -m unittest discover -s services/tts -p 'test_*.py'

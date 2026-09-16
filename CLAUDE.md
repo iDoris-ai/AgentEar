@@ -2,7 +2,7 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-## 当前状态：**v0.17.0 —— 边车内存上限与缓存回收（+ 修一个启动即崩的 bug）**；M1/M2 已发布；**M3 通话链路已跑通，AEC / 自动打断未做**
+## 当前状态：**v0.18.0 —— 边车内存可观测（`/health` 自报 MLX 占用）+ 修两条测试**；M1/M2 已发布；**M3 通话链路已跑通，AEC / 自动打断未做**
 
 M1 完成；**知识库投递 + 全文检索默认开（v0.4.2）**；M2 理解层已发布（v0.4.0）但默认关；
 **v0.6.0 加了通话链路（说一句答一句、可按键打断）**，**v0.5.0 加了可切换的 ASR 后端**（`--asr-backend` / `config.json` 的 `asr_backend`，
@@ -111,6 +111,11 @@ M1 完成；**知识库投递 + 全文检索默认开（v0.4.2）**；M2 理解�
   - **`/health` 现在自报 `peak_rss_mb`**（`resource.getrusage`）：macOS 沙箱里
     `ps`/`top` 读不到别的进程内存，而仓库规矩要求「高资源档峰值 RSS 必须实测入库」。
     实测 4bit **2386MB** / 8bit **3266MB**。
+  - **`/health` 还自报一个 `mlx` 块**（v0.18.0，`_mlx_memory()`）：
+    `{"active_mb","cache_mb","peak_mb","cache_limit_mb"}`。
+    ⚠️ **RSS 会被系统回收/压缩，看增长要看 MLX 自己报的数**——v0.17.0 查
+    「38 GB」那条时就是靠它；`cache_mb` 长期为 0 才证明「上限 + 每次回收」
+    那两道闸真的生效了（实测重启后 `active 3072 / cache 0 / peak 3072 / limit 256`）。
 - **语音指令表（v0.9.0）= 本地快路径 + LLM 兜底的两段式**。
   用户先说一句声明过的短语（「记一下…」「搜索…」「发邮件给…」），
   **本地先查表**（`src/commands.rs`，纯字符串前缀匹配，0ms，断网也能用）；
@@ -467,7 +472,10 @@ scripts/serve-talk-llm.sh                     # 每次：LLM 边车，默认 127
 scripts/serve-tts.sh                          # 每次：TTS 边车，默认 127.0.0.1:8765（--backend voxcpm2）
 scripts/talk-e2e.sh --text '今天天气怎么样' --lang zh   # 全链路：ASR → LLM → TTS → 音频文件
 
-python3 -m unittest discover -s services/tts -p 'test_*.py'   # 34 passed（TTS 边车）
+python3 -m unittest discover -s services/tts -p 'test_*.py'   # 42 passed（TTS 边车）
+# ⚠️ 响度那 3 条要 numpy：`normalize_loudness` 没有 numpy 时是恒等函数，
+#    于是第一条报「RMS 差 10 倍」（像真 bug）、另两条假绿。已有 skip 守卫，
+#    但**别把 skip 当成通过**——本机三个解释器都有 numpy，正常应当 42 passed。
 ```
 
 日志同时写 stderr 和 `~/.agentear/agentear.log`。
