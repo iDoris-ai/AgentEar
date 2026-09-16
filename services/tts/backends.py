@@ -251,6 +251,13 @@ class SayBackend:
 #: 这几种是**方言**：文档要求控制指令只写方言名，且正文必须是方言本身。
 DIALECT_STYLES = frozenset({"yue", "henan", "sichuan", "shandong", "dongbei", "tianjin"})
 
+#: MLX 缓冲缓存的上限（256 MB）。
+#:
+#: **为什么是 256 MB**：合成一次 48 kHz 十几秒的音频，中间张量在几百 MB 量级；
+#: 留 256 MB 够复用、又不会让池子无限长。设成 0 会让每次合成都要重新分配，
+#: 反而更慢——**这是个折中，不是越小越好**。
+CACHE_LIMIT_BYTES = 256 * 1024 * 1024
+
 STYLE_INSTRUCTS = {
     # ⚠️ **控制指令只写名字，不要写描述。**
     #
@@ -529,6 +536,22 @@ class VoxCpm2Backend:
 
             # Own a stream on this thread before anything else touches MLX.
             mx.set_default_stream(mx.new_stream(mx.default_device()))
+            # ⚠️ **给 MLX 的缓冲缓存设上限**（2026-09-15 加，jason 报了一次内存暴涨）。
+            #
+            # MLX 释放张量时**不把 Metal 缓冲还给系统**，而是留在自己的缓存池里；
+            # 默认上限很宽松，于是一个长期跑着的服务在反复合成之后
+            # **RSS 只增不减**。实测过一次「跑了快一小时、涨到几十 GB」的报告
+            # （我没能复现出那个数字，但短文本循环确实稳定在 ~200 MB，
+            #   说明增长来自重负荷路径：98 秒长参考 + 长文本）。
+            #
+            # 两道闸：① 缓存上限（超了 MLX 自己回收）；② 每次合成后主动 clear_cache。
+            try:
+                import mlx.core as mx
+
+                mx.metal.set_cache_limit(CACHE_LIMIT_BYTES)
+            except Exception as error:  # noqa: BLE001 - 老版本没有这个 API 也不算错
+                log_once(f"MLX 缓存上限没设上（不影响合成，但内存可能不回收）: {error}")
+
             from mlx_audio.tts.utils import load_model
 
             started = time.monotonic()
@@ -624,10 +647,58 @@ class VoxCpm2Backend:
         except TTSError:
             raise
         except Exception as error:  # noqa: BLE001 - reported as a 500 JSON body
+            _release_mlx_cache()
             raise TTSError(500, f"VoxCPM2 synthesis failed: {error}") from None
         if not chunks:
             raise TTSError(500, "VoxCPM2 produced no audio segments.")
+        # ⚠️ **合成完主动把 MLX 的缓冲缓存还给系统。**
+        # 不做这一步时，池子里的空闲缓冲会一直留着 —— 服务跑得越久、占得越多。
+        # 放在 `finally` 语义上不合适（出错时也要清），所以这里在返回前一并清掉，
+        # 异常路径由下面的 except 分支再清一次。
+        _release_mlx_cache()
         return join_audio(chunks), sample_rate
+
+
+def log_once(message):
+    """只喊一次的告警（避免每轮刷屏）。"""
+    global _LOGGED_ONCE
+    if message in _LOGGED_ONCE:
+        return
+    _LOGGED_ONCE.add(message)
+    import sys as _sys
+
+    print(f"⚠️ {message}", file=_sys.stderr)
+
+
+_LOGGED_ONCE = set()
+
+
+def _release_mlx_cache():
+    """把 MLX 的 Metal 缓冲缓存还给系统。**失败不算错**（老版本没这个 API）。"""
+    try:
+        import mlx.core as mx
+
+        mx.clear_cache()
+    except Exception:  # noqa: BLE001 - 清理失败不该影响这一轮合成
+        pass
+
+
+def mlx_memory_mb():
+    """MLX 自己报的内存（MB）。**这是查内存增长唯一靠谱的读数**：
+    `ps` 看到的 RSS 会被系统回收/压缩，而这里的 active/cache 是 MLX 真实持有量。
+
+    返回 `(active, cache, peak)`；老版本或没装 mlx 时返回 `None`。
+    """
+    try:
+        import mlx.core as mx
+
+        return (
+            mx.get_active_memory() // (1024 * 1024),
+            mx.get_cache_memory() // (1024 * 1024),
+            mx.get_peak_memory() // (1024 * 1024),
+        )
+    except Exception:  # noqa: BLE001
+        return None
 
 
 def read_wav(path):
