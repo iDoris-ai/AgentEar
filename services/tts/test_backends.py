@@ -135,20 +135,152 @@ class ContractWithRustTests(unittest.TestCase):
         )
 
     def test_tone_and_style_both_reach_the_instruct(self):
-        """语气和语系都必须真的进 instruct。
+        """语言档：语系和语气都必须真的进 instruct。
 
         菜单点了没效果、而日志里一切正常——这是最难查的一类（用户只会说
         「选了没用」）。所以直接断言送进模型的 instruct 里两句都在。
+
+        ⚠️ 只对**语言档**成立。方言档走另一条分支，见下一个用例。
+        """
+        backend, fake = voxcpm2_backend()
+        backend.synthesize("hi", "zh", tone="lively", style="zh")
+        instruct = fake.calls[0]["kwargs"].get("instruct", "")
+        self.assertIn(backends.TONE_INSTRUCTS["lively"], instruct, instruct)
+        self.assertIn(backends.STYLE_INSTRUCTS["zh"], instruct, instruct)
+
+    def test_a_dialect_instruct_is_the_bare_name_and_nothing_else(self):
+        """方言档的 instruct **只能是方言名本身**（v0.16.0 的实测结论）。
+
+        原来往方言指令里塞「用四川话说，地道四川口音」＋语气描述，正是官方
+        cookbook 的 "Keep Instructions Simple" 警告的那类啰嗦描述，实测
+        **出来的根本不是四川话**。改成只写方言名之后 jason 验收「效果不错」。
+
+        ⚠️ 这条测试是**故意**钉住「语气描述不进方言档」的：看着像漏了语气，
+        实际是踩过坑才砍掉的。要改回去得先拿到人耳验收，别顺手改绿。
         """
         backend, fake = voxcpm2_backend()
         backend.synthesize("hi", "zh", tone="lively", style="yue")
         instruct = fake.calls[0]["kwargs"].get("instruct", "")
-        self.assertIn(backends.TONE_INSTRUCTS["lively"], instruct, instruct)
-        self.assertIn(backends.STYLE_INSTRUCTS["yue"], instruct, instruct)
+        self.assertEqual(instruct.strip(), backends.STYLE_INSTRUCTS["yue"])
+        self.assertNotIn(backends.TONE_INSTRUCTS["lively"], instruct, instruct)
+
+    def test_every_dialect_style_takes_the_bare_name_branch(self):
+        """`DIALECT_STYLES` 里每一条都得走裸方言名那条分支。"""
+        for style in sorted(backends.DIALECT_STYLES):
+            with self.subTest(style=style):
+                backend, fake = voxcpm2_backend()
+                backend.synthesize("hi", "zh", tone="lively", style=style)
+                instruct = fake.calls[0]["kwargs"].get("instruct", "")
+                self.assertEqual(instruct.strip(), backends.STYLE_INSTRUCTS[style])
 
 
+def _has_numpy():
+    try:
+        import numpy  # noqa: F401
+    except ImportError:
+        return False
+    return True
+
+
+class CacheLimitTests(unittest.TestCase):
+    """缓存上限「到底设上了没有」。
+
+    ⚠️ 这组测试的存在理由是一次**报喜不报忧**：v0.17.0 的 `/health` 把
+    **我们想要的** 256 当成事实报出去，而 MLX 根本没有 `get_cache_limit()`
+    可以读回（实测 0.32.2：两个命名空间都没有）。调用失败时它照样报 256。
+    而且失败**真的会发生**：`mx.metal.*` 已废弃，将来被删就静默失效。
+    """
+
+    def _mlx_with(self, setter=None, metal_setter=None, with_metal=True):
+        core = types.ModuleType("mlx.core")
+        if setter is not None:
+            core.set_cache_limit = setter
+        if with_metal:
+            core.metal = types.SimpleNamespace(set_cache_limit=metal_setter)
+        # `_mlx_memory()` 要读这三个数：缺了它会走 except 返回 None（那是它
+        # 「读数拿不到」的正常行为），于是测试以看不懂的 TypeError 失败，
+        # 而不是告诉你「假模块不够真」。
+        core.get_active_memory = lambda: 100 * 1024 * 1024
+        core.get_cache_memory = lambda: 0
+        core.get_peak_memory = lambda: 200 * 1024 * 1024
+        return {"mlx": types.ModuleType("mlx"), "mlx.core": core}
+
+    def test_the_current_api_wins_over_the_deprecated_one(self):
+        """两个都在时必须走 `mx.set_cache_limit`（`mx.metal.*` 会被删）。"""
+        calls = []
+        modules = self._mlx_with(
+            setter=lambda n: calls.append(("new", n)),
+            metal_setter=lambda n: calls.append(("deprecated", n)),
+        )
+        with patch.dict(sys.modules, modules):
+            api, error = backends.install_cache_limit()
+        self.assertEqual(api, "mx.set_cache_limit")
+        self.assertIsNone(error)
+        self.assertEqual(calls, [("new", backends.CACHE_LIMIT_BYTES)])
+        self.assertTrue(backends.CACHE_LIMIT_STATE["installed"])
+
+    def test_the_deprecated_api_still_works_for_old_mlx(self):
+        """老 mlx 只有 `mx.metal`：还得能设上，但**要能看出是谁设的**。"""
+        calls = []
+        modules = self._mlx_with(metal_setter=lambda n: calls.append(n))
+        with patch.dict(sys.modules, modules):
+            api, _ = backends.install_cache_limit()
+        self.assertEqual(api, "mx.metal.set_cache_limit")
+        self.assertEqual(calls, [backends.CACHE_LIMIT_BYTES])
+        self.assertEqual(backends.CACHE_LIMIT_STATE["api"], "mx.metal.set_cache_limit")
+
+    def test_a_failure_is_recorded_and_never_reported_as_success(self):
+        """设不上时必须留痕 —— 这是这条测试唯一在守的东西。"""
+        def boom(_):
+            raise AttributeError("no such method")
+
+        modules = self._mlx_with(setter=boom, metal_setter=boom)
+        with patch.dict(sys.modules, modules):
+            api, error = backends.install_cache_limit()
+        self.assertIsNone(api)
+        self.assertIsNotNone(error)
+        self.assertFalse(backends.CACHE_LIMIT_STATE["installed"])
+        self.assertIn("no such method", backends.CACHE_LIMIT_STATE["error"])
+
+    def test_health_says_whether_the_limit_is_actually_in_place(self):
+        """`/health` 里那三个字段必须跟着真实结果走。"""
+        backend, _ = voxcpm2_backend()
+        with patch.dict(sys.modules, self._mlx_with(setter=lambda n: None)):
+            backends.install_cache_limit()
+            report = backend._mlx_memory()
+        self.assertTrue(report["cache_limit_set"])
+        self.assertEqual(report["cache_limit_api"], "mx.set_cache_limit")
+        self.assertIsNone(report["cache_limit_error"])
+
+        with patch.dict(sys.modules, self._mlx_with(setter=lambda n: (_ for _ in ()).throw(OSError("boom")))):
+            backends.install_cache_limit()
+            report = backend._mlx_memory()
+        self.assertFalse(report["cache_limit_set"])
+        self.assertIsNone(report["cache_limit_api"])
+        self.assertIn("boom", report["cache_limit_error"])
+
+
+@unittest.skipUnless(_has_numpy(), "需要 numpy：没有它 normalize_loudness 是恒等函数，这三条测不到东西")
 class LoudnessTests(unittest.TestCase):
-    """响度归一：直接治「声量飘忽」（实测不归一时 RMS 差 4.54 倍）。"""
+    """响度归一：直接治「声量飘忽」（实测不归一时 RMS 差 4.54 倍）。
+
+    ⚠️ **没 numpy 时这三条没有意义**，而且症状会骗人。`normalize_loudness`
+    在 `ImportError` 分支里**原样返回**（裸 Python 的 `say` 后端用不到它），
+    于是：
+      - `test_quiet_and_loud_inputs_come_out_at_the_same_level` 报
+        **「RMS 差 10 倍」**——看着像响度归一真坏了；
+      - 另外两条**假绿**（恒等输出恰好满足断言）——永远不会失败。
+    实测确认（2026-09-15，把 `sys.modules['numpy']` 置 None 复现）：
+    `rms(quiet) = 0.01` vs `TARGET_RMS = 0.1`，与当时看到的失败一模一样。
+    **所以整类显式跳过并说清原因**，而不是给一个会被误读成产品缺陷的红、
+    或一个不会失败的绿。
+
+    ⚠️ 本机三个解释器（`/usr/bin/python3` 3.9.6 / venv 3.11.15 / 3.12.13）
+    **都有 numpy**，所以在这里它正常跑；上面那个失败是在**某个没有 numpy 的
+    解释器**下出现的，**具体是哪一个没有查实**（`~/.pyenv/versions/3.11.9`
+    在该路径下不存在）。不要照抄「非交互 python3 没有 numpy」这种说法——
+    这条**没验证**，而且 `/usr/bin/python3` 反例就在眼前。
+    """
 
     def test_quiet_and_loud_inputs_come_out_at_the_same_level(self):
         quiet = backends.normalize_loudness([0.01, -0.01] * 500)
