@@ -554,6 +554,8 @@ There is no Stream(cpu, 1) in current thread.
 
 数据落在 `~/.agentear/`（`AGENTEAR_DATA` 可覆盖）；ASR 二进制与模型在 `vendor/`（`AGENTEAR_VENDOR` 可覆盖，**不入库**）。
 
+**换机器 / 新环境初始化 / 改动怎么进主干 → [`docs/dev-setup.md`](docs/dev-setup.md)**（含「不在 git 里的东西」清单、**必须由 PR-Daemon 审**的规矩、分支保护实际配置）。
+
 文档阅读顺序：`docs/milestones.md`（里程碑）→ `docs/decisions/`（决策记录，**选型结论以此为准**）→ `docs/benchmarks.md`（实测数据）→ `docs/ingest-design.md`（接入层设计）。`docs/asr-selection.md` 是初版调研，其中的选型结论**已被 ADR-0001 推翻**，仅作历史参考。
 
 仓库在 GitHub 上（`git@github.com:iDoris-ai/AgentEar.git`，分支 `main`）。
