@@ -52,7 +52,7 @@ class TTSError(Exception):
 
 
 #: 归一化目标：约 -20 dBFS 的 RMS。人耳对「一句话比另一句响 4 倍」极其敏感，
-#: 而 VoxCPM2 不同次生成的 RMS 实测能差 **4.54 倍**（`vendor/models/talk/measure_f0.py`）。
+#: 而 VoxCPM2 不同次生成的 RMS 实测能差 **4.54 倍**（`scripts/measure-f0.py`）。
 #: -20 dBFS ≈ 0.1 的 RMS：够响、又给峰值留了 6dB 以上余量。
 TARGET_RMS = 0.1
 #: 归一化后的峰值上限。**必须留**：只按 RMS 拉满会把峰值推过 1.0 削波成破音，

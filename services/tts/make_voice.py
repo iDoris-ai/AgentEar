@@ -4,7 +4,7 @@
 ## 为什么需要它
 
 jason 2026-09-14 的反馈：「声量和男生女声、声量的高低……都飘忽不定」。
-实测（`vendor/models/talk/measure_f0.py`）确认了：同一批句子生成三次，
+实测（`scripts/measure-f0.py`）确认了：同一批句子生成三次，
 **F0 中位数 142–292Hz、极差 65%，有一次落在男声带；RMS 差 4.54 倍**。
 
 根因是 VoxCPM2 是**零样本**模型：不给参考音频时，每次生成都重新采样一个说话人。
@@ -86,7 +86,7 @@ def read_wav(path):
 
 
 def analyze(samples, rate=48000):
-    """F0 中位数 + RMS + 浊音帧数。判据与 `measure_f0.py` 同一套。"""
+    """F0 中位数 + RMS + 浊音帧数。判据与 `scripts/measure-f0.py` 同一套。"""
     frame, hop = 1024, 512
     f0s = []
     for start in range(0, max(0, len(samples) - frame), hop):
