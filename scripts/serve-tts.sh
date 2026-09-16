@@ -51,7 +51,7 @@ BACKEND="${AGENTEAR_TTS_BACKEND:-voxcpm2}"
 [ -x "$VENV/bin/python" ] || { echo "!! 环境没备好，先跑 scripts/setup-talk.sh" >&2; exit 1; }
 
 if [ "$BACKEND" = "voxcpm2" ] && [ ! -f "$MODEL/config.json" ]; then
-  echo "!! 找不到 VoxCPM2 模型 $MODEL（档位 ${QUANT}）" >&2
+  echo "!! 找不到 VoxCPM2 模型 ${MODEL}（档位 ${QUANT}）" >&2
   # 报错要说清**下一步跑哪条命令**，而且要带上档位——只说「先跑 setup-talk.sh」
   # 会让人拿着 8bit 的目录去下 4bit，然后还是起不来。
   echo "   下这一档：AGENTEAR_TTS_QUANT=$QUANT scripts/setup-talk.sh" >&2
@@ -70,14 +70,31 @@ fi
 EXTRA=()
 if [ "$BACKEND" = "voxcpm2" ] && [ -d "$VOICES_DIR" ]; then
   EXTRA+=(--voices-dir "$VOICES_DIR")
-  if [ -f "$VOICES_DIR/$VOICE.wav" ] && [ -f "$VOICES_DIR/$VOICE.json" ]; then
-    EXTRA+=(--voice "$VOICE")
-    echo "音色库 $VOICES_DIR，钉住 $VOICE"
+  if [ -f "$VOICES_DIR/${VOICE}.wav" ] && [ -f "$VOICES_DIR/${VOICE}.json" ]; then
+    EXTRA+=(--voice "${VOICE}")
+    echo "音色库 ${VOICES_DIR}，钉住 ${VOICE}"
   else
-    echo "⚠️ 音色库里没有 $VOICE（$VOICES_DIR），交给边车选默认那条" >&2
+    # ⚠️ **配置里那条音色不在库里时，兜底用库里第一条，而不是让服务起不来。**
+    #
+    # 踩过两次：
+    # ① 用户把参考音频改名（jason 把 female_zh_02 改成「女声」）之后，
+    #    写死的默认名就对不上了；
+    # ② **`echo "…${VOICE}（…)"` 里变量后面紧跟全角括号，bash 3.2 会把多字节
+    #    字符当成变量名的一部分**（`VOICE\xef\xbc\x88`），`set -u` 下直接
+    #    「unbound variable」退出——**整个边车起不来**。所以下面所有变量都加花括号。
+    #
+    # 失败方向要选对：**宁可音色挑错，也不能没声音**（挑错能听见、能改；
+    # 起不来是静默的——日志里只有一行 shell 报错）。
+    FALLBACK="$(ls "${VOICES_DIR}"/*.wav 2>/dev/null | head -1 | xargs -I{} basename {} .wav)"
+    if [ -n "${FALLBACK}" ]; then
+      EXTRA+=(--voice "${FALLBACK}")
+      echo "⚠️ 音色库里没有「${VOICE}」（${VOICES_DIR}），改用第一条：${FALLBACK}" >&2
+    else
+      echo "⚠️ 音色库是空的（${VOICES_DIR}）→ 每次生成会随机换说话人" >&2
+    fi
   fi
 else
-  echo "⚠️ 没有音色库（$VOICES_DIR）→ 每次生成会随机换说话人。" >&2
+  echo "⚠️ 没有音色库（${VOICES_DIR}）→ 每次生成会随机换说话人" >&2
   echo "   造一条参考音频：services/tts/make_voice.py --help   或指定 AGENTEAR_TTS_VOICES_DIR" >&2
 fi
 
