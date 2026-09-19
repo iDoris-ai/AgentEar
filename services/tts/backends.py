@@ -697,9 +697,9 @@ class VoxCpm2Backend:
         for name, entry in self.voices.entries.items():
             started = time.monotonic()
             try:
-                self._ref_cache[name] = refcache.build_ref_cache(
-                    self._model, str(entry["wav"]), entry.get("ref_text")
-                )
+                # 不传 ref_text——参考音色克隆这条路径（Mode 3）根本不读它，
+                # 见 refcache.build_ref_cache 的 docstring。
+                self._ref_cache[name] = refcache.build_ref_cache(self._model, str(entry["wav"]))
             except Exception as error:  # noqa: BLE001 - this voice falls back, others still try
                 print(f"⚠️ 音色 {name!r} 的参考缓存建立失败（{error!r}），这个音色每次都会重新处理参考音色", file=sys.stderr)
                 continue
@@ -772,11 +772,20 @@ class VoxCpm2Backend:
                 return audio, sample_rate or self.sample_rate
             except TTSError:
                 raise
-            except Exception as error:  # noqa: BLE001 - 退回老路必须有输出（T3.4.8 的教训）
+            except Exception as error:  # noqa: BLE001 - 捕获到异常就退回老路（T3.4.8 的教训）
+                # ⚠️ **把这个音色的缓存直接扔掉，不是只这一轮不用它。**
+                # 失败原因大概率是确定性的（mask 补丁没打上、模型内部形状变了、
+                # mlx_audio 升级后接口不兼容……），留着它只会让**以后每一次**
+                # 这个音色的请求都先白跑一遍缓存路径、再退回慢路径——比直接
+                # 从一开始就退回慢路径更差。一次失败就永久禁用，下次边车重启
+                # 会重新尝试预热。
+                self._ref_cache.pop(entry["name"], None)
                 _release_mlx_cache()
                 log_once(
                     f"音色 {entry['name']!r} 的参考缓存续接失败（{error!r}），"
-                    "这一轮退回未缓存的合成路径（慢，但正确）"
+                    "这个音色本轮起改用未缓存的合成路径（慢，但正确）；"
+                    "**不覆盖原生调用卡死/挂起的情况**——那种失败走的是 "
+                    "synthesize() 自己的 timeout，不经过这里"
                 )
         return self._generate_uncached(text, instruct, entry)
 

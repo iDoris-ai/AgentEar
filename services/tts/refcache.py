@@ -1,12 +1,19 @@
 """Reference-voice forward-pass caching for VoxCPM2 (ADR-0009 §5.1, T3.4.13 Phase 2).
 
-**What this buys**: every ``VoxCPM2.Model.generate()`` call re-encodes the whole
-reference audio + reference text through ``base_lm``'s initial forward pass —
-measured 2026-09-19 at **~2.8 s, regardless of how short the reply is**
-(``docs/decisions/0009-tts-chunked-streaming.md`` §3.3). That cost is identical
-every time the *same* reference is used, so it is wasted work: this module runs
-it **once per voice**, keeps the resulting KV-cache resident, and has later
-requests continue from it instead of starting over.
+**What this buys**: every ``VoxCPM2.Model.generate()`` call re-encodes the
+reference **audio** — its whole duration, turned into a long latent sequence —
+through ``base_lm``'s initial forward pass. Measured 2026-09-19 at **~2.8 s**
+for a ~99 s reference clip, regardless of how short the reply is
+(``docs/decisions/0009-tts-chunked-streaming.md`` §3.3). ⚠️ **Not** the
+reference *text*: Mode 3 (see ``build_ref_cache``'s docstring) never reads
+``ref_text`` at all — an earlier draft of this module's docs blamed a
+"465-character reference text" for the cost, which was wrong and has been
+corrected; the two known voices' warmup times (男声 3.56 s / 98.7 s audio vs.
+女声 1.05 s / 10.9 s audio) track audio duration, not any text length. That
+cost is identical every time the *same* reference audio is used, so it is
+wasted work: this module runs it **once per voice**, keeps the resulting
+KV-cache resident, and has later requests continue from it instead of
+starting over.
 
 Spike results (``spike/t3413-tts-refcache/``, 2026-09-19): total synthesis time
 drops from ~4.2–4.5 s to ~1.2–1.4 s for short replies — about a 3x speedup, not
@@ -108,13 +115,26 @@ def _scale_emb(model):
     return model.args.lm_config.scale_emb if model.args.lm_config.use_mup else 1.0
 
 
-def build_ref_cache(model, ref_audio_path, ref_text):
+def build_ref_cache(model, ref_audio_path):
     """Run the reference-only forward pass once and keep the resulting cache.
 
     Mirrors the first half of ``VoxCPM2.Model.generate()``'s "Mode 3:
     Reference cloning only" branch, stopping right before any of the caller's
     own text would be appended. Raises on any unexpected model shape — the
     caller must catch and fall back (see module docstring).
+
+    ⚠️ **Takes no ``ref_text`` argument — this is not an oversight.** Mode 3
+    never reads it (only Mode 2/4, "continuation", read `prompt_text`/
+    `ref_text` into `combined_text`; verified against ``mlx_audio`` 0.5.1's
+    ``voxcpm2.py`` ``elif has_ref:`` branch, which only touches
+    ``ref_audio``). Cost accounting in ``docs/decisions/0009-...`` was
+    corrected 2026-09-19 after a review caught this: the ~2.8 s fixed cost
+    comes from encoding the **reference audio's own duration** into a long
+    latent sequence and running that through ``base_lm``'s initial forward
+    pass — not from any reference *text*. This matches the measured warmup
+    times for the two known voices: 男声 (98.7 s reference) took 3.56 s to
+    warm, 女声 (10.9 s reference) took 1.05 s — same direction as audio
+    duration, nothing to do with either voice's ``ref_text`` length.
     """
     ref_feat = model._encode_wav(ref_audio_path, padding_mode="right")
     ref_tokens, ref_feats, ref_t_mask, ref_a_mask = model._make_ref_prefix(ref_feat)

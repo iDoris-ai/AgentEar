@@ -458,6 +458,41 @@ class RefCacheWiringTests(unittest.TestCase):
             backends.validate_wav_bytes(data)
             self.assertEqual(len(fake.calls), 1, "缓存续接失败要退回未缓存路径，不能就此没有声音")
             self.assertEqual(fake.calls[0]["text"], "你好世界")
+            self.assertNotIn(
+                "男声", backend._ref_cache,
+                "失败要把这个音色的缓存直接扔掉，不能让下一次请求还去踩同一个坑"
+                "（先白跑一遍缓存路径、再退回慢路径，比一开始就退回慢路径更差）",
+            )
+
+    def test_a_second_failure_after_eviction_does_not_touch_refcache_again(self):
+        # 上一条测试证明失败会把缓存扔掉；这一条证明扔掉之后就真的不会再碰
+        # `refcache.generate_with_cache` 了——不是"扔了但还是会再试一次"。
+        with voice_library_dir() as voices_dir:
+            backend, fake = voxcpm2_backend(voices_dir=voices_dir)
+            import refcache
+
+            backend._ref_cache["男声"] = object()
+            with patch.object(refcache, "generate_with_cache", side_effect=RuntimeError("boom")) as mock_generate:
+                backend.synthesize("第一次", "zh", voice="男声")
+                backend.synthesize("第二次", "zh", voice="男声")
+            self.assertEqual(mock_generate.call_count, 1, "第一次失败就该被永久禁用，第二次请求不该再摸一次缓存路径")
+            self.assertEqual(len(fake.calls), 2, "两次请求都该落到未缓存路径")
+
+    def test_cache_object_identity_is_reused_across_successful_calls(self):
+        # 证明"缓存只建一次、之后反复复用"，不是每次请求偷偷重建或替换。
+        with voice_library_dir() as voices_dir:
+            backend, fake = voxcpm2_backend(voices_dir=voices_dir)
+            import refcache
+
+            sentinel = object()
+            backend._ref_cache["男声"] = sentinel
+            with patch.object(refcache, "generate_with_cache", return_value=([0.0], 48000)) as mock_generate:
+                backend.synthesize("第一句", "zh", voice="男声")
+                backend.synthesize("第二句", "zh", voice="男声")
+            self.assertEqual(mock_generate.call_count, 2)
+            self.assertIs(mock_generate.call_args_list[0].args[1], sentinel)
+            self.assertIs(mock_generate.call_args_list[1].args[1], sentinel, "第二次调用应该复用同一份缓存对象，不是重建的")
+            self.assertEqual(fake.calls, [], "两次都该走缓存路径，一次都不该落到未缓存的 model.generate()")
 
     def test_unknown_voice_has_no_cache_entry_to_use(self):
         # `entry` 为 None（音色库为空）时，缓存分支必须整个跳过而不是报错。
