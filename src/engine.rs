@@ -98,8 +98,8 @@ pub struct BuiltinEngine {
 }
 
 impl BuiltinEngine {
-    pub fn new(vendor: &Path) -> Result<Self> {
-        Ok(Self { inner: Asr::new(vendor)? })
+    pub fn new(vendor: &Path, data_root: Option<&Path>) -> Result<Self> {
+        Ok(Self { inner: Asr::new(vendor, data_root)? })
     }
 }
 
@@ -301,17 +301,23 @@ fn parse_speech_output(stdout: &str) -> Result<Transcript> {
     }
 }
 
-/// 从 `terms.json` 取纯拉丁词，拼成 `--context`。
+/// 从 `terms.json` 取纯拉丁词，拼成一段 initial prompt / context 字符串。
 ///
-/// **只取纯拉丁的**：含中文的 alias（`我的妈book`）对 Qwen3-ASR 的
-/// 「保持拉丁书写」提示没有帮助，只是白占 token。
+/// **两个调用方**：Qwen3-ASR（`SpeechSwiftEngine` 的 `--context`）和
+/// whisper（`asr.rs` 的 `Asr::transcribe_thai`，T3.2.1 起接上，见
+/// `docs/data/thai-corpus-arm-2026-09/RESULTS.md`）——两边共用同一份提取
+/// 逻辑和同一个 40 词上限，不是各自拼一份。
+///
+/// **只取纯拉丁的**：含中文的 alias（`我的妈book`）对「保持拉丁书写」这个
+/// 提示没有帮助，只是白占 token/上下文长度。
 ///
 /// 上限 40 个词。`RESULTS.md` 实测过 whisper 侧的长度拐点：
-/// 20–40 词稳定有收益，85 词往后明确有害，100 词能把纯泰语 CER 从 3.9% 打到 22.2%。
-/// ⚠️ **那条曲线是 whisper 的，Qwen3-ASR 侧还没测**——这里沿用同一个上限
-/// 是保守取值，不是实测结论。`terms.json` 是用户会自己编辑的文件，
-/// 只会越来越长，不设上限的话某天会毫无征兆地变差。
-fn latin_context_from_terms(data_root: &Path) -> String {
+/// 20–40 词稳定有收益（三格都是 2.2%，30 附近最好），85 词往后明确有害，
+/// 100 词能把纯泰语 CER 从 3.9% 打到 22.2%。⚠️ **这条曲线是用 whisper 测的**——
+/// Qwen3-ASR 侧沿用同一个上限是保守取值，不是它自己的实测结论；
+/// whisper 这一侧则是这条曲线的直接依据，不是借用。`terms.json` 是用户会
+/// 自己编辑的文件，只会越来越长，不设上限的话某天会毫无征兆地变差。
+pub(crate) fn latin_context_from_terms(data_root: &Path) -> String {
     const MAX_WORDS: usize = 40;
     let terms = crate::terms::load(data_root);
     let mut entries: Vec<String> = Vec::new();
@@ -367,7 +373,7 @@ pub fn build(
     data_root: Option<&Path>,
 ) -> Result<Box<dyn AsrEngine>> {
     match backend {
-        AsrBackend::Builtin => Ok(Box::new(BuiltinEngine::new(vendor)?)),
+        AsrBackend::Builtin => Ok(Box::new(BuiltinEngine::new(vendor, data_root)?)),
         AsrBackend::SpeechSwift => Ok(Box::new(SpeechSwiftEngine::new(data_root))),
     }
 }

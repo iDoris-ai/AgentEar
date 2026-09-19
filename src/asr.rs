@@ -83,6 +83,16 @@ pub struct Asr {
     /// 主链路照常工作。老版本升级上来时 vendor 里没有这个文件，
     /// 那时候不该连启动都失败。
     whisper: PathBuf,
+    /// 泰语 code-switch 的 initial prompt 要用的数据目录（T3.2.1，见
+    /// `engine::latin_context_from_terms`）。`None` = 没有术语表可用。
+    ///
+    /// ⚠️ **存路径，不存算好的字符串**——codex 评审抓出来的：如果在这里把
+    /// prompt 算一次缓存住，用户运行期间编辑 `terms.json` 就要等进程重启
+    /// 才生效，跟 M2 术语纠错「每次都重新读术语表，改完下次录音即生效，
+    /// 不用重启」（`main.rs` 里录音处理那段的注释）的承诺不一致。改成存
+    /// `data_root`，每次转写时现算——多的开销是一次小文件读取 + 字符串
+    /// 过滤，相对一次上秒的 whisper 转写可以忽略。
+    data_root: Option<PathBuf>,
 }
 
 /// 一次转写的产物。
@@ -98,12 +108,16 @@ pub struct Transcript {
 }
 
 impl Asr {
-    pub fn new(vendor: &Path) -> Result<Self> {
+    /// `data_root` 用来读 `terms.json`，取里面的拉丁词当泰语 code-switch 的
+    /// initial prompt。传 `None`（比如还没跑过 `--diagnose` 之外的一次性
+    /// 命令）等价于没有术语表——照样能转写，只是拿不到 code-switch 的收益。
+    pub fn new(vendor: &Path, data_root: Option<&Path>) -> Result<Self> {
         let a = Self {
             bin: vendor.join("bin/llama-funasr-sensevoice"),
             model: vendor.join("models/sensevoice-small-q8.gguf"),
             vad: vendor.join("models/fsmn-vad.gguf"),
             whisper: vendor.join("bin/whisper-cli"),
+            data_root: data_root.map(Path::to_path_buf),
         };
         // 只校验主链路。whisper 的缺失留到真要用泰语时再报——
         // 见 whisper 字段的说明。
@@ -155,6 +169,11 @@ impl Asr {
     /// 解码参数**照抄 ADR-0004 §3 的基线**（线程 4、贪心 beam 1）——
     /// 那张 RTF/RSS 表和 §4 的 CER 都是在这组参数下测的。改这里的任何一个
     /// 数字，入库的数据就不再描述产品的实际行为了。
+    ///
+    /// **T3.2.1（2026-09-19）加了 `--prompt`**：夹英文 CER 31.1%→18.4%、
+    /// 英文词命中 8%→51%、纯泰语还从 3.9% 略降到 3.1%——不是解码参数的功劳
+    /// （见下），是给模型一个「保持拉丁书写」的语域提示。
+    /// 依据、40 词护栏的来源：`docs/data/thai-corpus-arm-2026-09/RESULTS.md`。
     fn transcribe_thai(&self, wav: &Path) -> Result<Transcript> {
         if !self.whisper.exists() {
             bail!(
@@ -168,22 +187,36 @@ impl Asr {
             bail!("泰语模型还没下载：{}", model.display());
         }
 
-        let out = Command::new(&self.whisper)
-            .arg("-m").arg(&model)
+        let mut cmd = Command::new(&self.whisper);
+        cmd.arg("-m").arg(&model)
             .arg("-f").arg(wav)
             // 强制泰语，不让它自己猜。模型是泰语微调的，猜错的代价远大于收益。
             .arg("-l").arg("th")
             .arg("-t").arg("4")
             // 贪心解码：beam 1 + best-of 1。**两个都要给**——
             // `-bo` 默认是 5，只给 `-bs 1` 的话温度回退时仍会采样五次，
-            // 那就不是基线测的那套解码参数了。
+            // 那就不是基线测的那套解码参数了。**不要动这两个数字**：
+            // RESULTS.md 实测过换默认 beam search 只值 2 个词、0.3 个百分点，
+            // 解码参数不是 code-switch 问题的根因，下面的 `--prompt` 才是。
             .arg("-bs").arg("1")
             .arg("-bo").arg("1")
             // -np：只输出结果，不打进度和模型信息
             // -nt：不要时间戳。**这两个一起才够**——只给 -nt 的话
             //      加载日志照样会混进 stdout。
             .arg("-np")
-            .arg("-nt")
+            .arg("-nt");
+        // 现算，不用缓存：`terms.json` 是运行时可编辑文件，跟 M2 纠错
+        // 「每次都重新读、改完下次即生效」的承诺保持一致（见 `data_root`
+        // 字段的说明）。
+        let thai_prompt = self
+            .data_root
+            .as_deref()
+            .map(crate::engine::latin_context_from_terms)
+            .unwrap_or_default();
+        if !thai_prompt.is_empty() {
+            cmd.arg("--prompt").arg(&thai_prompt);
+        }
+        let out = cmd
             .output()
             .with_context(|| format!("启动 {} 失败", self.whisper.display()))?;
 
@@ -765,5 +798,118 @@ mod whisper_tests {
     fn asr_lang_serializes_as_snake_case() {
         assert_eq!(serde_json::to_string(&AsrLang::Auto).unwrap(), "\"auto\"");
         assert_eq!(serde_json::to_string(&AsrLang::Thai).unwrap(), "\"thai\"");
+    }
+
+    /// T3.2.1：`Asr::new` 要把 `data_root` 存下来，不能吞掉或提前算死——
+    /// 提前算死（缓存成字符串）会导致用户运行期间编辑 `terms.json` 不生效，
+    /// 直到重启才行，这条是 codex 评审抓出来的真问题，`transcribe_thai`
+    /// 现在是每次转写现算，这里只测「构造时把路径原样存对了」。
+    /// `latin_context_from_terms` 本身的提取/40 词封顶逻辑已经在
+    /// `engine.rs` 测过，不在这里重复测。
+    #[test]
+    fn new_stores_the_data_root_for_later_per_call_lookup() {
+        let vendor = crate::testutil::tmpdir("agentear-asr-vendor");
+        std::fs::create_dir_all(vendor.join("bin")).unwrap();
+        std::fs::create_dir_all(vendor.join("models")).unwrap();
+        // `Asr::new` 只检查这三个文件存不存在，不校验内容。
+        std::fs::write(vendor.join("bin/llama-funasr-sensevoice"), b"").unwrap();
+        std::fs::write(vendor.join("models/sensevoice-small-q8.gguf"), b"").unwrap();
+        std::fs::write(vendor.join("models/fsmn-vad.gguf"), b"").unwrap();
+
+        let data_root = crate::testutil::tmpdir("agentear-asr-data");
+        let a = Asr::new(&vendor, Some(&data_root)).unwrap();
+        assert_eq!(a.data_root.as_deref(), Some(data_root.as_path()));
+    }
+
+    /// 没有 `data_root`（`None`）时不能崩——只是没有 code-switch 收益，
+    /// 不是"泰语识别整个不可用"。这条边界之前是隐含的，写一条钉住。
+    #[test]
+    fn new_with_no_data_root_is_not_a_panic() {
+        let vendor = crate::testutil::tmpdir("agentear-asr-vendor-none");
+        std::fs::create_dir_all(vendor.join("bin")).unwrap();
+        std::fs::create_dir_all(vendor.join("models")).unwrap();
+        std::fs::write(vendor.join("bin/llama-funasr-sensevoice"), b"").unwrap();
+        std::fs::write(vendor.join("models/sensevoice-small-q8.gguf"), b"").unwrap();
+        std::fs::write(vendor.join("models/fsmn-vad.gguf"), b"").unwrap();
+
+        let a = Asr::new(&vendor, None).unwrap();
+        assert_eq!(a.data_root, None);
+    }
+
+    /// **真实端到端验证，不是 mock**：真的调 `whisper-cli` + 真的泰语模型，
+    /// 对比「不带 prompt」和「带 prompt（来自真实 terms.json）」两次转写，
+    /// 断言 `--prompt` 真的到了子进程手上、而且真的改变了输出——不是只测
+    /// 「字段算对了」就假设子进程收到了它。
+    ///
+    /// `#[ignore]`：需要这台机器上已经下载好泰语模型
+    /// （`~/.agentear/models/ggml-distill-whisper-th-large-v3-q5_0.bin`，
+    /// 跑 `--fetch-thai`）、`vendor/bin/whisper-cli` 存在、且装了 macOS
+    /// `say`（用来现场合成测试音频，不依赖仓库里没有的真实语料录音——
+    /// 原始 ARM 语料的音频不在这台机器上，见 T3.2.1 在 tasks.md 里的说明）。
+    #[test]
+    #[ignore = "需要真实 whisper-cli + 已下载的泰语模型 + macOS say"]
+    fn prompt_actually_changes_real_whisper_output() {
+        // `cargo test` 的工作目录是仓库根，`vendor/` 通常就在那里——
+        // **除非是在 worktree 里跑**：`vendor/` 被 gitignore 掉，worktree
+        // 里没有，得指到主 checkout（`AGENTEAR_VENDOR`，跟 CLI 自己认的
+        // 环境变量同名，见 `docs/agent/progress.md` 的踩坑记录）。
+        let vendor = std::env::var("AGENTEAR_VENDOR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| PathBuf::from("vendor"));
+        // ⚠️ **不用这台机器上真实的 `~/.agentear/terms.json`**——那是开发者
+        // 自己会编辑的文件，内容不受控，测试会因为"今天 terms.json 里恰好
+        // 有没有 Docker"而变得不确定。造一份内容已知、跟测试句子对得上的，
+        // 让这条测试在任何机器上都可复现。
+        let data_root = crate::testutil::tmpdir("agentear-asr-thai-smoke-data");
+        // `transcribe_thai` 找泰语模型走的是完全独立的一个全局
+        // （`crate::download::DATA_ROOT`），不是 `Asr` 里存的那个
+        // `data_root`——两条线互不相干，这里都要设，缺一个都会失败在
+        // 「模型未初始化」而不是真正测到的东西。真实模型要用真实数据目录
+        // （里面已经下好了），不能用这个临时目录。
+        crate::download::set_data_root(crate::data_root().expect("找不到 home 目录"));
+        let json = serde_json::json!({
+            "version": 2,
+            "terms": [
+                {"canonical": "Docker", "aliases": []},
+                {"canonical": "Kubernetes", "aliases": []},
+                {"canonical": "container", "aliases": []},
+            ],
+        });
+        std::fs::write(crate::terms::path_in(&data_root), serde_json::to_string(&json).unwrap())
+            .unwrap();
+
+        let tmp_wav = crate::testutil::tmpdir("agentear-asr-thai-smoke").join("sample.wav");
+        let tmp_aiff = tmp_wav.with_extension("aiff");
+        let say = std::process::Command::new("say")
+            .args(["-v", "Kanya", "-o"])
+            .arg(&tmp_aiff)
+            .arg("เราใช้ Docker สร้าง container แล้วส่งขึ้น Kubernetes")
+            .status()
+            .expect("启动 say 失败");
+        assert!(say.success(), "say 合成失败");
+        let conv = std::process::Command::new("afconvert")
+            .arg(&tmp_aiff)
+            .arg(&tmp_wav)
+            .args(["-d", "LEI16", "-f", "WAVE", "-r", "16000"])
+            .status()
+            .expect("启动 afconvert 失败");
+        assert!(conv.success(), "afconvert 转码失败");
+
+        // 不带 prompt：data_root = None
+        let a_without = Asr::new(&vendor, None).expect("Asr::new 失败（vendor 里缺文件？）");
+        let without = a_without
+            .transcribe(&tmp_wav, AsrLang::Thai)
+            .expect("转写失败（泰语模型没下载？跑 --fetch-thai）")
+            .text;
+
+        // 带 prompt：真实 terms.json（这台机器上已经在用的那份，不是临时凑的）
+        let a_with = Asr::new(&vendor, Some(&data_root)).expect("Asr::new 失败");
+        let with = a_with.transcribe(&tmp_wav, AsrLang::Thai).expect("转写失败").text;
+
+        assert!(
+            with.contains("Docker") || with.contains("Kubernetes") || with.contains("container"),
+            "带 prompt 应该至少救回一个技术词的拉丁书写，实际输出：{with:?}"
+        );
+        assert_ne!(without, with, "prompt 应该真的改变了输出，不能两次一模一样");
     }
 }
