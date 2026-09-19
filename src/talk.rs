@@ -1800,11 +1800,22 @@ mod tests {
         let handle = std::thread::spawn(move || play_blocking(&wav));
         // 让它真的开始播（afplay 拉起需要几十毫秒）
         std::thread::sleep(Duration::from_millis(600));
+        // **T3.4.2 出口判据「端到端打断延迟 <300ms」在推键式下的量法**：
+        // 从调用 stop_playback() 那一刻（等价于"用户按下录音键那一刻"，
+        // 键盘事件本身的分发延迟不在这里量，是 M1 就跑通的既有链路）
+        // 到 play_blocking 确认返回（等价于"声音真的停了"）之间的时长。
+        let interrupt_started = std::time::Instant::now();
         assert!(stop_playback(), "正在播的时候应该报告「掐掉了」");
         let played = handle.join().unwrap().expect("被打断不该是 Err");
+        let interrupt_latency = interrupt_started.elapsed();
+        eprintln!("端到端打断延迟实测：{interrupt_latency:?}");
         assert!(
             played < Duration::from_secs(4),
             "掐掉之后不该继续播满 5 秒，实测 {played:?}"
+        );
+        assert!(
+            interrupt_latency < Duration::from_millis(300),
+            "端到端打断延迟应 <300ms（T3.4.2 出口判据），实测 {interrupt_latency:?}"
         );
         // 幂等：没有在播的时候调用不该 panic，也不该报告成功
         assert!(!stop_playback(), "没有在播时不该报告掐掉了");
