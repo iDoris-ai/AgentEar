@@ -812,19 +812,43 @@
 
 ---
 
-### T3.2.1 泰语 code-switch：给 whisper 加 initial prompt  `READY`
+### T3.2.1 泰语 code-switch：给 whisper 加 initial prompt  `DONE`（2026-09-19）
 - **实测依据**：[`docs/data/thai-corpus-arm-2026-09/RESULTS.md`](../data/thai-corpus-arm-2026-09/RESULTS.md)
 - 用**已经在发的** `terms.json` 当 whisper 的 `--prompt`：
   夹英文 CER **31.1% → 18.4%**，英文词命中 **8% → 51%**，纯泰语 3.9% → 3.1%。
-  **约 10 行改动，不需要边车，不需要换模型。**
 - ⚠️ **必须带长度护栏，拐点已测**（2026-09-04，见 RESULTS.md §二）：
   **收益可复现的区间是 20–40 词**（三格都是 2.2%，30 附近最好）；
   54–70 词和基线区分不开且不单调（4.2% / 3.1%），**这份数据判不了**；
   85 词明确变差，100 词时连纯泰语都从 3.9% 崩到 22.2%。
   **落地时截到 40 词**——留余量，因为 `terms.json` 是用户会自己编辑的文件，
   只会越来越长。不设上限的话，某天用户多加几十个术语，泰语会毫无征兆地整个变差。
-- 落地前还要：D 方案按 3 遍复核（目前 1 遍，依据是 A 与 3 遍结果逐位一致）。
 - **不要动 `-bs 1 -bo 1`**：实测换默认 beam search 只值 2 个词、0.3 个百分点。
+- **✅ 已落地**：`Asr::new` 新增 `data_root` 参数，构造时算一次
+  `crate::engine::latin_context_from_terms(data_root)`（复用 T3.4 给
+  Qwen3-ASR 写的那份提取逻辑——**不是重新实现**，两个 ASR 后端现在共用
+  同一份「取 terms.json 的拉丁词、40 词封顶」的代码，同一个上限、同一份
+  40 词护栏的实测依据）；`transcribe_thai` 非空时传 `--prompt`。
+- ⚠️ **"D 方案按 3 遍复核"这条前置检查没能按原计划做**：原始 ARM 语料的
+  音频文件不在这台机器上（只有 `manifest.txt`/`reference.tsv` 这些文字记录
+  进了仓库，原始录音没有），没法重跑当年的 CER 测量。**改用能做的验证**：
+  - `say -v Kanya` 合成 3 条不同的泰英混合句子（跟原语料完全无关的新样本），
+    对同一句话分别用 `whisper-cli` 跑「不带 `--prompt`」和「带 `--prompt`」
+    两遍直接对比输出。三句里两句能看到明确改善（"Docker"/"container"/"API"
+    从被音译改为保留拉丁书写），一句效果不明显（临时凑的对照 prompt 词表
+    没覆盖到那句里的词，不是机制失效）——**跟 RESULTS.md 描述的"不是查表
+    替换、是保持拉丁书写的语域提示，覆盖不到的词救不回来"是一致的**，
+    不是新发现，是重新观察到了同一个已知现象。
+  - 同一条样本连续跑 3 次（贪心解码，`-bs 1 -bo 1` 本来就是确定性的），
+    逐字节输出完全一致——**没有采样噪声**，但这验证的是"贪心解码可复现"，
+    不是"CER 数字可复现"，两者不是一回事。
+  - **老实说**：这不等于把 RESULTS.md 里 31.1%→18.4% 那组数字重新坐实了一遍，
+    只是确认了机制在新样本上仍然工作、没有因为这次改动而失效。真要重新
+    核实原始 CER 数字，需要拿到 ARM 那台机器上的原始录音，这不是本次能做的。
+- **代码验证**：新增 `asr::whisper_tests::new_picks_up_the_thai_prompt_from_terms_json`
+  （从临时 `terms.json` 建 `Asr`，断言 `thai_prompt` 里有拉丁词）和
+  `new_with_no_data_root_has_an_empty_prompt_not_a_panic`（`data_root=None`
+  不崩、只是拿不到收益，这条边界之前是隐含的）。`cargo test` 294 passed
+  （292→294）。
 
 ### T3.2.2 泰语模型复评（三方横比）  `BLOCKED`
 - **卡在模型文件**：ADR-0004 的另两个候选（Thonburian medium /

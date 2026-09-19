@@ -83,6 +83,11 @@ pub struct Asr {
     /// 主链路照常工作。老版本升级上来时 vendor 里没有这个文件，
     /// 那时候不该连启动都失败。
     whisper: PathBuf,
+    /// 泰语 code-switch 的 initial prompt（T3.2.1，`terms.json` 里的拉丁词，
+    /// 40 词封顶，见 `engine::latin_context_from_terms`）。空字符串 = 不传
+    /// `--prompt`。在构造时算一次、之后每次转写复用——`terms.json` 转写期间
+    /// 不会变，没必要每次都重新读文件、重新过滤。
+    thai_prompt: String,
 }
 
 /// 一次转写的产物。
@@ -98,12 +103,17 @@ pub struct Transcript {
 }
 
 impl Asr {
-    pub fn new(vendor: &Path) -> Result<Self> {
+    /// `data_root` 用来读 `terms.json`，取里面的拉丁词当泰语 code-switch 的
+    /// initial prompt。传 `None`（比如还没跑过 `--diagnose` 之外的一次性
+    /// 命令）等价于没有术语表——照样能转写，只是拿不到 code-switch 的收益。
+    pub fn new(vendor: &Path, data_root: Option<&Path>) -> Result<Self> {
+        let thai_prompt = data_root.map(crate::engine::latin_context_from_terms).unwrap_or_default();
         let a = Self {
             bin: vendor.join("bin/llama-funasr-sensevoice"),
             model: vendor.join("models/sensevoice-small-q8.gguf"),
             vad: vendor.join("models/fsmn-vad.gguf"),
             whisper: vendor.join("bin/whisper-cli"),
+            thai_prompt,
         };
         // 只校验主链路。whisper 的缺失留到真要用泰语时再报——
         // 见 whisper 字段的说明。
@@ -155,6 +165,11 @@ impl Asr {
     /// 解码参数**照抄 ADR-0004 §3 的基线**（线程 4、贪心 beam 1）——
     /// 那张 RTF/RSS 表和 §4 的 CER 都是在这组参数下测的。改这里的任何一个
     /// 数字，入库的数据就不再描述产品的实际行为了。
+    ///
+    /// **T3.2.1（2026-09-19）加了 `--prompt`**：夹英文 CER 31.1%→18.4%、
+    /// 英文词命中 8%→51%、纯泰语还从 3.9% 略降到 3.1%——不是解码参数的功劳
+    /// （见下），是给模型一个「保持拉丁书写」的语域提示。
+    /// 依据、40 词护栏的来源：`docs/data/thai-corpus-arm-2026-09/RESULTS.md`。
     fn transcribe_thai(&self, wav: &Path) -> Result<Transcript> {
         if !self.whisper.exists() {
             bail!(
@@ -168,22 +183,28 @@ impl Asr {
             bail!("泰语模型还没下载：{}", model.display());
         }
 
-        let out = Command::new(&self.whisper)
-            .arg("-m").arg(&model)
+        let mut cmd = Command::new(&self.whisper);
+        cmd.arg("-m").arg(&model)
             .arg("-f").arg(wav)
             // 强制泰语，不让它自己猜。模型是泰语微调的，猜错的代价远大于收益。
             .arg("-l").arg("th")
             .arg("-t").arg("4")
             // 贪心解码：beam 1 + best-of 1。**两个都要给**——
             // `-bo` 默认是 5，只给 `-bs 1` 的话温度回退时仍会采样五次，
-            // 那就不是基线测的那套解码参数了。
+            // 那就不是基线测的那套解码参数了。**不要动这两个数字**：
+            // RESULTS.md 实测过换默认 beam search 只值 2 个词、0.3 个百分点，
+            // 解码参数不是 code-switch 问题的根因，下面的 `--prompt` 才是。
             .arg("-bs").arg("1")
             .arg("-bo").arg("1")
             // -np：只输出结果，不打进度和模型信息
             // -nt：不要时间戳。**这两个一起才够**——只给 -nt 的话
             //      加载日志照样会混进 stdout。
             .arg("-np")
-            .arg("-nt")
+            .arg("-nt");
+        if !self.thai_prompt.is_empty() {
+            cmd.arg("--prompt").arg(&self.thai_prompt);
+        }
+        let out = cmd
             .output()
             .with_context(|| format!("启动 {} 失败", self.whisper.display()))?;
 
@@ -765,5 +786,49 @@ mod whisper_tests {
     fn asr_lang_serializes_as_snake_case() {
         assert_eq!(serde_json::to_string(&AsrLang::Auto).unwrap(), "\"auto\"");
         assert_eq!(serde_json::to_string(&AsrLang::Thai).unwrap(), "\"thai\"");
+    }
+
+    /// T3.2.1：`Asr::new` 要真的从 `data_root` 读到 `terms.json`、
+    /// 把里面的拉丁词接成 `thai_prompt`——这是新加的那根线，
+    /// `latin_context_from_terms` 本身的提取/40 词封顶逻辑已经在
+    /// `engine.rs` 测过，这里只测「接上了没有」。
+    #[test]
+    fn new_picks_up_the_thai_prompt_from_terms_json() {
+        let vendor = crate::testutil::tmpdir("agentear-asr-vendor");
+        std::fs::create_dir_all(vendor.join("bin")).unwrap();
+        std::fs::create_dir_all(vendor.join("models")).unwrap();
+        // `Asr::new` 只检查这三个文件存不存在，不校验内容。
+        std::fs::write(vendor.join("bin/llama-funasr-sensevoice"), b"").unwrap();
+        std::fs::write(vendor.join("models/sensevoice-small-q8.gguf"), b"").unwrap();
+        std::fs::write(vendor.join("models/fsmn-vad.gguf"), b"").unwrap();
+
+        let data_root = crate::testutil::tmpdir("agentear-asr-data");
+        let json = serde_json::json!({
+            "version": 2,
+            "terms": [{"canonical": "Docker", "aliases": ["docker", "doocca"]}],
+        });
+        std::fs::write(
+            crate::terms::path_in(&data_root),
+            serde_json::to_string(&json).unwrap(),
+        )
+        .unwrap();
+
+        let a = Asr::new(&vendor, Some(&data_root)).unwrap();
+        assert!(a.thai_prompt.contains("Docker"), "prompt 里要有术语表的拉丁词：{}", a.thai_prompt);
+    }
+
+    /// 没有 `data_root`（`None`）时不能崩——只是没有 code-switch 收益，
+    /// 不是"泰语识别整个不可用"。这条边界之前是隐含的，写一条钉住。
+    #[test]
+    fn new_with_no_data_root_has_an_empty_prompt_not_a_panic() {
+        let vendor = crate::testutil::tmpdir("agentear-asr-vendor-none");
+        std::fs::create_dir_all(vendor.join("bin")).unwrap();
+        std::fs::create_dir_all(vendor.join("models")).unwrap();
+        std::fs::write(vendor.join("bin/llama-funasr-sensevoice"), b"").unwrap();
+        std::fs::write(vendor.join("models/sensevoice-small-q8.gguf"), b"").unwrap();
+        std::fs::write(vendor.join("models/fsmn-vad.gguf"), b"").unwrap();
+
+        let a = Asr::new(&vendor, None).unwrap();
+        assert_eq!(a.thai_prompt, "");
     }
 }
