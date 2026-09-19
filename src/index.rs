@@ -629,11 +629,9 @@ mod tests {
     /// 索引整个删掉、重建，结果要一样。
     #[test]
     fn the_index_rebuilds_itself_from_the_markdown_tree() {
-        let root = std::env::temp_dir().join(format!(
-            "agentear-ix-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
-        ));
+        // 同一个模块里还留着一份没迁移的老写法，codex 评审挑出来的——
+        // 跟 tmproot() 用同一个共用函数，理由见 tmproot() 的注释。
+        let root = tmproot();
         let kb = root.join("kb/2026/09/03");
         std::fs::create_dir_all(&kb).unwrap();
         std::fs::write(
