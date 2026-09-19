@@ -425,14 +425,12 @@ mod tests {
         ix
     }
 
+    /// 临时目录走共用的 `testutil`：原来的 `{pid}-{纳秒}` 会撞
+    /// （macOS 时钟分辨率约 1 µs，实测 91.6% 的连续两次取值相同），
+    /// 并行测试因此会互相覆盖对方的文件。见 `testutil::tmpdir` 的说明，
+    /// 以及 `deliver.rs`/`kb.rs` 踩过的同一个坑。
     fn tmproot() -> std::path::PathBuf {
-        let p = std::env::temp_dir().join(format!(
-            "agentear-ix-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
-        ));
-        std::fs::create_dir_all(&p).unwrap();
-        p
+        crate::testutil::tmpdir("agentear-ix")
     }
 
     fn hits(ix: &Index, q: &str) -> usize {
