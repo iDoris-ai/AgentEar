@@ -823,32 +823,51 @@
   **落地时截到 40 词**——留余量，因为 `terms.json` 是用户会自己编辑的文件，
   只会越来越长。不设上限的话，某天用户多加几十个术语，泰语会毫无征兆地整个变差。
 - **不要动 `-bs 1 -bo 1`**：实测换默认 beam search 只值 2 个词、0.3 个百分点。
-- **✅ 已落地**：`Asr::new` 新增 `data_root` 参数，构造时算一次
-  `crate::engine::latin_context_from_terms(data_root)`（复用 T3.4 给
-  Qwen3-ASR 写的那份提取逻辑——**不是重新实现**，两个 ASR 后端现在共用
-  同一份「取 terms.json 的拉丁词、40 词封顶」的代码，同一个上限、同一份
-  40 词护栏的实测依据）；`transcribe_thai` 非空时传 `--prompt`。
+- **✅ 已落地**：`Asr::new` 新增 `data_root` 参数并存下来（`Option<PathBuf>`）；
+  `transcribe_thai` **每次转写现算** `crate::engine::latin_context_from_terms`
+  （复用 T3.4 给 Qwen3-ASR 写的那份提取逻辑——**不是重新实现**，两个 ASR
+  后端现在共用同一份「取 terms.json 的拉丁词、40 词封顶」的代码，同一个
+  上限、同一份 40 词护栏的实测依据）；非空时传 `--prompt`。
+- ⚠️ **一轮 codex 评审抓出一个真问题，已修**：最初的实现在 `Asr::new`
+  构造时就把 prompt 算好缓存成字符串，导致用户运行期间编辑 `terms.json`
+  要等进程重启才生效——跟 M2 纠错「每次都重新读术语表，改完下次录音即
+  生效，不用重启」的既有承诺不一致。改成只存 `data_root`，`transcribe_thai`
+  每次现读现算；多的开销是一次小文件读取，相对一次上秒的 whisper 转写
+  可以忽略。
 - ⚠️ **"D 方案按 3 遍复核"这条前置检查没能按原计划做**：原始 ARM 语料的
   音频文件不在这台机器上（只有 `manifest.txt`/`reference.tsv` 这些文字记录
   进了仓库，原始录音没有），没法重跑当年的 CER 测量。**改用能做的验证**：
   - `say -v Kanya` 合成 3 条不同的泰英混合句子（跟原语料完全无关的新样本），
     对同一句话分别用 `whisper-cli` 跑「不带 `--prompt`」和「带 `--prompt`」
     两遍直接对比输出。三句里两句能看到明确改善（"Docker"/"container"/"API"
-    从被音译改为保留拉丁书写），一句效果不明显（临时凑的对照 prompt 词表
-    没覆盖到那句里的词，不是机制失效）——**跟 RESULTS.md 描述的"不是查表
-    替换、是保持拉丁书写的语域提示，覆盖不到的词救不回来"是一致的**，
-    不是新发现，是重新观察到了同一个已知现象。
+    从被音译改为保留拉丁书写），一句只有部分改善（"API" 被救回、"bug"/
+    "unit test" 没有）。⚠️ **这条最初的解释是错的，一轮 codex 评审挑出来
+    的**：我原来写"覆盖不到的词救不回来，跟 RESULTS.md 一致"，但 RESULTS.md
+    的原话恰恰是"救回了 20 个词，**包括表里没有的词**"——两处描述的其实是
+    不一样的模式（第一句：连不在词表里的词也被救回，符合"语域提示"的说法；
+    第三句：只有在词表里的"API"被救回，更像字面查表）。**老实说**：3 个
+    临时样本谁的模式更能代表真实情况，判不出来，这就是样本量太小的正常
+    表现，不该硬套一个解释让两边看起来一致。
   - 同一条样本连续跑 3 次（贪心解码，`-bs 1 -bo 1` 本来就是确定性的），
     逐字节输出完全一致——**没有采样噪声**，但这验证的是"贪心解码可复现"，
     不是"CER 数字可复现"，两者不是一回事。
   - **老实说**：这不等于把 RESULTS.md 里 31.1%→18.4% 那组数字重新坐实了一遍，
     只是确认了机制在新样本上仍然工作、没有因为这次改动而失效。真要重新
     核实原始 CER 数字，需要拿到 ARM 那台机器上的原始录音，这不是本次能做的。
-- **代码验证**：新增 `asr::whisper_tests::new_picks_up_the_thai_prompt_from_terms_json`
-  （从临时 `terms.json` 建 `Asr`，断言 `thai_prompt` 里有拉丁词）和
-  `new_with_no_data_root_has_an_empty_prompt_not_a_panic`（`data_root=None`
-  不崩、只是拿不到收益，这条边界之前是隐含的）。`cargo test` 294 passed
-  （292→294）。
+- **代码验证**：
+  - `new_stores_the_data_root_for_later_per_call_lookup` / `new_with_no_data_root_is_not_a_panic`：
+    构造时的接线（存对了 `data_root`，`None` 不崩）。
+  - **`prompt_actually_changes_real_whisper_output`（`#[ignore]`，真实
+    端到端，不是 mock）**：这条是 codex 评审点名要求的——原来的两条测试
+    只证明"字段算对了"，没证明"子进程真的收到了 `--prompt`"。新测试真的
+    调 `whisper-cli` + 真实泰语模型 + `say` 现场合成的音频，对比带/不带
+    `--prompt` 的两次转写，断言输出不同、且带 prompt 那次救回了至少一个
+    技术词。为了可复现，**没有用这台机器上真实的 `~/.agentear/terms.json`**
+    （开发者自己会编辑的文件，内容不受控），造了一份内容已知的临时表。
+    手动跑：`AGENTEAR_VENDOR=<主 checkout>/vendor cargo test -- --ignored
+    prompt_actually_changes_real_whisper_output`（worktree 里 `vendor/`
+    被 gitignore，要指到主 checkout）。
+  - `cargo test` 294 passed（292→294，不含 `#[ignore]` 的端到端测试）。
 
 ### T3.2.2 泰语模型复评（三方横比）  `BLOCKED`
 - **卡在模型文件**：ADR-0004 的另两个候选（Thonburian medium /
