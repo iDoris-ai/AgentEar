@@ -90,6 +90,11 @@ cargo build --release
 scripts/bundle.sh        # → dist/AgentEar.app
 ```
 
+> ⚠️ 上面这段是**上游资产**（URL 会漂移，`external-links.yml` 每周查一次）。
+> 想少踩坑（含「换到新机器要搬哪些不在 git 里的东西」「改动怎么进主干」），
+> 看 **[`docs/dev-setup.md`](docs/dev-setup.md)** —— 那份是照着做就能跑起来的清单，
+> 也可以直接从发布包里解出 `AgentEar.app/Contents/Resources/vendor` 当 `vendor/`。
+
 泰语**模型**不用在这里准备——它由 app 按需下载。要自己从上游权重复现那份
 GGML 产物(会校验指纹是否与 ADR-0004 记录一致):
 
