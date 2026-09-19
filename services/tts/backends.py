@@ -387,6 +387,7 @@ class VoiceLibrary:
                     except (OSError, ValueError) as error:
                         meta["ref_text_error"] = str(error)
                 self.entries[wav.stem] = {
+                    "name": wav.stem,
                     "wav": wav,
                     "ref_text": meta.get("ref_text"),
                     "f0_median": meta.get("f0_median"),
@@ -638,6 +639,12 @@ class VoxCpm2Backend:
             self._model = load_model(self.model_id)
             self.load_seconds = time.monotonic() - started
             self.sample_rate = int(getattr(self._model, "sample_rate", 48000))
+            # **同步做，不是"起来之后再说"**：`_warm_ref_caches` 内部把每一步都
+            # 包在自己的 try/except 里，不会让这个构造函数失败；放在
+            # `set_result` 之前是为了让"边车就绪"真正意味着"缓存已经热了"——
+            # 否则调用方以为边车已经可以快速响应，第一批请求却还要跟催热
+            # 抢同一条 MLX 线程。
+            self._warm_ref_caches()
             self._startup.set_result(True)
         except BaseException as error:  # noqa: BLE001 - surfaced to __init__
             self._startup.set_exception(error)
@@ -654,6 +661,59 @@ class VoxCpm2Backend:
                 )
             except BaseException as error:  # noqa: BLE001 - surfaced to the caller
                 future.set_exception(error)
+
+    def _warm_ref_caches(self):
+        """Build a `refcache.RefCache` for every known voice, once, at startup.
+
+        Runs on the MLX thread (same constraint as everything else in this
+        class — MLX streams are thread-local). **All voices in the library**
+        get warmed unconditionally, not just the configured default: there
+        are only two today (男声/女声, see `assets/talk-voices/`), warming
+        both means switching the default via the tray menu stays fast without
+        this class needing to know anything about menu state. If more voices
+        are added later, warming grows with them — no code change needed.
+
+        This is pure optimization. Any failure here (missing model internals
+        on an unexpected `mlx_audio` version, a malformed reference file, the
+        test suite's stub model that only implements `.generate()`) is caught
+        and logged, never raised — `_generate` falls back to the unmodified
+        `self._model.generate()` path for any voice that isn't in the cache,
+        exactly as if this method had never run.
+
+        ⚠️ **No staleness check.** This reads each voice's `.wav`/`.json` once,
+        here, at startup. If a voice's reference file is replaced on disk
+        while this process is still running, the cache keeps serving the old
+        reference until the sidecar restarts. Acceptable under the current
+        assumption that voices are static assets (`assets/talk-voices/`, only
+        changed by shipping a new build or by `make_voice.py` before the
+        sidecar is (re)started) — revisit if that assumption stops holding
+        (e.g. a future "record your own voice" feature that writes into
+        `voices_dir` while the sidecar is live).
+        """
+        if not self.voices.entries:
+            return
+        import sys
+
+        try:
+            import refcache
+        except Exception as error:  # noqa: BLE001 - optimization, not a requirement
+            print(f"⚠️ 参考音色缓存不可用（{error!r}），每次合成都会重新处理参考音色", file=sys.stderr)
+            return
+        try:
+            refcache.patch_multi_token_cache_continuation(self._model)
+        except Exception as error:  # noqa: BLE001 - see docstring
+            print(f"⚠️ 参考音色缓存补丁没打上（{error!r}），每次合成都会重新处理参考音色", file=sys.stderr)
+            return
+        for name, entry in self.voices.entries.items():
+            started = time.monotonic()
+            try:
+                # 不传 ref_text——参考音色克隆这条路径（Mode 3）根本不读它，
+                # 见 refcache.build_ref_cache 的 docstring。
+                self._ref_cache[name] = refcache.build_ref_cache(self._model, str(entry["wav"]))
+            except Exception as error:  # noqa: BLE001 - this voice falls back, others still try
+                print(f"⚠️ 音色 {name!r} 的参考缓存建立失败（{error!r}），这个音色每次都会重新处理参考音色", file=sys.stderr)
+                continue
+            print(f"音色 {name!r} 的参考缓存已建立（{time.monotonic() - started:.2f}s）", file=sys.stderr)
 
     def _load_ref(self, entry):
         """把参考音频交给模型——**给路径，不给数组**。
@@ -677,26 +737,26 @@ class VoxCpm2Backend:
         这就是「换成谁的参考都是同一个机器人声」的真正原因 ——
         跟参考音频的质量、跟 instruct、跟量化档都无关。
 
-        代价：每次合成都让模型重新读一次参考 wav（约 1 MB / 10.9 秒；98 秒的
-        约 9 MB）。相对一次 2.4–6 s 的合成，这点 IO 可以忽略；**正确性优先**。
+        ⚠️ **这条 docstring 曾经写错过一句话，2026-09-19 更正**：「代价是每次合成
+        重读一次参考 wav，相对合成时长可以忽略」——把成本理解成了**文件 I/O**，
+        实际成本是**计算**：每次都要把参考文本重新过一遍 `base_lm` 的初始前向，
+        实测 **~2.8s**，是短句合成里最大的单项开销，不是可忽略的量级
+        （`docs/decisions/0009-tts-chunked-streaming.md` §3.3）。真正省掉这笔
+        重复计算的是 `refcache.py`（`_warm_ref_caches`/`_ref_cache`），不是这里——
+        这个方法本身现在只在**没有可用缓存**时才会被真正用到（见 `_generate`）。
         """
         if entry is None:
             return None, None
         return str(entry["wav"]), entry.get("ref_text")
 
     def _generate(self, text, style, tone, entry):
-        """Collect every segment of the generator into one waveform.
+        """Pick the reference-cached fast path if one exists for this voice,
+        otherwise fall back to the uncached path (`_generate_uncached`).
 
-        ``mlx_audio``'s ``generate`` is a **generator**, not a call returning one
-        result: a long text can come back as several segments that have to be
-        joined in order. Measured on an M1 Max, a short spoken sentence is
-        emitted as a single segment — 2.4-4.2 s from call to full audio — so
-        there is currently nothing to stream to the caller early.
+        The instruct string is computed once here and shared by both paths —
+        it's identical either way, only how the reference gets processed
+        differs (see `refcache.py`'s module docstring for why).
         """
-        chunks = []
-        sample_rate = None
-        # **钉音色**：给了参考音频就走克隆模式，不给才会每次随机换人。
-        ref_audio, ref_text = self._load_ref(entry)
         # ⚠️ **方言档只给方言名，不拼语气描述。**
         #
         # 文档的 "Keep Instructions Simple" 警告：控制指令里加太多复杂描述
@@ -709,6 +769,58 @@ class VoxCpm2Backend:
             instruct = STYLE_INSTRUCTS[style]
         else:
             instruct = f"{TONE_INSTRUCTS[tone]}，{STYLE_INSTRUCTS[style]}"
+
+        # `.get("name")` 不是 `entry["name"]`——虽然 VoiceLibrary 建的每个 entry
+        # 都带 "name"，正常运行时不可能触发 KeyError，但防御性地不假设调用方
+        # 未来传进来的一定是那个精确形状（比如经过 pickle/序列化的 entry）。
+        voice_name = entry.get("name") if entry else None
+        cached = self._ref_cache.get(voice_name) if voice_name else None
+        if cached is not None:
+            try:
+                import refcache
+
+                audio, sample_rate = refcache.generate_with_cache(
+                    self._model, cached, text, instruct, self.MAX_TOKENS
+                )
+                _release_mlx_cache()
+                return audio, sample_rate or self.sample_rate
+            except TTSError:
+                raise
+            except Exception as error:  # noqa: BLE001 - 捕获到异常就退回老路（T3.4.8 的教训）
+                # ⚠️ **把这个音色的缓存直接扔掉，不是只这一轮不用它。**
+                # 失败原因大概率是确定性的（mask 补丁没打上、模型内部形状变了、
+                # mlx_audio 升级后接口不兼容……），留着它只会让**以后每一次**
+                # 这个音色的请求都先白跑一遍缓存路径、再退回慢路径——比直接
+                # 从一开始就退回慢路径更差。一次失败就永久禁用，下次边车重启
+                # 会重新尝试预热。
+                self._ref_cache.pop(voice_name, None)
+                _release_mlx_cache()
+                log_once(
+                    f"音色 {voice_name!r} 的参考缓存续接失败（{error!r}），"
+                    "这个音色本轮起改用未缓存的合成路径（慢，但正确）；"
+                    "**不覆盖原生调用卡死/挂起的情况**——那种失败走的是 "
+                    "synthesize() 自己的 timeout，不经过这里"
+                )
+        return self._generate_uncached(text, instruct, entry)
+
+    def _generate_uncached(self, text, instruct, entry):
+        """Collect every segment of the generator into one waveform.
+
+        ``mlx_audio``'s ``generate`` is a **generator**, not a call returning one
+        result: a long text can come back as several segments that have to be
+        joined in order. Measured on an M1 Max, a short spoken sentence is
+        emitted as a single segment — 2.4-4.2 s from call to full audio — so
+        there is currently nothing to stream to the caller early.
+
+        This is the path every request took before `refcache.py` (T3.4.13
+        Phase 2) — still the only path for a voice whose cache failed to
+        build, or wasn't warmed (e.g. added to the voices directory after
+        this process started; see `_warm_ref_caches`).
+        """
+        chunks = []
+        sample_rate = None
+        # **钉音色**：给了参考音频就走克隆模式，不给才会每次随机换人。
+        ref_audio, ref_text = self._load_ref(entry)
         if ref_audio is None:
             log_once_no_voice()
         try:
