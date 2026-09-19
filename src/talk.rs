@@ -1800,22 +1800,38 @@ mod tests {
         let handle = std::thread::spawn(move || play_blocking(&wav));
         // 让它真的开始播（afplay 拉起需要几十毫秒）
         std::thread::sleep(Duration::from_millis(600));
-        // **T3.4.2 出口判据「端到端打断延迟 <300ms」在推键式下的量法**：
-        // 从调用 stop_playback() 那一刻（等价于"用户按下录音键那一刻"，
-        // 键盘事件本身的分发延迟不在这里量，是 M1 就跑通的既有链路）
-        // 到 play_blocking 确认返回（等价于"声音真的停了"）之间的时长。
-        let interrupt_started = std::time::Instant::now();
+        // ⚠️ **这条量的不是"端到端"打断延迟，一轮 codex 评审指出来的**：
+        // 起点是直接调用 stop_playback()，**不包含**：
+        //   ① 键盘事件从系统分发到 classify_tap 判定完成的延迟——
+        //      `hotkey.rs` 的单击/双击判定窗口本身就有 `DOUBLE_TAP_MAX_MS`
+        //      （500ms）这个量级，真实按键路径比这里量的要长；
+        //   ② 主循环收到"结束一段"信号到调用 stop_playback() 之间的
+        //      channel 分发延迟；
+        //   ③ `play_blocking` 返回到扬声器缓冲区真正播完（听不见了）
+        //      之间的音频设备延迟——这里量的是"线程确认停止"，不是"耳朵
+        //      听到安静"。
+        // 这条测的是**这条链路里我们代码能控制的那一段**（stop_playback
+        // 调用 → play_blocking 感知到并返回），是"端到端"里的一部分，
+        // 不是全部。真正的端到端（物理按键 → 真正听不到声音）需要另外测，
+        // 这条没做到。
+        let internal_interval_started = std::time::Instant::now();
         assert!(stop_playback(), "正在播的时候应该报告「掐掉了」");
         let played = handle.join().unwrap().expect("被打断不该是 Err");
-        let interrupt_latency = interrupt_started.elapsed();
-        eprintln!("端到端打断延迟实测：{interrupt_latency:?}");
+        let internal_interval = internal_interval_started.elapsed();
+        eprintln!("stop_playback() → play_blocking 返回，内部区间实测：{internal_interval:?}");
         assert!(
             played < Duration::from_secs(4),
             "掐掉之后不该继续播满 5 秒，实测 {played:?}"
         );
+        // ⚠️ 这个 300ms 阈值钉的是**上面这段内部区间**，不是 T3.4.2 出口
+        // 判据本身——出口判据要求的是真实的物理按键到声音停止，这条测试
+        // 证明不了那件事，只能证明"我们代码这一段没有引入明显延迟"。
+        // 实测方差 3–24ms 主要来自 `play_blocking` 的 20ms 轮询间隔
+        // （`std::thread::sleep(Duration::from_millis(20))`），不是
+        // kill 系统调用本身的抖动——kill 几乎瞬时，轮询检测到才是瓶颈。
         assert!(
-            interrupt_latency < Duration::from_millis(300),
-            "端到端打断延迟应 <300ms（T3.4.2 出口判据），实测 {interrupt_latency:?}"
+            internal_interval < Duration::from_millis(300),
+            "stop_playback 到 play_blocking 返回的内部区间应 <300ms，实测 {internal_interval:?}"
         );
         // 幂等：没有在播的时候调用不该 panic，也不该报告成功
         assert!(!stop_playback(), "没有在播时不该报告掐掉了");
