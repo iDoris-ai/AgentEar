@@ -11,11 +11,13 @@ import io
 import json
 import struct
 import sys
+import tempfile
 import threading
 import time
 import types
 import unittest
 import wave
+from pathlib import Path
 from unittest.mock import patch
 
 import backends
@@ -52,21 +54,29 @@ class FakeVoxModel:
             yield FakeResult(list(self.samples), self.sample_rate)
 
 
-def voxcpm2_backend(model=None):
+def voxcpm2_backend(model=None, **kwargs):
     """Build a VoxCpm2Backend with mlx and the mlx_audio loader stubbed out.
 
     Both stubs are needed: the backend imports ``mlx.core`` (to own a stream on
     its MLX thread) and ``mlx_audio.tts.utils`` **inside that thread**, so both
     must be importable while ``__init__`` waits for startup.
+
+    ``mlx.nn`` is stubbed too (empty module, nothing calls into it unless a
+    test explicitly exercises ``refcache``'s real body) — ``refcache.py``
+    imports it at module level, and ``_warm_ref_caches``/``_generate`` only
+    reach that import when ``voices_dir`` actually has entries, which most
+    callers here don't pass.
     """
     fake = model or FakeVoxModel()
     core = types.ModuleType("mlx.core")
     core.set_default_stream = lambda stream: None
     core.new_stream = lambda device: "stream"
     core.default_device = lambda: "device"
+    nn_module = types.ModuleType("mlx.nn")
     mlx = types.ModuleType("mlx")
     mlx.__path__ = []
     mlx.core = core
+    mlx.nn = nn_module
     utils = types.ModuleType("mlx_audio.tts.utils")
     utils.load_model = lambda path: fake
     package = types.ModuleType("mlx_audio")
@@ -76,6 +86,7 @@ def voxcpm2_backend(model=None):
     modules = {
         "mlx": mlx,
         "mlx.core": core,
+        "mlx.nn": nn_module,
         "mlx_audio": package,
         "mlx_audio.tts": tts,
         "mlx_audio.tts.utils": utils,
@@ -83,13 +94,32 @@ def voxcpm2_backend(model=None):
     saved = {name: sys.modules.get(name) for name in modules}
     sys.modules.update(modules)
     try:
-        return backends.VoxCpm2Backend(model="stub-model"), fake
+        # `_warm_ref_caches` runs synchronously before `__init__` returns
+        # (see backends.py), so any `import refcache` it triggers happens
+        # inside this stub window — deliberately **not** undone afterwards:
+        # `refcache` then stays cached in `sys.modules` like any other
+        # module, which is what lets a test `import refcache` later and
+        # `patch.object` the same module object `_generate` will call into.
+        return backends.VoxCpm2Backend(model="stub-model", **kwargs), fake
     finally:
         for name, previous in saved.items():
             if previous is None:
                 sys.modules.pop(name, None)
             else:
                 sys.modules[name] = previous
+
+
+@contextlib.contextmanager
+def voice_library_dir(names=("男声", "女声")):
+    """A real directory with one dummy ``.wav`` (+ ``.json``) per name, so
+    ``VoiceLibrary`` (and therefore ``_warm_ref_caches``) has entries to work
+    with. Content is a placeholder — nothing here decodes real audio."""
+    with tempfile.TemporaryDirectory() as tmp:
+        directory = Path(tmp)
+        for name in names:
+            (directory / f"{name}.wav").write_bytes(b"RIFF....WAVEfmt ")
+            (directory / f"{name}.json").write_text(json.dumps({"ref_text": f"{name} 的参考文本"}))
+        yield str(directory)
 
 
 class WavPackingTests(unittest.TestCase):
@@ -374,6 +404,67 @@ class VoxCpm2BackendTests(unittest.TestCase):
         described = backend.describe()
         self.assertEqual(described["backend"], "voxcpm2")
         self.assertEqual(described["model"], "stub-model")
+
+
+class RefCacheWiringTests(unittest.TestCase):
+    """T3.4.13 Phase 2: does `_generate` actually reach `refcache`, and does
+    it fail safe when the cache path breaks? The cache's own correctness
+    (does cached synthesis sound right) is validated separately in
+    `spike/t3413-tts-refcache/` against the real model — a stub model can't
+    prove that, only that the wiring calls the right thing with the right
+    arguments and falls back when it should.
+    """
+
+    def test_warming_with_a_stub_model_fails_safe_and_leaves_no_cache(self):
+        # FakeVoxModel has no `base_lm`/`residual_lm` — exactly the shape
+        # mismatch `_warm_ref_caches` must survive without crashing startup.
+        with voice_library_dir() as voices_dir:
+            backend, _ = voxcpm2_backend(voices_dir=voices_dir)
+        self.assertEqual(set(backend.voices.entries), {"男声", "女声"}, "音色库本身要读到两个条目")
+        self.assertEqual(backend._ref_cache, {}, "stub 模型建不出缓存，不该假装建成了")
+
+    def test_generate_uses_the_cache_when_one_is_available(self):
+        with voice_library_dir() as voices_dir:
+            backend, fake = voxcpm2_backend(voices_dir=voices_dir)
+            # 到这里 `voxcpm2_backend` 内部的预热已经至少尝试过 `import refcache`
+            # 一次（不管预热本身成不成功），`sys.modules["refcache"]` 已经有了——
+            # 这里才 import 才能拿到同一个模块对象，`patch.object` 才打得准。
+            import refcache
+            # 自然预热在 stub 模型上必然失败（见上一条测试），这里手工注入一个
+            # 哨兵，只为了让 `_generate` 走到"有缓存"分支——`generate_with_cache`
+            # 本身整个被替身掉，所以这个哨兵长什么样不重要。
+            backend._ref_cache["男声"] = object()
+            fake_audio = [0.1, -0.1, 0.2]
+            with patch.object(refcache, "generate_with_cache", return_value=(fake_audio, 48000)) as mock_generate:
+                data = backend.synthesize("你好世界", "zh", voice="男声")
+            backends.validate_wav_bytes(data)
+            mock_generate.assert_called_once()
+            call = mock_generate.call_args
+            self.assertIs(call.args[0], backend._model, "要传真正在跑的那个 model 实例")
+            self.assertIs(call.args[1], backend._ref_cache["男声"], "要传我们注入的那份缓存")
+            self.assertEqual(call.args[2], "你好世界", "文本不能被缓存路径动过")
+            self.assertEqual(call.args[4], backend.MAX_TOKENS)
+            self.assertEqual(fake.calls, [], "走了缓存路径就不该再调没缓存的 model.generate()")
+
+    def test_generate_falls_back_when_cache_continuation_raises(self):
+        with voice_library_dir() as voices_dir:
+            backend, fake = voxcpm2_backend(voices_dir=voices_dir)
+            import refcache
+            backend._ref_cache["男声"] = object()
+            with patch.object(refcache, "generate_with_cache", side_effect=RuntimeError("broadcast_shapes boom")):
+                # 退回老路必须有输出（T3.4.8 的教训同一条纪律）——不是 500，
+                # 是老老实实调一遍没有缓存的 model.generate()。
+                data = backend.synthesize("你好世界", "zh", voice="男声")
+            backends.validate_wav_bytes(data)
+            self.assertEqual(len(fake.calls), 1, "缓存续接失败要退回未缓存路径，不能就此没有声音")
+            self.assertEqual(fake.calls[0]["text"], "你好世界")
+
+    def test_unknown_voice_has_no_cache_entry_to_use(self):
+        # `entry` 为 None（音色库为空）时，缓存分支必须整个跳过而不是报错。
+        backend, fake = voxcpm2_backend()
+        data = backend.synthesize("你好", "zh")
+        backends.validate_wav_bytes(data)
+        self.assertEqual(len(fake.calls), 1)
 
 
 class BackendSelectionTests(unittest.TestCase):
