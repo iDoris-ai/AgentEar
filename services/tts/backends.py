@@ -679,6 +679,16 @@ class VoxCpm2Backend:
         and logged, never raised — `_generate` falls back to the unmodified
         `self._model.generate()` path for any voice that isn't in the cache,
         exactly as if this method had never run.
+
+        ⚠️ **No staleness check.** This reads each voice's `.wav`/`.json` once,
+        here, at startup. If a voice's reference file is replaced on disk
+        while this process is still running, the cache keeps serving the old
+        reference until the sidecar restarts. Acceptable under the current
+        assumption that voices are static assets (`assets/talk-voices/`, only
+        changed by shipping a new build or by `make_voice.py` before the
+        sidecar is (re)started) — revisit if that assumption stops holding
+        (e.g. a future "record your own voice" feature that writes into
+        `voices_dir` while the sidecar is live).
         """
         if not self.voices.entries:
             return
@@ -760,7 +770,11 @@ class VoxCpm2Backend:
         else:
             instruct = f"{TONE_INSTRUCTS[tone]}，{STYLE_INSTRUCTS[style]}"
 
-        cached = self._ref_cache.get(entry["name"]) if entry else None
+        # `.get("name")` 不是 `entry["name"]`——虽然 VoiceLibrary 建的每个 entry
+        # 都带 "name"，正常运行时不可能触发 KeyError，但防御性地不假设调用方
+        # 未来传进来的一定是那个精确形状（比如经过 pickle/序列化的 entry）。
+        voice_name = entry.get("name") if entry else None
+        cached = self._ref_cache.get(voice_name) if voice_name else None
         if cached is not None:
             try:
                 import refcache
@@ -779,10 +793,10 @@ class VoxCpm2Backend:
                 # 这个音色的请求都先白跑一遍缓存路径、再退回慢路径——比直接
                 # 从一开始就退回慢路径更差。一次失败就永久禁用，下次边车重启
                 # 会重新尝试预热。
-                self._ref_cache.pop(entry["name"], None)
+                self._ref_cache.pop(voice_name, None)
                 _release_mlx_cache()
                 log_once(
-                    f"音色 {entry['name']!r} 的参考缓存续接失败（{error!r}），"
+                    f"音色 {voice_name!r} 的参考缓存续接失败（{error!r}），"
                     "这个音色本轮起改用未缓存的合成路径（慢，但正确）；"
                     "**不覆盖原生调用卡死/挂起的情况**——那种失败走的是 "
                     "synthesize() 自己的 timeout，不经过这里"

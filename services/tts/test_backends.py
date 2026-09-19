@@ -406,6 +406,104 @@ class VoxCpm2BackendTests(unittest.TestCase):
         self.assertEqual(described["model"], "stub-model")
 
 
+def _real_mlx_and_model_available():
+    """True only with the special venv (`~/.agentear/llm/venv`) active *and*
+    the real VoxCPM2-4bit weights already downloaded. Neither holds for the
+    default interpreter this suite normally runs under — that's why this
+    gates a `skipUnless`, same pattern as `_has_numpy()` above."""
+    try:
+        import mlx_audio  # noqa: F401
+    except ImportError:
+        return False
+    return Path(REAL_VOXCPM2_MODEL_PATH).is_dir()
+
+
+REAL_VOXCPM2_MODEL_PATH = str(Path.home() / ".agentear/talk/models/voxcpm2-4bit")
+REAL_VOICES_DIR = str(Path.home() / ".agentear/talk/voices")
+
+
+@unittest.skipUnless(
+    _real_mlx_and_model_available(),
+    "需要真实 mlx_audio + 已下载的 VoxCPM2-4bit 权重（~/.agentear/talk/models/voxcpm2-4bit）："
+    "本仓库默认的测试解释器没装 mlx，这条只在 `~/.agentear/llm/venv/bin/python` 下跑",
+)
+class RefCacheEquivalenceTests(unittest.TestCase):
+    """`refcache.generate_with_cache` 声称"只是把参考音色的编码挪出去、跳过
+    重复计算，不改变计算内容"——这条测试用真实模型直接验证这句话，不是靠
+    读代码论证。是 PR-Daemon 复审要求的"承重"测试：能同时抓住①缓存复用被
+    就地变异污染、②`generate_with_cache` 硬编码的解码参数（`inference_timesteps`/
+    `cfg_value`）与 `generate()` 自己的默认值静默漂移、③`prefix_feat_cond`
+    对齐错误。
+
+    **做法**：VoxCPM2 扩散采样没有固定 seed，直接比较两次独立调用的输出没有
+    意义（正常也会不同）。但 `mx.random.seed()` 能让同一段代码在给定种子下
+    确定性执行——**在"生成新文本"这一步之前**，给缓存路径和未缓存路径各
+    设同一个种子，如果两条路径算的是同一件事，输出应该逐样本几乎相同
+    （允许浮点结合律带来的极小误差，不是完全比特级相同）。
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        import mlx.core as mx
+        from mlx_audio.tts.utils import load_model
+
+        import refcache as refcache_module
+
+        cls.refcache = refcache_module
+        cls.mx = mx
+        cls.model = load_model(REAL_VOXCPM2_MODEL_PATH)
+        cls.refcache.patch_multi_token_cache_continuation(cls.model)
+
+    def test_cached_and_uncached_paths_compute_the_same_thing(self):
+        import json
+
+        ref_audio = f"{REAL_VOICES_DIR}/男声.wav"
+        with open(f"{REAL_VOICES_DIR}/男声.json") as f:
+            ref_text = json.load(f)["ref_text"]
+        text = "现在几点了"
+        instruct = "warm，Mandarin"
+
+        self.mx.random.seed(1234)
+        cache = self.refcache.build_ref_cache(self.model, ref_audio)
+        self.mx.random.seed(5678)
+        cached_audio, cached_sr = self.refcache.generate_with_cache(
+            self.model, cache, text, instruct, 200
+        )
+        self.mx.eval(cached_audio)
+
+        self.mx.random.seed(5678)
+        chunks, uncached_sr = [], None
+        for segment in self.model.generate(
+            text=text, max_tokens=2000, ref_audio=ref_audio, ref_text=ref_text,
+            instruct=instruct, inference_timesteps=10, cfg_value=2.0,
+        ):
+            audio = getattr(segment, "audio", None)
+            if audio is not None:
+                chunks.append(audio)
+                uncached_sr = getattr(segment, "sample_rate", None) or uncached_sr
+
+        import numpy as np
+
+        uncached_audio = np.concatenate([np.array(c) for c in chunks])
+        cached_audio_np = np.array(cached_audio)
+
+        self.assertEqual(cached_sr, uncached_sr)
+        self.assertEqual(
+            cached_audio_np.shape, uncached_audio.shape,
+            "长度都不一样，说明两条路径生成的 patch 数都对不上——不只是数值细节，是逻辑分叉了",
+        )
+        max_abs_diff = float(np.abs(cached_audio_np - uncached_audio).max())
+        # 实测（2026-09-19，男声/「现在几点了」）：max_abs_diff ≈ 3.6e-5——量级是
+        # 浮点结合律噪声，不是语义差异。1e-3 是留了两个数量级的余量，真出现
+        # cache 复用污染 / 解码参数漂移 / 对齐错误，差异会是这个量级的成百上千倍
+        # （整段波形形状不同），不会卡在这条阈值附近。
+        self.assertLess(
+            max_abs_diff, 1e-3,
+            f"缓存路径与未缓存路径的输出差异过大（max_abs_diff={max_abs_diff}）——"
+            "这就是「命中却静默出错音」，正是本条测试要拦住的",
+        )
+
+
 class RefCacheWiringTests(unittest.TestCase):
     """T3.4.13 Phase 2: does `_generate` actually reach `refcache`, and does
     it fail safe when the cache path breaks? The cache's own correctness

@@ -65,13 +65,50 @@ Every function here can raise (missing model attributes on an unexpected
 import mlx.core as mx
 import mlx.nn as nn
 
+#: The exact ``mlx-audio`` version this patch and the rest of this module were
+#: verified against (source read + empirical cache-mutation test, both
+#: 2026-09-19). Not a hard requirement — see ``patch_multi_token_cache_continuation``.
+VERIFIED_MLX_AUDIO_VERSION = "0.5.1"
+
+
+def _installed_mlx_audio_version():
+    try:
+        import importlib.metadata
+
+        return importlib.metadata.version("mlx-audio")
+    except Exception:  # noqa: BLE001 - version probing is best-effort, never fatal
+        return None
+
 
 def patch_multi_token_cache_continuation(model):
     """Fix ``base_lm``/``residual_lm``'s causal mask for multi-token cache
     continuation. Safe to call more than once (idempotent) and safe to call on
     a model that turns out not to need it — it only ever changes behaviour for
     calls that would otherwise raise.
+
+    ⚠️ **Loudly warns, but still patches, on an unverified ``mlx-audio``
+    version.** This whole module is a hand-written mirror of that package's
+    private internals (see module docstring); if a future version restructures
+    them, the honest failure mode is "``refcache`` raises and every caller
+    falls back to the uncached path" — not silent corruption, because every
+    call site here (``VoxCpm2Backend._generate``/``_warm_ref_caches``) already
+    wraps this in a try/except. So refusing to patch outright would only
+    trade "definitely falls back" for "definitely falls back, plus a scarier
+    log line" — not worth doing. What *is* worth doing is making a version
+    drift **visible** instead of a developer having to rediscover it from
+    scratch: a mismatch prints once, doesn't block startup.
     """
+    installed = _installed_mlx_audio_version()
+    if installed is not None and installed != VERIFIED_MLX_AUDIO_VERSION:
+        import sys
+
+        print(
+            f"⚠️ refcache.py 是照着 mlx-audio {VERIFIED_MLX_AUDIO_VERSION} 的内部实现写的，"
+            f"当前装的是 {installed}——mask 补丁和 build_ref_cache/generate_with_cache 里对内部结构"
+            "的假设可能不再成立。仍会尝试打补丁；真出问题时每次调用会自然退回未缓存路径"
+            "（见 _generate 的 try/except），不会静默出错音，但排查起来会更绕，先看这条日志。",
+            file=sys.stderr,
+        )
     minicpm_cls = type(model.base_lm)
     if getattr(minicpm_cls, "_agentear_refcache_patched", False):
         return
