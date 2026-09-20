@@ -2,7 +2,7 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-## 当前状态：**v0.18.0 —— 边车内存可观测（`/health` 自报 MLX 占用，且不报喜不报忧）+ 修两条测试 + 补上 CI 漏掉的 Python 闸**；M1/M2 已发布；**M3 通话链路已跑通，AEC / 自动打断未做**
+## 当前状态：**v0.19.0 —— 修复播放期间按录音键在守护进程里实际打不断的真 bug（此前 v0.6.0 起就没真正生效过）+ 泰语 code-switch 提示词**；M1/M2 已发布；**M3 通话链路已跑通，推键式打断这次才真正接通，AEC / VAD 自动打断未做**
 
 M1 完成；**知识库投递 + 全文检索默认开（v0.4.2）**；M2 理解层已发布（v0.4.0）但默认关；
 **v0.6.0 加了通话链路（说一句答一句、可按键打断）**，**v0.5.0 加了可切换的 ASR 后端**（`--asr-backend` / `config.json` 的 `asr_backend`，
@@ -485,7 +485,7 @@ clippy **刻意不加 `-D warnings`**（既有 13 条警告，加了会让 CI �
 
 ```bash
 cargo build --release
-cargo test                                    # 297 passed / 0 failed / 6 ignored（292 条单测 + 5 条钉脚本默认值的集成测试；ignored 6 条：4 条要边车、1 条要联网、1 条要能出声的环境）：提交协议、崩溃语义、token 过滤、i18n、下载协议、知识库投递、通话会话状态机、语音指令表
+cargo test                                    # 300 passed / 0 failed / 7 ignored（294 条单测 + 6 条钉脚本默认值的集成测试；ignored 7 条：4 条要边车、1 条要联网、1 条要能出声的环境、1 条要真实 whisper-cli+已下载泰语模型+macOS say）：提交协议、崩溃语义、token 过滤、i18n、下载协议、知识库投递、通话会话状态机、语音指令表、泰语 code-switch 提示词
 ./target/release/agentear                     # 守护进程，Ctrl+Shift+R 开始/停止录音
 ./target/release/agentear --transcribe x.wav  # 离线转写，不占麦克风，用于验证 ASR 链路
 ./target/release/agentear --diagnose          # 环境自检：权限、音频设备、ASR 依赖
