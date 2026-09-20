@@ -1773,10 +1773,18 @@ mod tests {
         assert!(validate_wav(&ok).is_ok());
     }
 
-    /// **V1 的打断机制本身**：`stop_playback` 必须真的把声音掐断，
-    /// 而且 `play_blocking` 要把它当成「播完了」正常返回——
-    /// 被打断不是错误，调用方拿到的是一个明显短于音频总长的时长
-    /// （这正是打断延迟可以直接量出来的地方）。
+    /// **测的是 `stop_playback`/`play_blocking` 这两个原语，不是 V1 打断
+    /// 机制本身**（2026-09-20 改名前的名字 `stop_playback_really_cuts_the_
+    /// sound_short` 暗示了后者，是过度声称）。这里用一个 spawn 出来的线程
+    /// 模拟"播放跑在另一个线程"，从测试主线程直接调 `stop_playback()`——
+    /// 这验证的是原语本身线程安全、`play_blocking` 能正确感知被掐断，
+    /// **不验证** `main.rs::worker()` 那条真实的"按键 → channel →
+    /// `stop_playback()`"路径接得对不对（2026-09-19 codex 复查发现过
+    /// 一次这条路径实际接错了——播放调用曾经同步跑在 worker 线程里，
+    /// 导致这条原语从未在真实播放中被触发过；2026-09-20 已修，
+    /// 见 `docs/agent/tasks.md` T3.4.2）。
+    /// `play_blocking` 要把被掐断当成「播完了」正常返回——被打断不是
+    /// 错误，调用方拿到的是一个明显短于音频总长的时长。
     ///
     /// ⚠️ **标了 `ignore`：它需要能出声的环境。** `afplay` 在 macOS 上恒在，
     /// 但**没有可用输出设备**（CI runner、无声卡容器）时它会直接失败，
@@ -1785,7 +1793,7 @@ mod tests {
     /// 本机实测：`cargo test -- --ignored` 里它通过（见 `docs/benchmarks-talk.md`）。
     #[test]
     #[ignore = "需要能出声的环境（afplay 要有可用输出设备）"]
-    fn stop_playback_really_cuts_the_sound_short() {
+    fn direct_stop_returns_playback_thread_quickly() {
         // 造一段 5 秒的 440 Hz 正弦波——够长，短了就看不出「被掐」
         let rate = 16000u32;
         let seconds = 5u32;
@@ -1800,11 +1808,41 @@ mod tests {
         let handle = std::thread::spawn(move || play_blocking(&wav));
         // 让它真的开始播（afplay 拉起需要几十毫秒）
         std::thread::sleep(Duration::from_millis(600));
+        // ⚠️ **这条量的不是"端到端"打断延迟，一轮 codex 评审指出来的**：
+        // 起点是直接调用 stop_playback()，**不包含**：
+        //   ① 键盘事件从系统分发到 channel 里的延迟——`classify_tap()`
+        //      本身是按键一松开立刻分类、不等待，`DOUBLE_TAP_MAX_MS`
+        //      （500ms）只是"两次敲击之间的间隔阈值"，不是单次按键的
+        //      处理延迟，**之前这里写"判定窗口量级 500ms"是错的，已删**；
+        //      但真实的系统级事件分发（CGEventTap → channel）仍有它
+        //      自己未测的延迟；
+        //   ② 主循环收到"结束一段"信号到调用 stop_playback() 之间的
+        //      channel 分发延迟；
+        //   ③ `play_blocking` 返回到扬声器缓冲区真正播完（听不见了）
+        //      之间的音频设备延迟——这里量的是"线程确认停止"，不是"耳朵
+        //      听到安静"。
+        // 这条测的是**这条链路里我们代码能控制的那一段**（stop_playback
+        // 调用 → play_blocking 感知到并返回），是"端到端"里的一部分，
+        // 不是全部。真正的端到端（物理按键 → 真正听不到声音）需要另外测，
+        // 这条没做到。
+        let internal_interval_started = std::time::Instant::now();
         assert!(stop_playback(), "正在播的时候应该报告「掐掉了」");
         let played = handle.join().unwrap().expect("被打断不该是 Err");
+        let internal_interval = internal_interval_started.elapsed();
+        eprintln!("stop_playback() → play_blocking 返回，内部区间实测：{internal_interval:?}");
         assert!(
             played < Duration::from_secs(4),
             "掐掉之后不该继续播满 5 秒，实测 {played:?}"
+        );
+        // ⚠️ 这个 300ms 阈值钉的是**上面这段内部区间**，不是 T3.4.2 出口
+        // 判据本身——出口判据要求的是真实的物理按键到声音停止，这条测试
+        // 证明不了那件事，只能证明"我们代码这一段没有引入明显延迟"。
+        // 实测方差 3–24ms 主要来自 `play_blocking` 的 20ms 轮询间隔
+        // （`std::thread::sleep(Duration::from_millis(20))`），不是
+        // kill 系统调用本身的抖动——kill 几乎瞬时，轮询检测到才是瓶颈。
+        assert!(
+            internal_interval < Duration::from_millis(300),
+            "stop_playback 到 play_blocking 返回的内部区间应 <300ms，实测 {internal_interval:?}"
         );
         // 幂等：没有在播的时候调用不该 panic，也不该报告成功
         assert!(!stop_playback(), "没有在播时不该报告掐掉了");

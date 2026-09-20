@@ -37,10 +37,16 @@
 //!
 //! ## 持久化纪律
 //!
-//! 通话属于**路径 B（实时流）= 有界丢失**，不是文件导入那种零丢失
-//! （ADR-0007 §4.5）。本模块因此只记录「这一段该不该 commit」，
-//! 具体策略由 `BatchCommitPolicy` / `StreamCheckpointPolicy` 决定——
-//! **不要把文件导入的零丢失语义套到通话上**。
+//! ⚠️ **2026-09-19 更正**：这里曾经写"通话属于路径 B = 有界丢失"，后来
+//! 又改成"推键式录音是路径 A = 零丢失"，**两句都不完全对**。实际情况：
+//! 代码走的是 `BatchCommitPolicy`（路径 A 的机制——录音结束才 `finalize`
+//! + `fsync`），但**录音进行中**（最长 300 秒）如果进程崩溃，`store.rs`
+//! 的 `sweep_tmp()` 会把未 commit 的临时文件整个删掉——这是路径 A 的
+//! 机制，却没有路径 A"源可重放"那个让零丢失成立的前提，实际丢失窗口
+//! 比 `StreamCheckpointPolicy` 想解决的"有界丢失"更大。这是一个未解决
+//! 的真实风险，见 `docs/decisions/0007-realtime-voice-architecture.md`
+//! §4.5、`docs/agent/tasks.md` T3.4.2——**本模块因此只记录「这一段该不该
+//! commit」，不代表这个风险已经被哪个策略兜住了**。
 
 use std::time::{Duration, Instant};
 

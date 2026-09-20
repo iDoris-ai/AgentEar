@@ -1227,7 +1227,27 @@ fn finish(state: State, store: &store::Store, asr: &dyn engine::AsrEngine) -> Re
             if cfg.talk_mode == config::TalkMode::Conversation {
                 // 这一轮用哪个语言，**在配置里读**：菜单改了下一轮生效，
                 // 这就是 jason 要的「过程中可以随时切」。
-                answer_out_loud(&cfg, &text, cfg.talk_lang);
+                //
+                // ⚠️ **必须 spawn，不能同步调用**（2026-09-20 codex 复查揪出的真
+                // bug，见 ADR-0007 §8）：`answer_out_loud` 一路阻塞到播放结束，
+                // 而这里是 `worker()` 主循环内部——那个循环是唯一读录音键事件
+                // （`rx.try_recv()`）的地方。同步调用会让 worker 线程卡在
+                // `play_blocking()` 里回不了循环顶部，于是播放期间按录音键这个
+                // "V1 打断入口"永远等不到被处理的那一刻，只有播完之后才会读到
+                // 那次按键——**打断形同虚设**。
+                // `talk::PLAYING`/`stop_playback()` 与 `TALK_SESSION` 都已经是
+                // 跨线程安全的设计（mutex 保护），`session.rs::begin_turn()` 的
+                // `Phase::Speaking` 分支也是专门为"播放中又按下录音键"这个场景写的
+                // ——问题只在这个调用点从没真的跑在另一个线程上，那些设计因此
+                // 从未被触发过。spawn 之后，worker 循环立刻能回到 `rx.try_recv()`，
+                // 用户按键时 `Intent::Begin` 分支会先 `stop_playback()` 掐掉这个
+                // 线程正在放的声音，再开新一段录音。
+                let cfg_owned = cfg.clone();
+                let text_owned = text.clone();
+                let talk_lang = cfg.talk_lang;
+                std::thread::spawn(move || {
+                    answer_out_loud(&cfg_owned, &text_owned, talk_lang);
+                });
             }
         }
         Ok(_) => log::warn!("转写结果为空（这段音频可能没有语音）"),
