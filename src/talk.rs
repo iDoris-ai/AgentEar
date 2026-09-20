@@ -1773,10 +1773,18 @@ mod tests {
         assert!(validate_wav(&ok).is_ok());
     }
 
-    /// **V1 的打断机制本身**：`stop_playback` 必须真的把声音掐断，
-    /// 而且 `play_blocking` 要把它当成「播完了」正常返回——
-    /// 被打断不是错误，调用方拿到的是一个明显短于音频总长的时长
-    /// （这正是打断延迟可以直接量出来的地方）。
+    /// **测的是 `stop_playback`/`play_blocking` 这两个原语，不是 V1 打断
+    /// 机制本身**（2026-09-20 改名前的名字 `stop_playback_really_cuts_the_
+    /// sound_short` 暗示了后者，是过度声称）。这里用一个 spawn 出来的线程
+    /// 模拟"播放跑在另一个线程"，从测试主线程直接调 `stop_playback()`——
+    /// 这验证的是原语本身线程安全、`play_blocking` 能正确感知被掐断，
+    /// **不验证** `main.rs::worker()` 那条真实的"按键 → channel →
+    /// `stop_playback()`"路径接得对不对（2026-09-19 codex 复查发现过
+    /// 一次这条路径实际接错了——播放调用曾经同步跑在 worker 线程里，
+    /// 导致这条原语从未在真实播放中被触发过；2026-09-20 已修，
+    /// 见 `docs/agent/tasks.md` T3.4.2）。
+    /// `play_blocking` 要把被掐断当成「播完了」正常返回——被打断不是
+    /// 错误，调用方拿到的是一个明显短于音频总长的时长。
     ///
     /// ⚠️ **标了 `ignore`：它需要能出声的环境。** `afplay` 在 macOS 上恒在，
     /// 但**没有可用输出设备**（CI runner、无声卡容器）时它会直接失败，
@@ -1785,7 +1793,7 @@ mod tests {
     /// 本机实测：`cargo test -- --ignored` 里它通过（见 `docs/benchmarks-talk.md`）。
     #[test]
     #[ignore = "需要能出声的环境（afplay 要有可用输出设备）"]
-    fn stop_playback_really_cuts_the_sound_short() {
+    fn direct_stop_returns_playback_thread_quickly() {
         // 造一段 5 秒的 440 Hz 正弦波——够长，短了就看不出「被掐」
         let rate = 16000u32;
         let seconds = 5u32;
@@ -1802,9 +1810,12 @@ mod tests {
         std::thread::sleep(Duration::from_millis(600));
         // ⚠️ **这条量的不是"端到端"打断延迟，一轮 codex 评审指出来的**：
         // 起点是直接调用 stop_playback()，**不包含**：
-        //   ① 键盘事件从系统分发到 classify_tap 判定完成的延迟——
-        //      `hotkey.rs` 的单击/双击判定窗口本身就有 `DOUBLE_TAP_MAX_MS`
-        //      （500ms）这个量级，真实按键路径比这里量的要长；
+        //   ① 键盘事件从系统分发到 channel 里的延迟——`classify_tap()`
+        //      本身是按键一松开立刻分类、不等待，`DOUBLE_TAP_MAX_MS`
+        //      （500ms）只是"两次敲击之间的间隔阈值"，不是单次按键的
+        //      处理延迟，**之前这里写"判定窗口量级 500ms"是错的，已删**；
+        //      但真实的系统级事件分发（CGEventTap → channel）仍有它
+        //      自己未测的延迟；
         //   ② 主循环收到"结束一段"信号到调用 stop_playback() 之间的
         //      channel 分发延迟；
         //   ③ `play_blocking` 返回到扬声器缓冲区真正播完（听不见了）
