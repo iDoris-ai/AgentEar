@@ -840,6 +840,29 @@
   Phase 2/3 的验收标准。
 - **粗估工作量**：5–9 天（spike 1 天判生死，Phase 2/3 各 2–4 天）。
 
+### T3.4.15 打断修复的两条遗留（确认提示音同样打不断 + 退出时播放进程可能残留）  `BACKLOG`
+- **背景**：T3.4.2 的"播放期间按录音键在守护进程里实际打不断"bug（2026-09-20
+  修复，`main.rs` 里对话回答的 `answer_out_loud` 改成了 `std::thread::spawn`）
+  修完之后，本地模型自评审（当轮 Codex 配额用完，走 Tier 2 兜底）又发现了
+  两条**同类、但未修**的遗留——jason 2026-09-20 拍板：先记账、不阻塞发布。
+- **遗留 1：`announce_pending()`（`main.rs:1452`，命令二次确认的"念问句"）
+  同样是同步调用 `talk::speak(...)`**，和刚修的那个 bug 是同一类问题——
+  worker 线程被这段播放卡住时，用户按键打断不了这句确认提示音。
+  影响面比对话回答小（提示音通常很短），但原理相同，修法也相同（spawn 出去）。
+- **遗留 2：`talk::PLAYING` 是 `static`，进程退出（菜单 Quit / 信号）时 Rust
+  不会跑 `'static` 变量的 `Drop`**——如果退出那一刻恰好有 `afplay` 子进程在播，
+  它不会被自动杀掉、`Player` 的临时文件目录也不会被清理。这个口子在 T3.4.2
+  这次修复之前就存在（旧代码下同样可以在阻塞播放期间点菜单 Quit），
+  不是这次改动引入或加重的，但没有任何现有关闭路径（`talk::shutdown_spawned()`、
+  `talk::kill_spawned_pids_from_signal()`）覆盖它。
+  ⚠️ **信号路径要小心**：`kill_spawned_pids_from_signal()` 之所以只做裸
+  `kill(2)`、不碰 mutex，是因为信号处理函数里拿锁不是 async-signal-safe
+  （可能跟被打断的代码死锁）。要堵这个口子，Quit（菜单，非信号上下文）可以
+  直接调 `talk::stop_playback()`；信号路径需要仿照 `kill_spawned_pids_from_signal()`
+  的做法单独记一份裸 PID，不能直接调 `stop_playback()`。
+- **验收命令**：待定——遗留 1 可以照抄这次 spawn 的模式加单测；
+  遗留 2 需要先确认怎么在测试里模拟"进程退出时还有 afplay 在播"这个场景。
+
 ### T3.5.1 中文/英文 ASR 横比  `READY`
 - **为什么必须做**：`benchmarks-m3.md` 只测了泰语。
   换默认 ASR 影响**全部语种**，不能凭泰语结果推断 SenseVoice 该不该换。
