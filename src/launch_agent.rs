@@ -48,25 +48,34 @@ use std::path::{Path, PathBuf};
 
 const LABEL: &str = "ai.idoris.agentear";
 
-/// 当前运行的可执行文件是否在一个真正、稳定的 `.app` bundle 里
-/// （不是开发时的裸二进制，也不是 App Translocation 的临时挂载点）。
-pub fn bundle_executable_path() -> Option<PathBuf> {
-    let exe = std::env::current_exe().ok()?;
-    let s = exe.to_string_lossy();
+/// 一条可执行文件路径是不是"值得写进开机自启配置"的那种：真正、稳定的
+/// `.app` bundle（不是开发时的裸二进制，不是 App Translocation 的临时
+/// 挂载点，也不含会让生成的 plist 解析失败的 XML 非法字符）。
+///
+/// **抽成纯函数**是为了能被测试真正调用到——早先两条同名测试只是在
+/// 断言手写字符串本身的性质，从没调用过这个判据，改坏了判据本身
+/// 测试也不会红（codex 复查抓到）。
+fn is_stable_bundle_path(s: &str) -> bool {
     if !s.contains(".app/Contents/MacOS/") {
-        return None;
+        return false;
     }
     if s.contains("AppTranslocation") {
-        return None;
+        return false;
     }
     // plist 里的路径必须是合法 XML 文本：控制字符（除了 XML 1.0 允许的
     // tab/LF/CR）会让生成的 plist 直接解析失败，而这种字符正常路径里
     // 不会出现——出现了大概率是数据损坏，与其生成一份 launchd 读不了
     // 的 plist，不如直接当成"不是一个正常安装"跳过。
     if s.chars().any(|c| (c as u32) < 0x20 && !matches!(c, '\t' | '\n' | '\r')) {
-        return None;
+        return false;
     }
-    Some(exe)
+    true
+}
+
+/// 当前运行的可执行文件是否在一个真正、稳定的 `.app` bundle 里。
+pub fn bundle_executable_path() -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    is_stable_bundle_path(&exe.to_string_lossy()).then_some(exe)
 }
 
 fn plist_path() -> Option<PathBuf> {
@@ -190,14 +199,16 @@ mod tests {
     #[test]
     fn a_dev_binary_path_is_not_a_bundle_path() {
         // 开发时 current_exe() 长这样，不该被误判成「装在 App 里」。
-        let dev = "/Users/jason/Dev/tools/AgentEar/target/release/agentear";
-        assert!(!dev.contains(".app/Contents/MacOS/"));
+        assert!(!is_stable_bundle_path(
+            "/Users/jason/Dev/tools/AgentEar/target/release/agentear"
+        ));
     }
 
     #[test]
     fn an_installed_app_path_is_recognized() {
-        let installed = "/Applications/AgentEar.app/Contents/MacOS/AgentEar";
-        assert!(installed.contains(".app/Contents/MacOS/"));
+        assert!(is_stable_bundle_path(
+            "/Applications/AgentEar.app/Contents/MacOS/AgentEar"
+        ));
     }
 
     #[test]
@@ -220,17 +231,13 @@ mod tests {
         assert!(xml.contains("<key>KeepAlive</key>\n    <false/>"));
     }
 
-    /// codex 复查抓到：改前的版本会在这里调 `launchctl bootstrap`，
-    /// 而 `RunAtLoad=true` 会让 launchd 立刻再启动一个实例——调用方
-    /// 正是已经在跑的那一个。这条钉住"只写文件"这个事实本身
-    /// （没有直接的方法可测"没调用 launchctl"，但可以钉住
-    /// `plist_contents` 生成的内容里没有任何暗示"立刻执行"的东西，
-    /// 且 `apply` 的可见副作用只有文件系统——这条测试更多是给未来的人
-    /// 一个信号：加回 launchctl 调用之前，先重读模块文档那段"为什么"）。
+    /// `RunAtLoad=true` 是给 launchd 在下次登录时用的语义。这条只钉住
+    /// plist 内容本身写对了——**不证明** `apply()` 不会立刻触发它，
+    /// 那件事是靠"整个模块没有任何 `launchctl` 调用"这个结构性事实
+    /// 保证的（`grep -c launchctl src/launch_agent.rs` 应该是 0，
+    /// 见模块文档"为什么只写文件"）。
     #[test]
-    fn run_at_load_is_true_but_apply_itself_never_shells_out() {
-        // RunAtLoad=true 是给 launchd 在下次登录时用的语义，不代表
-        // apply() 会去触发它——这条测试名字本身就是最重要的注释。
+    fn plist_content_declares_run_at_load() {
         let xml = plist_contents(Path::new("/Applications/AgentEar.app/Contents/MacOS/AgentEar"));
         assert!(xml.contains("<key>RunAtLoad</key>\n    <true/>"));
     }
@@ -240,12 +247,19 @@ mod tests {
         // 从 Finder 直接双击一个还在隔离属性下、没挪出下载目录的 .app，
         // 系统会把它挂到 AppTranslocation 的临时只读路径——这个路径
         // 移出隔离或重新打开后就可能不存在了，写进开机自启只会留下
-        // 一条指向空地的 plist。这个判定不依赖 std::env::current_exe()
-        // （测试环境里那是真实路径），所以直接测字符串判据。
+        // 一条指向空地的 plist。
         let translocated = "/private/var/folders/xy/abc123/T/AppTranslocation/\
                              11111111-2222-3333-4444-555555555555/d/AgentEar.app/\
                              Contents/MacOS/AgentEar";
-        assert!(translocated.contains(".app/Contents/MacOS/"));
-        assert!(translocated.contains("AppTranslocation"));
+        assert!(!is_stable_bundle_path(translocated));
+    }
+
+    #[test]
+    fn control_characters_in_path_are_rejected() {
+        // 真实路径几乎不可能出现控制字符，但生成函数不能假设"路径永远
+        // 干净"——这条钉住判据本身会挡住它，不是钉住"正常路径没有它"。
+        assert!(!is_stable_bundle_path(
+            "/Applications/Weird\u{0007}.app/Contents/MacOS/AgentEar"
+        ));
     }
 }
