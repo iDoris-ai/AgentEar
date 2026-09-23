@@ -700,9 +700,10 @@ fn handle(tag: isize, mtm: MainThreadMarker) {
             let on = !config::get().launch_at_login;
             config::update(|c| c.launch_at_login = on);
             log::info!("开机自动启动：{}", if on { "开" } else { "关" });
-            // launchctl 是个子进程调用，几十毫秒级但没必要卡住点击这一下——
-            // 设置窗口里其它控件照样能点。
-            std::thread::spawn(move || crate::launch_agent::apply(on));
+            // 文件 I/O 没必要卡住点击这一下——设置窗口里其它控件照样能点。
+            // `apply()` 自己现读配置（上面这行 `config::update` 已经落盘），
+            // 不用把 `on` 带进闭包。
+            std::thread::spawn(crate::launch_agent::apply);
         }
         TAG_START_SIDECAR => {
             let cfg = config::get();
@@ -961,6 +962,7 @@ fn info_label(mtm: MainThreadMarker, text: &str, y: f64) -> Retained<NSTextField
 fn retention_popup(
     mtm: MainThreadMarker,
     target: &MenuTarget,
+    lang: Lang,
     current_days: u32,
     y: f64,
 ) -> Retained<NSPopUpButton> {
@@ -974,7 +976,7 @@ fn retention_popup(
         let it = unsafe {
             NSMenuItem::initWithTitle_action_keyEquivalent(
                 NSMenuItem::alloc(mtm),
-                &NSString::from_str(i18n::t(Lang::En, *key)), // 占位，下面立刻按语言重写
+                &NSString::from_str(i18n::t(lang, *key)),
                 None,
                 &NSString::from_str(""),
             )
@@ -1025,7 +1027,13 @@ fn open_settings_window(mtm: MainThreadMarker) {
 
     window.center();
     window.makeKeyAndOrderFront(None);
-    NSApplication::sharedApplication(mtm).activate();
+    // ⚠️ **不能用 `NSApplication::activate()`**：那是 macOS 14+ 才有的方法，
+    // `Info.plist` 的 `LSMinimumSystemVersion` 写的是 11.0——真在老系统上
+    // 跑会是「unrecognized selector」直接崩溃（codex 复查抓到的）。
+    // `activateIgnoringOtherApps:` 虽然标了 deprecated，但从 10.0 就有，
+    // 兼容面覆盖到 11.0——**这里正确性优先于消掉一条 deprecation 警告**。
+    #[allow(deprecated)]
+    NSApplication::sharedApplication(mtm).activateIgnoringOtherApps(true);
 }
 
 fn build_settings_content(
@@ -1043,14 +1051,22 @@ fn build_settings_content(
 
     let reachable = crate::sidecar::is_ready();
     let correct_key = if reachable { Key::CorrectTerms } else { Key::CorrectTermsOffline };
-    let sidecar_line = if cfg.correct_terms {
-        match crate::sidecar::health() {
-            crate::sidecar::Health::Up => Some(i18n::t(lang, Key::SidecarUp).to_string()),
-            crate::sidecar::Health::WrongService => {
-                Some(i18n::t(lang, Key::SidecarWrongService).to_string())
+    // 和 `populate()` 里菜单那份完全同一套判据（codex 复查抓到：这里原来
+    // 全部渲染成不可点的 `NSTextField`，`TAG_START_SIDECAR` 变成了死代码，
+    // 但文案还留着"点击拉起"，跟按钮那种一样，不点开源码看不出区别）。
+    let sidecar_line: Option<(String, isize)> = if cfg.correct_terms {
+        let (key, tag) = match crate::sidecar::health() {
+            crate::sidecar::Health::Up => (Key::SidecarUp, -1),
+            crate::sidecar::Health::WrongService => (Key::SidecarWrongService, -1),
+            crate::sidecar::Health::Down => {
+                if cfg.llm_autostart && !cfg.llm_start_command.is_empty() {
+                    (Key::SidecarDown, TAG_START_SIDECAR)
+                } else {
+                    (Key::SidecarDown, -1)
+                }
             }
-            crate::sidecar::Health::Down => Some(i18n::t(lang, Key::SidecarDown).to_string()),
-        }
+        };
+        Some((i18n::t(lang, key).to_string(), tag))
     } else {
         None
     };
@@ -1087,11 +1103,20 @@ fn build_settings_content(
         cfg.correct_terms,
         next_row(),
     ));
-    content.addSubview(&info_label(mtm, sidecar_line.as_deref().unwrap_or(""), next_row()));
+    {
+        let row_y = next_row();
+        match &sidecar_line {
+            Some((text, tag)) if *tag >= 0 => {
+                content.addSubview(&action_button(mtm, &target, text, *tag, row_y));
+            }
+            Some((text, _)) => content.addSubview(&info_label(mtm, text, row_y)),
+            None => content.addSubview(&info_label(mtm, "", row_y)),
+        }
+    }
     {
         let row_y = next_row();
         content.addSubview(&info_label(mtm, i18n::t(lang, Key::RetentionSection), row_y));
-        content.addSubview(&retention_popup(mtm, &target, cfg.retention_days, row_y));
+        content.addSubview(&retention_popup(mtm, &target, lang, cfg.retention_days, row_y));
     }
     content.addSubview(&action_button(
         mtm,
