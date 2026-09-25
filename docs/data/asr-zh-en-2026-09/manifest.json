@@ -1,0 +1,1290 @@
+{
+ "n_per_set": 60,
+ "sampling": "floor(i*N/n)，排序键为 parquet 原始行序",
+ "sets": {
+  "en": {
+   "items": {
+    "en000": {
+     "audio_sha256_16": "33aca50159ec2e3c",
+     "duration_s": 10.56,
+     "ref": "However, due to the slow communication channels, styles in the west could lag behind by 25 to 30 year.",
+     "upstream_id": "1904",
+     "wav_sha256_16": "7835bd6ffb54ce38"
+    },
+    "en001": {
+     "audio_sha256_16": "0471eb4c8306e143",
+     "duration_s": 4.8,
+     "ref": "Through the night between 150 and 200 copies were made, now known as \"Dunlap broadsides\".",
+     "upstream_id": "1776",
+     "wav_sha256_16": "a8b796e9b6cda2e6"
+    },
+    "en002": {
+     "audio_sha256_16": "3f498f6216c60544",
+     "duration_s": 8.58,
+     "ref": "Anyone who's going to drive at high latitudes or over mountain passes should consider the possibility of snow, ice, or freezing temperatures.",
+     "upstream_id": "1952",
+     "wav_sha256_16": "db02bab530870203"
+    },
+    "en003": {
+     "audio_sha256_16": "7df2a964d8ce3931",
+     "duration_s": 10.2,
+     "ref": "A well rounded athlete, the tiger can climb (though not well), swim, leap great distances and pull with five times the force of a strong human.",
+     "upstream_id": "1680",
+     "wav_sha256_16": "b030864451dee775"
+    },
+    "en004": {
+     "audio_sha256_16": "4b4fbbb4ccd84296",
+     "duration_s": 7.32,
+     "ref": "Travellers are strongly advised to be aware of any risk of severe weather affecting their area as they may affect any travel plans.",
+     "upstream_id": "2001",
+     "wav_sha256_16": "269eb5b53bbdc4a0"
+    },
+    "en005": {
+     "audio_sha256_16": "ead1e88e123d1932",
+     "duration_s": 12.48,
+     "ref": "To the north and within easy reach is the romantic and fascinating town of Sintra and which was made famous to foreigners after a glowing account of its splendours recorded by Lord Byron.",
+     "upstream_id": "1950",
+     "wav_sha256_16": "9c1f8fe1e8392c19"
+    },
+    "en006": {
+     "audio_sha256_16": "8652db54f8b59b71",
+     "duration_s": 5.04,
+     "ref": "Television reports show white smoke coming from the plant.",
+     "upstream_id": "1778",
+     "wav_sha256_16": "ce3981ca5ee5f483"
+    },
+    "en007": {
+     "audio_sha256_16": "ca6864a315a8ea4a",
+     "duration_s": 4.62,
+     "ref": "The find also grants insight into the evolution of feathers in birds.",
+     "upstream_id": "1750",
+     "wav_sha256_16": "dff06ff9ee3dcd5f"
+    },
+    "en008": {
+     "audio_sha256_16": "465720b063c2d915",
+     "duration_s": 11.64,
+     "ref": "Everyone participates in society and uses transportation systems. Almost everyone complains about transportation systems.",
+     "upstream_id": "1797",
+     "wav_sha256_16": "35c1434e514f03e3"
+    },
+    "en009": {
+     "audio_sha256_16": "fd8b818acaaa45a2",
+     "duration_s": 6.9,
+     "ref": "Mosasaurus was the apex predator of its time, so it feared nothing, except other mosasaurs.",
+     "upstream_id": "1760",
+     "wav_sha256_16": "a441ed3b1d995a85"
+    },
+    "en010": {
+     "audio_sha256_16": "f17abcd4a9abded4",
+     "duration_s": 10.68,
+     "ref": "Romanticism had a large element of cultural determinism, drawn from writers such as Goethe, Fichte, and Schlegel.",
+     "upstream_id": "1660",
+     "wav_sha256_16": "0c61f7eef52f68b6"
+    },
+    "en011": {
+     "audio_sha256_16": "9c1ba6f574da1d34",
+     "duration_s": 4.56,
+     "ref": "This is called a chemical's pH. You can make an indicator using red cabbage juice.",
+     "upstream_id": "1792",
+     "wav_sha256_16": "024da3437753b2d0"
+    },
+    "en012": {
+     "audio_sha256_16": "fdfd0b76cdd94ddc",
+     "duration_s": 4.56,
+     "ref": "The governor's office said nineteen of the injured were police officers.",
+     "upstream_id": "1860",
+     "wav_sha256_16": "0a91a26008a45e22"
+    },
+    "en013": {
+     "audio_sha256_16": "205bd40b6970dc99",
+     "duration_s": 19.66,
+     "ref": "We agree with the USOC's statement that the interests of our athletes and clubs, and their sport, may be better served by moving forward with meaningful change within our organization, rather than decertification.",
+     "upstream_id": "1690",
+     "wav_sha256_16": "95be9cd0a3516fb2"
+    },
+    "en014": {
+     "audio_sha256_16": "735d88d7bd8219fd",
+     "duration_s": 14.06,
+     "ref": "We don't know for sure, but it may have had a forked tongue. Its diet included turtles, large fish, other mosasaurs, and it may even have been a cannibal.",
+     "upstream_id": "1970",
+     "wav_sha256_16": "06cde396d00bb51b"
+    },
+    "en015": {
+     "audio_sha256_16": "959e78b742d2fc27",
+     "duration_s": 7.62,
+     "ref": "Using ships to transport goods is by far the most efficient way to move large amounts of people and goods across oceans.",
+     "upstream_id": "1956",
+     "wav_sha256_16": "6bca1aecb90a6a24"
+    },
+    "en016": {
+     "audio_sha256_16": "882820040d973122",
+     "duration_s": 11.1,
+     "ref": "There are still many men and women alive who survived their time here, and many more who had loved ones who were murdered or worked to death there, Jews and non-Jews alike.",
+     "upstream_id": "1683",
+     "wav_sha256_16": "e21ddf045703739f"
+    },
+    "en017": {
+     "audio_sha256_16": "10cc1a8f84b3c7f1",
+     "duration_s": 5.46,
+     "ref": "Soon after the outbreak of hostilities, Britain initiated a naval blockade of Germany.",
+     "upstream_id": "1907",
+     "wav_sha256_16": "273526a5e72bc9b0"
+    },
+    "en018": {
+     "audio_sha256_16": "d9d07f76d76e213e",
+     "duration_s": 7.2,
+     "ref": "It is thinner under the maria and thicker under the highlands.",
+     "upstream_id": "1700",
+     "wav_sha256_16": "0180a339ca778183"
+    },
+    "en019": {
+     "audio_sha256_16": "d8b504f9f627861e",
+     "duration_s": 8.76,
+     "ref": "The tiger's roar is not like the full-voiced roar of a lion, but more like a sentence of snarly, shouted words.",
+     "upstream_id": "1913",
+     "wav_sha256_16": "46dccb5fd8f6771e"
+    },
+    "en020": {
+     "audio_sha256_16": "9b57d14f8e5726ac",
+     "duration_s": 13.12,
+     "ref": "The central authority of the church had been in Rome for over a thousand years and this concentration of power and money led many to question whether this tenet was being met.",
+     "upstream_id": "1878",
+     "wav_sha256_16": "5beafc743cd5589c"
+    },
+    "en021": {
+     "audio_sha256_16": "6c55023cd69a4609",
+     "duration_s": 10.02,
+     "ref": "However, that is not true. Although there is something written on the back of the document, it is not a treasure map.",
+     "upstream_id": "1935",
+     "wav_sha256_16": "e28201cea462ef93"
+    },
+    "en022": {
+     "audio_sha256_16": "01f754effbcbfe05",
+     "duration_s": 8.58,
+     "ref": "The vehicle itself was taken away from the scene of the accident at approximately 1200 GMT on the same day.",
+     "upstream_id": "1854",
+     "wav_sha256_16": "1ebf0b4715b2c47a"
+    },
+    "en023": {
+     "audio_sha256_16": "091b83672e0bdf85",
+     "duration_s": 7.02,
+     "ref": "Soon after the outbreak of hostilities, Britain initiated a naval blockade of Germany.",
+     "upstream_id": "1907",
+     "wav_sha256_16": "e34d242626caa11e"
+    },
+    "en024": {
+     "audio_sha256_16": "45858650a9094fec",
+     "duration_s": 8.04,
+     "ref": "Liberal criticism of the reconstruction effort has focused on the awarding of reconstruction contracts to perceived Washington insiders.",
+     "upstream_id": "1837",
+     "wav_sha256_16": "fb5a58adac92cf63"
+    },
+    "en025": {
+     "audio_sha256_16": "6dbb5d491baf2de7",
+     "duration_s": 6.72,
+     "ref": "Accepted were Aristotle's views on all matters of science, including psychology.",
+     "upstream_id": "1926",
+     "wav_sha256_16": "aed7424993e8f6b0"
+    },
+    "en026": {
+     "audio_sha256_16": "59a8aecf01b085ef",
+     "duration_s": 8.64,
+     "ref": "Middle order batsmen, Sachin Tendulkar and Rahul Dravid, performed well and made a hundred-run partnership.",
+     "upstream_id": "1976",
+     "wav_sha256_16": "5d7d87ddd6b0ea4a"
+    },
+    "en027": {
+     "audio_sha256_16": "09c2081e65bfb878",
+     "duration_s": 11.48,
+     "ref": "Its renown for being an epicenter of luxury began in about 400 A.D. and lasted up until about 1100 A.D.",
+     "upstream_id": "1724",
+     "wav_sha256_16": "a9f9de2a2f8ed6a6"
+    },
+    "en028": {
+     "audio_sha256_16": "2b14129e808251b1",
+     "duration_s": 9.94,
+     "ref": "The tenth named storm of the Atlantic Hurricane season, Subtropical Storm Jerry, formed in the Atlantic Ocean today.",
+     "upstream_id": "1993",
+     "wav_sha256_16": "719a3facfdae5199"
+    },
+    "en029": {
+     "audio_sha256_16": "3b235b9f442aaeb3",
+     "duration_s": 8.76,
+     "ref": "He has been unable to take the drugs needed to overcome his pain as they are banned from the Games.",
+     "upstream_id": "1697",
+     "wav_sha256_16": "8ff5d6eb51b61b0e"
+    },
+    "en030": {
+     "audio_sha256_16": "ad2a7b34daf686bc",
+     "duration_s": 5.4,
+     "ref": "Swirl the two dry powders together and then, with clean wet hands, squeeze them into a ball.",
+     "upstream_id": "1664",
+     "wav_sha256_16": "e74bf67b76430a8b"
+    },
+    "en031": {
+     "audio_sha256_16": "9a35b0d41619990a",
+     "duration_s": 11.1,
+     "ref": "If you're not used to driving on country roads, keep your wits about you: steep grades, narrow lanes, and sharp curves predominate.",
+     "upstream_id": "1793",
+     "wav_sha256_16": "8520da688cbdbc6f"
+    },
+    "en032": {
+     "audio_sha256_16": "410ba2c57ff958f9",
+     "duration_s": 10.08,
+     "ref": "The official Falklands currency is the Falkland pound (FKP) whose value is set equivalent to that of one British pound (GBP).",
+     "upstream_id": "1979",
+     "wav_sha256_16": "f44e8434f0be6965"
+    },
+    "en033": {
+     "audio_sha256_16": "c88bd2077735b74a",
+     "duration_s": 6.72,
+     "ref": "The term bug is used by entomologists in a formal sense for this group of insects.",
+     "upstream_id": "1949",
+     "wav_sha256_16": "37155a0d74ac482f"
+    },
+    "en034": {
+     "audio_sha256_16": "bc29799f9b934026",
+     "duration_s": 9.64,
+     "ref": "Scientists hope to understand how planets form, especially how the Earth formed, since comets collided with the Earth long ago.",
+     "upstream_id": "1882",
+     "wav_sha256_16": "8e1f3093897cdacd"
+    },
+    "en035": {
+     "audio_sha256_16": "d425af67cfccd2ce",
+     "duration_s": 11.06,
+     "ref": "Finally, there are many small cats (including loose pet cats) that eat the far more numerous small prey like insects, rodents, lizards, and birds.",
+     "upstream_id": "1933",
+     "wav_sha256_16": "72b9bb49596805e8"
+    },
+    "en036": {
+     "audio_sha256_16": "89af6e74ee3695a3",
+     "duration_s": 5.46,
+     "ref": "One can only wonder what the keyboard will become when something newer comes along.",
+     "upstream_id": "1879",
+     "wav_sha256_16": "4876018e5a0f4c99"
+    },
+    "en037": {
+     "audio_sha256_16": "c543678e731e817d",
+     "duration_s": 8.64,
+     "ref": "The presence of a true “invisible team” (Larson and LaFasto, 1989, p109) is also a unique component of a virtual team.",
+     "upstream_id": "1986",
+     "wav_sha256_16": "e039a0099643f8dd"
+    },
+    "en038": {
+     "audio_sha256_16": "ed730a0a2052ea61",
+     "duration_s": 8.68,
+     "ref": "Be firm in turning down men, and don't be afraid to stand your ground (cultural differences or not, it doesn't make it ok!).",
+     "upstream_id": "1873",
+     "wav_sha256_16": "cc1423082e326bb5"
+    },
+    "en039": {
+     "audio_sha256_16": "805681f4ba028d5c",
+     "duration_s": 10.86,
+     "ref": "In many other cities of Italy and in the rest of the world, particularly in Poland, similar setups were made, which were viewed by a great number of people.",
+     "upstream_id": "1840",
+     "wav_sha256_16": "b8124b95b7e72761"
+    },
+    "en040": {
+     "audio_sha256_16": "d63013ea95a555c4",
+     "duration_s": 10.56,
+     "ref": "He was reportedly aged in his 20s. In a statement, Bieber said \"[w]hile I was not present nor directly involved with this tragic accident, my thoughts and prayers are with the family of the victim.\"",
+     "upstream_id": "1960",
+     "wav_sha256_16": "edc7e456568a8fde"
+    },
+    "en041": {
+     "audio_sha256_16": "ab95894b2a6a4702",
+     "duration_s": 8.96,
+     "ref": "There may be more maria on the near side because the crust is thinner. It was easier for lava to rise up to the surface.",
+     "upstream_id": "1754",
+     "wav_sha256_16": "6c73d8f1b44a7e22"
+    },
+    "en042": {
+     "audio_sha256_16": "d917a9cd04c4ffb1",
+     "duration_s": 10.94,
+     "ref": "The fission bomb works on the principle that it takes energy to put together a nucleus with many protons and neutrons.",
+     "upstream_id": "1815",
+     "wav_sha256_16": "76560d74cfb91b00"
+    },
+    "en043": {
+     "audio_sha256_16": "3b8b975d3d472512",
+     "duration_s": 10.44,
+     "ref": "But being placed in the \"high tropics\" just a few degrees north of equator you will need to deal with both heat (always) and strong sun (when the sky is clear, more rarely).",
+     "upstream_id": "1973",
+     "wav_sha256_16": "bd996ebc2acefb81"
+    },
+    "en044": {
+     "audio_sha256_16": "08120e4f99be27af",
+     "duration_s": 7.08,
+     "ref": "He was initially hospitalised in the James Paget Hospital in Great Yarmouth.",
+     "upstream_id": "1902",
+     "wav_sha256_16": "52f2df0c1cc399f2"
+    },
+    "en045": {
+     "audio_sha256_16": "506125d46411b14c",
+     "duration_s": 12.42,
+     "ref": "Congress began funding the obscenity initiative in fiscal 2005 and specified that the FBI must devote 10 agents to adult pornography.",
+     "upstream_id": "1671",
+     "wav_sha256_16": "6de0488c5e9b9b58"
+    },
+    "en046": {
+     "audio_sha256_16": "44b1a957531ef152",
+     "duration_s": 5.82,
+     "ref": "This sediment was necessary for creating sandbars and beaches, which served as wildlife habitats.",
+     "upstream_id": "1796",
+     "wav_sha256_16": "c7ce753492a64438"
+    },
+    "en047": {
+     "audio_sha256_16": "6e3c05d9dff8366f",
+     "duration_s": 11.32,
+     "ref": "Anyone who's going to drive at high latitudes or over mountain passes should consider the possibility of snow, ice, or freezing temperatures.",
+     "upstream_id": "1952",
+     "wav_sha256_16": "2bb14494f23ab290"
+    },
+    "en048": {
+     "audio_sha256_16": "fc1a9b4afb89df0a",
+     "duration_s": 9.96,
+     "ref": "But being placed in the \"high tropics\" just a few degrees north of equator you will need to deal with both heat (always) and strong sun (when the sky is clear, more rarely).",
+     "upstream_id": "1973",
+     "wav_sha256_16": "7af1272b3b2f2b9a"
+    },
+    "en049": {
+     "audio_sha256_16": "333a69703b4f1f5a",
+     "duration_s": 8.28,
+     "ref": "It also attacked anything that entered the water; even a giant dinosaur such as T. rex would be no match for it.",
+     "upstream_id": "1738",
+     "wav_sha256_16": "b300aa29136cf737"
+    },
+    "en050": {
+     "audio_sha256_16": "14481213d969d89c",
+     "duration_s": 4.56,
+     "ref": "The Schengen zone, however, works somewhat like one country in this respect.",
+     "upstream_id": "1817",
+     "wav_sha256_16": "6ef9d9b57644daa0"
+    },
+    "en051": {
+     "audio_sha256_16": "78b10f30eda51df6",
+     "duration_s": 15.7,
+     "ref": "\"He [Wales] basically lied to us from the start. First, by acting as if this was for legal reasons. Second, by pretending he was listening to us, right up to his art deletion.\"",
+     "upstream_id": "1898",
+     "wav_sha256_16": "6ec32e28820d0351"
+    },
+    "en052": {
+     "audio_sha256_16": "d95dde5406c1c6b8",
+     "duration_s": 6.12,
+     "ref": "Martelly swore in a new Provisional Electoral Council (CEP) of nine members yesterday.",
+     "upstream_id": "1703",
+     "wav_sha256_16": "db41523a103f58af"
+    },
+    "en053": {
+     "audio_sha256_16": "cc5df1ef02945cba",
+     "duration_s": 12.12,
+     "ref": "As a result, the process of an organization working together to overcome an obstacle can lead to a new innovative process to serve the customer's need.",
+     "upstream_id": "1686",
+     "wav_sha256_16": "1108829efab1a8d7"
+    },
+    "en054": {
+     "audio_sha256_16": "1c24757cbbd5b986",
+     "duration_s": 4.38,
+     "ref": "This seems sensible, because the Earth doesn't feel as if it's moving, does it?",
+     "upstream_id": "1770",
+     "wav_sha256_16": "a51e46802e733a4d"
+    },
+    "en055": {
+     "audio_sha256_16": "7d3d71b8f39087c1",
+     "duration_s": 7.8,
+     "ref": "Regional and seasonal severe weather phenomena include blizzards, snowstorms, ice storms, and dust storms.",
+     "upstream_id": "1783",
+     "wav_sha256_16": "ecc37c4cb302dbaf"
+    },
+    "en056": {
+     "audio_sha256_16": "b8f294e30196c231",
+     "duration_s": 17.58,
+     "ref": "First among its 78 recommendations is that a new diplomatic initiative should be taken before the end of this year to secure Iraq’s borders against hostile interventions and to re-establish diplomatic relations with its neighbors.",
+     "upstream_id": "1733",
+     "wav_sha256_16": "7769df5e0c6d9ba9"
+    },
+    "en057": {
+     "audio_sha256_16": "54d709fc396ac095",
+     "duration_s": 8.22,
+     "ref": "By 1976, thirty percent of Machu Picchu had been restored and restoration continues till today.",
+     "upstream_id": "1928",
+     "wav_sha256_16": "082a4d003e97ed3f"
+    },
+    "en058": {
+     "audio_sha256_16": "17f64100b4101fa3",
+     "duration_s": 11.1,
+     "ref": "Some cruises feature Berlin, Germany in the brochures. As you can see from the map above Berlin is no where near the sea and a visit to the city is not included in the price of the cruise.",
+     "upstream_id": "1968",
+     "wav_sha256_16": "97c910723e572013"
+    },
+    "en059": {
+     "audio_sha256_16": "71ca172220ac4165",
+     "duration_s": 15.3,
+     "ref": "Scaffolding is not a method of learning but rather an aid that provides support to individuals whom are undergoing a new learning experience such as using a new computer program or beginning a new project.",
+     "upstream_id": "1785",
+     "wav_sha256_16": "5ed064b43b85cf8f"
+    }
+   },
+   "pool_size_after_filter": 647,
+   "source": "google/fleurs en_us test, CC-BY-4.0",
+   "subset_sha256_16": "1c4caa9c73b4deab",
+   "total_s": 554.4
+  },
+  "mixed": {
+   "items": {
+    "mixed000": {
+     "audio_sha256_16": "7317a4752e95039e",
+     "duration_s": 4.03,
+     "ref": "no我专业是那个i s m information systems management",
+     "upstream_id": "00009",
+     "wav_sha256_16": "7317a4752e95039e"
+    },
+    "mixed001": {
+     "audio_sha256_16": "d5aff3578b2e61cd",
+     "duration_s": 2.76,
+     "ref": "想过但是因为最近project有点多",
+     "upstream_id": "00150",
+     "wav_sha256_16": "d5aff3578b2e61cd"
+    },
+    "mixed002": {
+     "audio_sha256_16": "e2df1721a33abfbf",
+     "duration_s": 3.77,
+     "ref": "嗯I like hot pot",
+     "upstream_id": "00193",
+     "wav_sha256_16": "e2df1721a33abfbf"
+    },
+    "mixed003": {
+     "audio_sha256_16": "2c129930454bdd3c",
+     "duration_s": 3.86,
+     "ref": "对我平时然后都喜欢跟Tony一起玩",
+     "upstream_id": "00215",
+     "wav_sha256_16": "2c129930454bdd3c"
+    },
+    "mixed004": {
+     "audio_sha256_16": "0e252c7c40a68681",
+     "duration_s": 3.99,
+     "ref": "但是我现在换major了换成computer engineering",
+     "upstream_id": "00229",
+     "wav_sha256_16": "0e252c7c40a68681"
+    },
+    "mixed005": {
+     "audio_sha256_16": "2c8fb5c3a2e073ca",
+     "duration_s": 3.73,
+     "ref": "然后总共的professor大概有呃一百多位",
+     "upstream_id": "00243",
+     "wav_sha256_16": "2c8fb5c3a2e073ca"
+    },
+    "mixed006": {
+     "audio_sha256_16": "fc6bcb67cbe4ae1f",
+     "duration_s": 2.44,
+     "ref": "就是就是我们的senior",
+     "upstream_id": "00254",
+     "wav_sha256_16": "fc6bcb67cbe4ae1f"
+    },
+    "mixed007": {
+     "audio_sha256_16": "ffa8aeeca3e2b5b5",
+     "duration_s": 3.94,
+     "ref": "所以你还蛮喜欢也蛮习惯Hong Kong life嘛就是",
+     "upstream_id": "00264",
+     "wav_sha256_16": "ffa8aeeca3e2b5b5"
+    },
+    "mixed008": {
+     "audio_sha256_16": "2ea2c9acb4507026",
+     "duration_s": 4.8,
+     "ref": "我我自己是之前的这边exchange就是我在这边当exchange students",
+     "upstream_id": "00276",
+     "wav_sha256_16": "2ea2c9acb4507026"
+    },
+    "mixed009": {
+     "audio_sha256_16": "b2c919c75eccd0d7",
+     "duration_s": 4.0,
+     "ref": "tell一些你现在做什么research方向",
+     "upstream_id": "00295",
+     "wav_sha256_16": "b2c919c75eccd0d7"
+    },
+    "mixed010": {
+     "audio_sha256_16": "5aea2d8a2b24f3e0",
+     "duration_s": 8.28,
+     "ref": "呃怎么之类的就是我们希望透过多轮就是monitor的方式然后最后让这个system可以帮助我们完成某一项任务",
+     "upstream_id": "00312",
+     "wav_sha256_16": "5aea2d8a2b24f3e0"
+    },
+    "mixed011": {
+     "audio_sha256_16": "7ff5eab0b28eb97a",
+     "duration_s": 4.82,
+     "ref": "对这一块算比较easy the part然后",
+     "upstream_id": "00328",
+     "wav_sha256_16": "7ff5eab0b28eb97a"
+    },
+    "mixed012": {
+     "audio_sha256_16": "ce484493a87e57a7",
+     "duration_s": 5.16,
+     "ref": "就是user去回去respond一些就是interesting的",
+     "upstream_id": "00337",
+     "wav_sha256_16": "ce484493a87e57a7"
+    },
+    "mixed013": {
+     "audio_sha256_16": "d1daa5f7d89db94b",
+     "duration_s": 6.88,
+     "ref": "比较就是对我来说比较new但是又就是说比比较容易习惯",
+     "upstream_id": "00352",
+     "wav_sha256_16": "d1daa5f7d89db94b"
+    },
+    "mixed014": {
+     "audio_sha256_16": "2c9dcc7b247de430",
+     "duration_s": 7.82,
+     "ref": "对再说apply for the fourth year i will我觉得我去exchange是在第四年的时候但是我apply是在third years的时候apply",
+     "upstream_id": "00362",
+     "wav_sha256_16": "2c9dcc7b247de430"
+    },
+    "mixed015": {
+     "audio_sha256_16": "bc8f7fbf04ce8dfd",
+     "duration_s": 7.29,
+     "ref": "就是美国学校的exchange的话托福toefl toefl score need to be like over one hundred and five",
+     "upstream_id": "00369",
+     "wav_sha256_16": "bc8f7fbf04ce8dfd"
+    },
+    "mixed016": {
+     "audio_sha256_16": "497d809ff0bc5e8c",
+     "duration_s": 7.2,
+     "ref": "也也是英语方向为主然后整个亚洲这样看起来不是Hong Kong就是Singapore",
+     "upstream_id": "00383",
+     "wav_sha256_16": "497d809ff0bc5e8c"
+    },
+    "mixed017": {
+     "audio_sha256_16": "ad87b851e5427db4",
+     "duration_s": 3.68,
+     "ref": "就是你已经想好你要念哪个major了吗",
+     "upstream_id": "00392",
+     "wav_sha256_16": "ad87b851e5427db4"
+    },
+    "mixed018": {
+     "audio_sha256_16": "0cd9b004a095c0cf",
+     "duration_s": 5.72,
+     "ref": "就你要申请去交换你并不需要去说哦我要去哪一个department交换是直接选school",
+     "upstream_id": "00400",
+     "wav_sha256_16": "0cd9b004a095c0cf"
+    },
+    "mixed019": {
+     "audio_sha256_16": "60a18681296ff27a",
+     "duration_s": 3.16,
+     "ref": "我们的department其实hardware跟software其实是各半",
+     "upstream_id": "00406",
+     "wav_sha256_16": "60a18681296ff27a"
+    },
+    "mixed020": {
+     "audio_sha256_16": "55e6a5b9f504faa8",
+     "duration_s": 4.34,
+     "ref": "感觉还不错robotics就是robotics mix with language application",
+     "upstream_id": "00417",
+     "wav_sha256_16": "55e6a5b9f504faa8"
+    },
+    "mixed021": {
+     "audio_sha256_16": "54d9d006501acb2c",
+     "duration_s": 2.98,
+     "ref": "对就是当时考虑过挺多major的",
+     "upstream_id": "00430",
+     "wav_sha256_16": "54d9d006501acb2c"
+    },
+    "mixed022": {
+     "audio_sha256_16": "6b1ad413c58bd3f6",
+     "duration_s": 2.08,
+     "ref": "还是做software的方向",
+     "upstream_id": "00438",
+     "wav_sha256_16": "6b1ad413c58bd3f6"
+    },
+    "mixed023": {
+     "audio_sha256_16": "a50bcdd16a6e6485",
+     "duration_s": 6.62,
+     "ref": "所以你平时就现在大部分时间还是tennis就打网球",
+     "upstream_id": "00494",
+     "wav_sha256_16": "a50bcdd16a6e6485"
+    },
+    "mixed024": {
+     "audio_sha256_16": "6560644426666444",
+     "duration_s": 2.36,
+     "ref": "嗯yeah因为体积比较小",
+     "upstream_id": "00613",
+     "wav_sha256_16": "6560644426666444"
+    },
+    "mixed025": {
+     "audio_sha256_16": "909515ccfe1ef006",
+     "duration_s": 3.14,
+     "ref": "首先为什么basketball呢因为就是",
+     "upstream_id": "00624",
+     "wav_sha256_16": "909515ccfe1ef006"
+    },
+    "mixed026": {
+     "audio_sha256_16": "f2c3d6c998e07f17",
+     "duration_s": 2.28,
+     "ref": "badminton其实可以就是",
+     "upstream_id": "00638",
+     "wav_sha256_16": "f2c3d6c998e07f17"
+    },
+    "mixed027": {
+     "audio_sha256_16": "e0062e3210ff503e",
+     "duration_s": 4.06,
+     "ref": "就是特别不好掌控那个就是你bracket的balance",
+     "upstream_id": "00657",
+     "wav_sha256_16": "e0062e3210ff503e"
+    },
+    "mixed028": {
+     "audio_sha256_16": "c2ff8fc3232f3a4e",
+     "duration_s": 5.94,
+     "ref": "对就是那些一些basketball或者soccer对",
+     "upstream_id": "00672",
+     "wav_sha256_16": "c2ff8fc3232f3a4e"
+    },
+    "mixed029": {
+     "audio_sha256_16": "fc133e39128f033a",
+     "duration_s": 3.98,
+     "ref": "比较容易学的是swim",
+     "upstream_id": "00681",
+     "wav_sha256_16": "fc133e39128f033a"
+    },
+    "mixed030": {
+     "audio_sha256_16": "70ba848ce5747daa",
+     "duration_s": 7.39,
+     "ref": "呃是因为我比较喜欢篮球所以我喜欢的运动员有Michael Jordan啊",
+     "upstream_id": "00695",
+     "wav_sha256_16": "70ba848ce5747daa"
+    },
+    "mixed031": {
+     "audio_sha256_16": "2ad39ed2291b05e4",
+     "duration_s": 2.89,
+     "ref": "因为他的得分方式非常efficient",
+     "upstream_id": "00706",
+     "wav_sha256_16": "2ad39ed2291b05e4"
+    },
+    "mixed032": {
+     "audio_sha256_16": "f79e8b580141969d",
+     "duration_s": 4.32,
+     "ref": "就是 [UNK] a famous chinese player姚明",
+     "upstream_id": "00717",
+     "wav_sha256_16": "f79e8b580141969d"
+    },
+    "mixed033": {
+     "audio_sha256_16": "b20768bb16f82c22",
+     "duration_s": 11.2,
+     "ref": "而且他的先锋他的lay up他的那个crossover都非常的非常的标准非常的那个具有威胁性",
+     "upstream_id": "00724",
+     "wav_sha256_16": "b20768bb16f82c22"
+    },
+    "mixed034": {
+     "audio_sha256_16": "0ea010e1d4abed91",
+     "duration_s": 8.04,
+     "ref": "那我呃嗯Why you choose Hong Kong instead of other other foreign countries like US or Australia",
+     "upstream_id": "00773",
+     "wav_sha256_16": "0ea010e1d4abed91"
+    },
+    "mixed035": {
+     "audio_sha256_16": "0dabfc7b84a769f1",
+     "duration_s": 2.36,
+     "ref": "那你平时怎么跟local交流啊",
+     "upstream_id": "00841",
+     "wav_sha256_16": "0dabfc7b84a769f1"
+    },
+    "mixed036": {
+     "audio_sha256_16": "ed811da8545555fe",
+     "duration_s": 2.66,
+     "ref": "个人的personalities还有那个",
+     "upstream_id": "00891",
+     "wav_sha256_16": "ed811da8545555fe"
+    },
+    "mixed037": {
+     "audio_sha256_16": "d33915c44be76b1e",
+     "duration_s": 7.94,
+     "ref": "大四上学期好像是反正好像是六月份的时候才开始准备IELTS",
+     "upstream_id": "00921",
+     "wav_sha256_16": "d33915c44be76b1e"
+    },
+    "mixed038": {
+     "audio_sha256_16": "2c91148ac8f4b37b",
+     "duration_s": 3.2,
+     "ref": "但是你们不觉得平时也有很多due要赶吗",
+     "upstream_id": "00939",
+     "wav_sha256_16": "2c91148ac8f4b37b"
+    },
+    "mixed039": {
+     "audio_sha256_16": "983edcf36802e47d",
+     "duration_s": 8.44,
+     "ref": "sandwiches或者是其他东西分给我们吃然后我们就边吃边听他分享share他的一些他们公司的一些东西",
+     "upstream_id": "00953",
+     "wav_sha256_16": "983edcf36802e47d"
+    },
+    "mixed040": {
+     "audio_sha256_16": "0df5dd405c8d0d49",
+     "duration_s": 10.89,
+     "ref": "那种关于呃着装啊还有关于那些关于interview skills的东西所以you need to have um to dress formal",
+     "upstream_id": "00968",
+     "wav_sha256_16": "0df5dd405c8d0d49"
+    },
+    "mixed041": {
+     "audio_sha256_16": "8999b715c0f07bcc",
+     "duration_s": 3.34,
+     "ref": "self driving方面自动驾驶方面",
+     "upstream_id": "00979",
+     "wav_sha256_16": "8999b715c0f07bcc"
+    },
+    "mixed042": {
+     "audio_sha256_16": "78790bf6be2c3513",
+     "duration_s": 2.23,
+     "ref": "他他make a mistake",
+     "upstream_id": "00989",
+     "wav_sha256_16": "78790bf6be2c3513"
+    },
+    "mixed043": {
+     "audio_sha256_16": "5b162a00f36ed14b",
+     "duration_s": 3.37,
+     "ref": "很大程度上是属于那种data driver",
+     "upstream_id": "01003",
+     "wav_sha256_16": "5b162a00f36ed14b"
+    },
+    "mixed044": {
+     "audio_sha256_16": "1145f12d2bf660c8",
+     "duration_s": 3.47,
+     "ref": "另一个呢就是responsibility的问题",
+     "upstream_id": "01014",
+     "wav_sha256_16": "1145f12d2bf660c8"
+    },
+    "mixed045": {
+     "audio_sha256_16": "49739fc35d743cbb",
+     "duration_s": 3.46,
+     "ref": "其实我觉得呢要分不同的situation",
+     "upstream_id": "01026",
+     "wav_sha256_16": "49739fc35d743cbb"
+    },
+    "mixed046": {
+     "audio_sha256_16": "772048dd18460772",
+     "duration_s": 4.83,
+     "ref": "如果你customer在知道这个会有五percent的accident",
+     "upstream_id": "01032",
+     "wav_sha256_16": "772048dd18460772"
+    },
+    "mixed047": {
+     "audio_sha256_16": "f7d6e5bd40d5a1ac",
+     "duration_s": 5.76,
+     "ref": "然后如果这样的话accident happen的话我觉得就是company要take要负这个责任",
+     "upstream_id": "01037",
+     "wav_sha256_16": "f7d6e5bd40d5a1ac"
+    },
+    "mixed048": {
+     "audio_sha256_16": "a39c0a82c2d9582f",
+     "duration_s": 7.9,
+     "ref": "第二个呢它的测试也很很复杂就是说你在测试的时候你只能simulate这个scenario",
+     "upstream_id": "01047",
+     "wav_sha256_16": "a39c0a82c2d9582f"
+    },
+    "mixed049": {
+     "audio_sha256_16": "f5a24d19c0981617",
+     "duration_s": 9.04,
+     "ref": "ai可以就是很大很大程度上改善我们的生活比如说什么一些translation啊还有一些就是",
+     "upstream_id": "01052",
+     "wav_sha256_16": "f5a24d19c0981617"
+    },
+    "mixed050": {
+     "audio_sha256_16": "36aefbea86c60bc2",
+     "duration_s": 10.18,
+     "ref": "对但是它也有它的drawback就是说啊就是有手机可以玩一些很多很多游戏之类的会影响学习",
+     "upstream_id": "01062",
+     "wav_sha256_16": "36aefbea86c60bc2"
+    },
+    "mixed051": {
+     "audio_sha256_16": "69a3abe94210dfe8",
+     "duration_s": 6.86,
+     "ref": "你要就是教导就是自己的孩子如何使用smartphone是一个非常关键的",
+     "upstream_id": "01081",
+     "wav_sha256_16": "69a3abe94210dfe8"
+    },
+    "mixed052": {
+     "audio_sha256_16": "0a0e627ded1ce59c",
+     "duration_s": 5.2,
+     "ref": "我们也学big big data [UNK] 然后我们主要是拿它来做一些",
+     "upstream_id": "01127",
+     "wav_sha256_16": "0a0e627ded1ce59c"
+    },
+    "mixed053": {
+     "audio_sha256_16": "72c04590f8c4876f",
+     "duration_s": 4.8,
+     "ref": "做optimization然后再去做预测主要还是做预测",
+     "upstream_id": "01132",
+     "wav_sha256_16": "72c04590f8c4876f"
+    },
+    "mixed054": {
+     "audio_sha256_16": "676eca80e9c86a4e",
+     "duration_s": 3.64,
+     "ref": "computer language还有problem language的东西我还是不太懂",
+     "upstream_id": "01142",
+     "wav_sha256_16": "676eca80e9c86a4e"
+    },
+    "mixed055": {
+     "audio_sha256_16": "bbbf1d5626e42da8",
+     "duration_s": 2.94,
+     "ref": "哦那个是那个是wind好像是做",
+     "upstream_id": "01157",
+     "wav_sha256_16": "bbbf1d5626e42da8"
+    },
+    "mixed056": {
+     "audio_sha256_16": "adf574ecd8679335",
+     "duration_s": 3.28,
+     "ref": "我当时学privacy的时候也是觉得",
+     "upstream_id": "01199",
+     "wav_sha256_16": "adf574ecd8679335"
+    },
+    "mixed057": {
+     "audio_sha256_16": "d093a51ed5c1d528",
+     "duration_s": 3.06,
+     "ref": "然后它可能会record your personal life",
+     "upstream_id": "01213",
+     "wav_sha256_16": "d093a51ed5c1d528"
+    },
+    "mixed058": {
+     "audio_sha256_16": "5296e189c34eb1e7",
+     "duration_s": 5.26,
+     "ref": "他们之所以不用Alipay的原因就是因为啊他们觉得Alipay很轻易的就能",
+     "upstream_id": "01255",
+     "wav_sha256_16": "5296e189c34eb1e7"
+    },
+    "mixed059": {
+     "audio_sha256_16": "a30ecd6e338a52be",
+     "duration_s": 2.66,
+     "ref": "sign in的话只需要你的一个",
+     "upstream_id": "01283",
+     "wav_sha256_16": "a30ecd6e338a52be"
+    }
+   },
+   "pool_size_after_filter": 306,
+   "source": "CAiRE/ASCEND main test, CC-BY-SA-4.0",
+   "subset_sha256_16": "46393673d779f3f7",
+   "total_s": 295.7
+  },
+  "zh": {
+   "items": {
+    "zh000": {
+     "audio_sha256_16": "a72c0b59fdba8085",
+     "duration_s": 10.38,
+     "ref": "“这并不是告别。这是一个篇章的结束，也是新篇章的开始。”",
+     "upstream_id": "1906",
+     "wav_sha256_16": "5214e16584b6498d"
+    },
+    "zh001": {
+     "audio_sha256_16": "3396a3e3612d2451",
+     "duration_s": 18.44,
+     "ref": "有些人认为他是对的，但也有很多人持相反意见；他们认为太阳系是围绕着地球运转的，太阳也是（甚至其他恒星也是）。",
+     "upstream_id": "1874",
+     "wav_sha256_16": "61c18a5e0181273f"
+    },
+    "zh002": {
+     "audio_sha256_16": "5a478dd626fa441f",
+     "duration_s": 11.94,
+     "ref": "自 1966 年以来，孙德尔本斯一直是野生动物保护区。据估计，目前该区生活着 400 只皇家孟加拉虎和大约 3 万只梅花鹿。",
+     "upstream_id": "1712",
+     "wav_sha256_16": "362ffec7320d18d5"
+    },
+    "zh003": {
+     "audio_sha256_16": "71276e151ca251c9",
+     "duration_s": 12.3,
+     "ref": "该海湾曾在 1889 年发生过一场臭名昭著的海军对峙，当时来自德国、美国和英国的七艘舰船拒绝驶离这个海湾。",
+     "upstream_id": "1723",
+     "wav_sha256_16": "6675c6fb6dabd803"
+    },
+    "zh004": {
+     "audio_sha256_16": "e99d7e1fe64ac91f",
+     "duration_s": 10.9,
+     "ref": "对儿童来说，金字塔的声光表演是该地区最有趣的活动之一。",
+     "upstream_id": "1740",
+     "wav_sha256_16": "4ae712e496ea97bb"
+    },
+    "zh005": {
+     "audio_sha256_16": "e32b16ccc8bcb53c",
+     "duration_s": 14.98,
+     "ref": "起初，他被送往位于大雅茅斯的詹姆斯·佩吉特医院进行救治。",
+     "upstream_id": "1902",
+     "wav_sha256_16": "bb0b8a91c611edc1"
+    },
+    "zh006": {
+     "audio_sha256_16": "aec933d626de2394",
+     "duration_s": 9.96,
+     "ref": "平时你总能在这里听到游客和小摊贩的声音。声光交织，就像在讲述一个动人的故事。",
+     "upstream_id": "1934",
+     "wav_sha256_16": "ae157fc1b9d1e15e"
+    },
+    "zh007": {
+     "audio_sha256_16": "bd3dccd1202946e0",
+     "duration_s": 12.72,
+     "ref": "胡纳已经辞职，他在内阁中的位置将由国会议员埃德·戴维 (Ed Davey) 接替。预计国会议员诺曼·兰姆 (Norman Lamb) 将接替戴维空出的商务部长一职。",
+     "upstream_id": "1708",
+     "wav_sha256_16": "443ffc4aa96dc3db"
+    },
+    "zh008": {
+     "audio_sha256_16": "6358377e84217018",
+     "duration_s": 22.86,
+     "ref": "表演开始五分钟后，刮起了风，约一分钟后，风速达到了 70 公里/小时……紧接着又下起了雨，雨势如此之大，像针扎一样拍打在皮肤上，随后天上下起了冰雹，惊慌失措的人群尖叫着四散奔逃。",
+     "upstream_id": "1932",
+     "wav_sha256_16": "58f6017561b7674c"
+    },
+    "zh009": {
+     "audio_sha256_16": "589bcffd45044f61",
+     "duration_s": 11.04,
+     "ref": "野孩子在被抛弃或离家出走之前，可能经历过严重的儿童虐待或创伤。",
+     "upstream_id": "1727",
+     "wav_sha256_16": "2022c29977efd8b8"
+    },
+    "zh010": {
+     "audio_sha256_16": "b7008bcb66c2e415",
+     "duration_s": 10.26,
+     "ref": "较小的岛屿大多是独立国家，或所属于法国，它们以豪华海滩度假胜地而闻名。",
+     "upstream_id": "1912",
+     "wav_sha256_16": "fa47c596c7b7c10c"
+    },
+    "zh011": {
+     "audio_sha256_16": "037f711c48902ffa",
+     "duration_s": 14.86,
+     "ref": "交通流量研究的是驾驶员和车辆在两点之间的运动，以及它们之间的相互作用。",
+     "upstream_id": "1823",
+     "wav_sha256_16": "e27142c798a80c92"
+    },
+    "zh012": {
+     "audio_sha256_16": "6492052f25f27ae0",
+     "duration_s": 15.5,
+     "ref": "通过红外光谱 (FTIR) 进行比较后发现，这些结晶的成分与在受影响宠物的尿液中发现的结晶成分吻合。",
+     "upstream_id": "1786",
+     "wav_sha256_16": "95dae2e6509dac2a"
+    },
+    "zh013": {
+     "audio_sha256_16": "a5cb1580bb79ec60",
+     "duration_s": 13.74,
+     "ref": "综上所述，如果我们的祖先解决“蛋白质问题”的途径与如今热带草原上的黑猩猩所使用的方法无异，我们也不应该感到惊讶。",
+     "upstream_id": "1940",
+     "wav_sha256_16": "f14d8803f3ee579d"
+    },
+    "zh014": {
+     "audio_sha256_16": "0d74e3e0d9b49f3e",
+     "duration_s": 7.02,
+     "ref": "梵蒂冈城的人口大约有 800 人。它是世界上最小的独立国家，也是人口最少的国家。",
+     "upstream_id": "1975",
+     "wav_sha256_16": "5f4c5abf7019429b"
+    },
+    "zh015": {
+     "audio_sha256_16": "605e96838a727343",
+     "duration_s": 8.46,
+     "ref": "周日晚些时候，美国总统唐纳德·特朗普通过新闻秘书发表声明，宣布美军将撤离叙利亚。",
+     "upstream_id": "1756",
+     "wav_sha256_16": "ba638253905442f9"
+    },
+    "zh016": {
+     "audio_sha256_16": "945043ebfd4e90b8",
+     "duration_s": 13.86,
+     "ref": "野孩子在被抛弃或离家出走之前，可能经历过严重的儿童虐待或创伤。",
+     "upstream_id": "1727",
+     "wav_sha256_16": "098b4d326f21f12f"
+    },
+    "zh017": {
+     "audio_sha256_16": "565ac6c79e751d79",
+     "duration_s": 8.64,
+     "ref": "邓迪大学（University of Dundee）的 Pamela Ferguson 教授指出：“记者如果公布嫌疑人的照片等信息的话，似乎确实存在危害性。”",
+     "upstream_id": "1843",
+     "wav_sha256_16": "c558f6fba0d4421a"
+    },
+    "zh018": {
+     "audio_sha256_16": "8cc94468016dc59f",
+     "duration_s": 13.64,
+     "ref": "据透露，这份文件将提及边界争端，巴勒斯坦希望以1967年中东战争前的边界为基础。",
+     "upstream_id": "1665",
+     "wav_sha256_16": "372082f392a505ee"
+    },
+    "zh019": {
+     "audio_sha256_16": "e048ee16b2774965",
+     "duration_s": 11.92,
+     "ref": "对儿童来说，金字塔的声光表演是该地区最有趣的活动之一。",
+     "upstream_id": "1740",
+     "wav_sha256_16": "49ae50014d5fe2b0"
+    },
+    "zh020": {
+     "audio_sha256_16": "b9ddaee90dbb361e",
+     "duration_s": 6.06,
+     "ref": "吉萨大金字塔是七大奇迹中唯一至今仍屹立不倒的建筑。",
+     "upstream_id": "1838",
+     "wav_sha256_16": "337b997e7358e88b"
+    },
+    "zh021": {
+     "audio_sha256_16": "38453a251e61f0cd",
+     "duration_s": 12.24,
+     "ref": "睡眠中断是指这样的过程：在正常睡眠期间有意地醒来，并且在短时间之后（10-60分钟）睡着。",
+     "upstream_id": "1773",
+     "wav_sha256_16": "668f1c952e4cd8cc"
+    },
+    "zh022": {
+     "audio_sha256_16": "f4d003349307a655",
+     "duration_s": 9.12,
+     "ref": "这里几乎都是沙滩，游泳很安全，大部分地方都有新西兰圣诞树的树荫。",
+     "upstream_id": "1965",
+     "wav_sha256_16": "9673a9df011d10d9"
+    },
+    "zh023": {
+     "audio_sha256_16": "564dab51d240c07a",
+     "duration_s": 6.0,
+     "ref": "州长办公室表示，伤者中有十九人是警察。",
+     "upstream_id": "1860",
+     "wav_sha256_16": "205433ddce1155ba"
+    },
+    "zh024": {
+     "audio_sha256_16": "40297adb135ed540",
+     "duration_s": 7.86,
+     "ref": "文明是一种由共同生活、合作工作的人群（社会）所共享的单一文化。",
+     "upstream_id": "1794",
+     "wav_sha256_16": "529f69edf0943b6c"
+    },
+    "zh025": {
+     "audio_sha256_16": "09fcd0524525d12d",
+     "duration_s": 12.82,
+     "ref": "但在队长输掉三柱门后，印度在结束这一局的比赛时只得了 36 分，输掉 7 个三柱门。",
+     "upstream_id": "1693",
+     "wav_sha256_16": "32421ec33d3902e3"
+    },
+    "zh026": {
+     "audio_sha256_16": "70951698bf3046e0",
+     "duration_s": 6.68,
+     "ref": "其他摔跤选手也纷纷悼念露娜 (Luna) 。",
+     "upstream_id": "1747",
+     "wav_sha256_16": "80eaa93a5c93c4bd"
+    },
+    "zh027": {
+     "audio_sha256_16": "a3632c68d4de67c9",
+     "duration_s": 6.72,
+     "ref": "结果，两种鱼类灭绝，另外两种鱼类濒临灭绝，其中包括弓背鲑。",
+     "upstream_id": "1752",
+     "wav_sha256_16": "7992213b6a71c562"
+    },
+    "zh028": {
+     "audio_sha256_16": "a6cdcec600e948bb",
+     "duration_s": 18.34,
+     "ref": "他补充道，“然而，他们不应该被要求承担超出其发展阶段、责任和能力范围的义务。”",
+     "upstream_id": "1857",
+     "wav_sha256_16": "c6b9d3d76b506761"
+    },
+    "zh029": {
+     "audio_sha256_16": "959aa6fb1146bfdd",
+     "duration_s": 21.54,
+     "ref": "在这份报告的 78 项建议中，第一条建议是在今年年底之前采取新的外交行动，目的在于保护伊拉克的边界免受敌对势力的侵害，并与邻国重建外交关系。",
+     "upstream_id": "1733",
+     "wav_sha256_16": "acf92d0724498e5c"
+    },
+    "zh030": {
+     "audio_sha256_16": "d4fa14301c93f043",
+     "duration_s": 7.56,
+     "ref": "昆虫学家们用“虫子 (bug)”一词来正式称呼这一类的昆虫。",
+     "upstream_id": "1949",
+     "wav_sha256_16": "48dcc94e529d1127"
+    },
+    "zh031": {
+     "audio_sha256_16": "3c09f3d8ec105d38",
+     "duration_s": 12.6,
+     "ref": "人们自古以来就知道金、银、铜等基本化学元素，因为这些元素都能以自然形态在自然界中发现，而且比较容易使用原始工具进行开采。",
+     "upstream_id": "1836",
+     "wav_sha256_16": "806fafad421c6707"
+    },
+    "zh032": {
+     "audio_sha256_16": "87e442a572a94164",
+     "duration_s": 13.46,
+     "ref": "该委员会是马尔泰利 (Martelly) 对始于 10 月份的大规模反政府抗议活动做出的回应。",
+     "upstream_id": "1966",
+     "wav_sha256_16": "dd7b1a1eb29d7e5a"
+    },
+    "zh033": {
+     "audio_sha256_16": "6d1a878a55d710be",
+     "duration_s": 11.16,
+     "ref": "一夜之间印刷了 150 到 200 份，就是现在众所周知的“邓拉普宽边”(Dunlap broadsides) 版。",
+     "upstream_id": "1776",
+     "wav_sha256_16": "d99c611b21ece2ad"
+    },
+    "zh034": {
+     "audio_sha256_16": "e69a03a6112e4fcd",
+     "duration_s": 8.4,
+     "ref": "在某些航线上，大型公司有自己的飞机，但对于其他航线和小公司来说，就有问题了。",
+     "upstream_id": "1691",
+     "wav_sha256_16": "5c0c88c3d45da2ad"
+    },
+    "zh035": {
+     "audio_sha256_16": "ee19cc208e987394",
+     "duration_s": 9.4,
+     "ref": "一枚炸弹在总督办公室外爆炸。",
+     "upstream_id": "1755",
+     "wav_sha256_16": "ba8f9280dcc9e979"
+    },
+    "zh036": {
+     "audio_sha256_16": "df7ca03a202bea96",
+     "duration_s": 11.04,
+     "ref": "从传统意义上讲，海军的任务是确保国家保持运输人员和货物的能力，同时，干扰敌人运输其人员和货物的能力。",
+     "upstream_id": "1688",
+     "wav_sha256_16": "7c06488804b4c64b"
+    },
+    "zh037": {
+     "audio_sha256_16": "ecc4e92fe2cdfefc",
+     "duration_s": 9.78,
+     "ref": "如果只是在乘船游览的情况下登岸，则不需要单独的签证（规定截至 2009 年）。",
+     "upstream_id": "1981",
+     "wav_sha256_16": "51cd233ea441e771"
+    },
+    "zh038": {
+     "audio_sha256_16": "d6ca3bca9097a087",
+     "duration_s": 8.94,
+     "ref": "亚马逊河占全世界所有河流的入海流量的 20%。",
+     "upstream_id": "1875",
+     "wav_sha256_16": "9934a192ad941d2a"
+    },
+    "zh039": {
+     "audio_sha256_16": "ebeb1509ea5689ec",
+     "duration_s": 8.82,
+     "ref": "拒绝男人时要坚定，别害怕坚持自己的立场（不管文化有无差异，都要果断回绝！）。",
+     "upstream_id": "1873",
+     "wav_sha256_16": "fbe5eaee3dcb43fc"
+    },
+    "zh040": {
+     "audio_sha256_16": "08499486f09bfeea",
+     "duration_s": 19.64,
+     "ref": "他的作品极具辨识度，拥有高质量和丰富的细节，这也使得他成为了极少数在集邮人士中“家喻户晓”的人物之一。有些人专门收集他的作品。",
+     "upstream_id": "1790",
+     "wav_sha256_16": "0c49eca19fc8b567"
+    },
+    "zh041": {
+     "audio_sha256_16": "19888ac67d7b0240",
+     "duration_s": 13.38,
+     "ref": "同样，历朝历代更迭期间都是一段小国分立的不稳定时代。其中最有名的便是长达 60 年的三国时期，该时期处于汉晋两代的更迭之间。",
+     "upstream_id": "1782",
+     "wav_sha256_16": "b5b1a16a9bffe275"
+    },
+    "zh042": {
+     "audio_sha256_16": "fa6a3ed5c6d44638",
+     "duration_s": 11.94,
+     "ref": "他们因其严格防守、控球技术和出色的团队合作脱颖而出。很显然，这是一支无往不胜的球队。",
+     "upstream_id": "1954",
+     "wav_sha256_16": "eb5d312e5f8320b3"
+    },
+    "zh043": {
+     "audio_sha256_16": "57d8be0a8d542f19",
+     "duration_s": 12.0,
+     "ref": "这座城市也是攀登尼拉贡戈火山（Nyiragongo）以及非洲最便宜的山地大猩猩追踪项目的基地。",
+     "upstream_id": "1919",
+     "wav_sha256_16": "20cf00c70590286b"
+    },
+    "zh044": {
+     "audio_sha256_16": "67a46f643476284b",
+     "duration_s": 17.12,
+     "ref": "恶劣天气是任何危险天气现象的总称；这种天气会造成破坏、严重社会混乱或人员伤亡。",
+     "upstream_id": "1719",
+     "wav_sha256_16": "f7ef5c816a8d1809"
+    },
+    "zh045": {
+     "audio_sha256_16": "d2cbae798c374358",
+     "duration_s": 5.28,
+     "ref": "亚马逊河占全世界所有河流的入海流量的 20%。",
+     "upstream_id": "1875",
+     "wav_sha256_16": "b5ed7715dc36eeda"
+    },
+    "zh046": {
+     "audio_sha256_16": "41ef4b25174025a0",
+     "duration_s": 8.22,
+     "ref": "写博客是一种能够激发合作的工具，还能鼓励学生把学习延伸到传统的学校授课之外。",
+     "upstream_id": "1787",
+     "wav_sha256_16": "8dd6f5e9d74deb68"
+    },
+    "zh047": {
+     "audio_sha256_16": "8c647ef25c32f4d2",
+     "duration_s": 11.64,
+     "ref": "如果你不习惯在乡村道路上开车，那可要保持头脑清醒：这里到处都是陡坡、窄车道和急转弯。",
+     "upstream_id": "1793",
+     "wav_sha256_16": "31bf8d5bca749bc8"
+    },
+    "zh048": {
+     "audio_sha256_16": "773394e93f21096b",
+     "duration_s": 5.16,
+     "ref": "互联网结合了大众传播和人际传播的要素。",
+     "upstream_id": "1802",
+     "wav_sha256_16": "c1ab8f4d02aff5c0"
+    },
+    "zh049": {
+     "audio_sha256_16": "904c133ee9f81134",
+     "duration_s": 12.88,
+     "ref": "这些海滩有时挤满了度假的家庭，沿岸排列着各种各样的商店。 游泳很安全。",
+     "upstream_id": "1944",
+     "wav_sha256_16": "ae08dd0cfbe71229"
+    },
+    "zh050": {
+     "audio_sha256_16": "68892beadd469b23",
+     "duration_s": 11.4,
+     "ref": "它的舌头有可能是分叉的，对此我们尚不确定。它的食物包括海龟、大型鱼类、其他沧龙，甚至会吃人。",
+     "upstream_id": "1970",
+     "wav_sha256_16": "b575ac9a47ffb814"
+    },
+    "zh051": {
+     "audio_sha256_16": "720790192d14cfbd",
+     "duration_s": 19.08,
+     "ref": "随着中世纪走向末期，西欧人民逐渐发展出自己的风格。当时最大的进步之一就是十字军东征后，人们开始用纽扣来系衣服。",
+     "upstream_id": "1859",
+     "wav_sha256_16": "daf76981fd24f8e1"
+    },
+    "zh052": {
+     "audio_sha256_16": "56a76d60a4445a43",
+     "duration_s": 8.04,
+     "ref": "该群岛位于南极半岛以北 120 公里处。最大的岛屿是乔治国王岛，这里是“繁星村（Villa Las Estrellas）”的定居点。",
+     "upstream_id": "1758",
+     "wav_sha256_16": "920835f65f7a06ec"
+    },
+    "zh053": {
+     "audio_sha256_16": "8c8beebcd342bbd5",
+     "duration_s": 17.12,
+     "ref": "在外围岛屿，可能无法使用信用卡，但可以使用英美货币；请事先与房主联系，确认可接受的付款方式。",
+     "upstream_id": "1774",
+     "wav_sha256_16": "1fc9f24d1af696c2"
+    },
+    "zh054": {
+     "audio_sha256_16": "74aa468d2f3a1dac",
+     "duration_s": 8.52,
+     "ref": "亚热带风暴杰瑞 (Jerry) 今天在大西洋形成，这是大西洋飓风季节中第十个被命名的风暴。",
+     "upstream_id": "1993",
+     "wav_sha256_16": "15ed2087c847fe0f"
+    },
+    "zh055": {
+     "audio_sha256_16": "d6564aeebede182f",
+     "duration_s": 22.5,
+     "ref": "巴塞罗那的官方语言为加泰罗尼亚语和西班牙语。大约一半的当地人更愿意说加泰罗尼亚语，绝大多数人都听懂加泰罗尼亚语，至于西班牙语，几乎每个人都能听懂。",
+     "upstream_id": "1813",
+     "wav_sha256_16": "b9710742286cc826"
+    },
+    "zh056": {
+     "audio_sha256_16": "99656ebc0d1b135e",
+     "duration_s": 13.46,
+     "ref": "裂变原子弹的工作原理如下：把一个原子核和许多质子及中子聚在一起需要能量。",
+     "upstream_id": "1815",
+     "wav_sha256_16": "5977cb8713c8afcb"
+    },
+    "zh057": {
+     "audio_sha256_16": "31957d5f4a428f73",
+     "duration_s": 22.44,
+     "ref": "“说穿了，他[威尔斯]从一开始就对我们撒谎。首先，他表现得好像是出于法律原因才这么做。其次，他先是假装听取我们的意见，然后直接删除了这些艺术作品。”",
+     "upstream_id": "1898",
+     "wav_sha256_16": "1668bfd95437b8f9"
+    },
+    "zh058": {
+     "audio_sha256_16": "498a47b3e7c9b54b",
+     "duration_s": 12.12,
+     "ref": "此外，在革命之后，官职面向全体男性开放申请，这使得最有抱负、最成功之人有机会飞黄腾达。",
+     "upstream_id": "1939",
+     "wav_sha256_16": "ced54f410b1e9207"
+    },
+    "zh059": {
+     "audio_sha256_16": "4efb7a49aec06eca",
+     "duration_s": 17.98,
+     "ref": "现年 53 岁的库莫（Cuomo）从今年年初开始担任州长，并于上个月签署了一项将同性婚姻合法化的法案。",
+     "upstream_id": "1722",
+     "wav_sha256_16": "7e08dd0fdb00251a"
+    }
+   },
+   "pool_size_after_filter": 945,
+   "source": "google/fleurs cmn_hans_cn test, CC-BY-4.0",
+   "subset_sha256_16": "df7b2520eb2c46a4",
+   "total_s": 731.9
+  }
+ }
+}

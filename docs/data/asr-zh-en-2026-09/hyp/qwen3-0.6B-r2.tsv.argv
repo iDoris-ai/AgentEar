@@ -1,0 +1,540 @@
+--help
+transcribe --help
+transcribe --engine qwen3 -m 0.6B --context=raw, road, row, ro, roll, knowledge base, notice base, MacBook, macbook, mac book, Mac mini, mark mini, mac mini, 24R, 24 r, idea, report, Docker, doocca, Kubernetes, cuubber needs, WiFi, wifi, ESP32, esp32, ESP 32, derived, routes, committed, provisional, vendor -- /private/tmp/claude-502/-Users-jason-Dev-tools-AgentEar/33723602-1e71-4fcc-a8b4-cbcd366361fc/scratchpad/asr/corpus/wav/en/en000.wav
+--help
+transcribe --help
+transcribe --engine qwen3 -m 0.6B --context=raw, road, row, ro, roll, knowledge base, notice base, MacBook, macbook, mac book, Mac mini, mark mini, mac mini, 24R, 24 r, idea, report, Docker, doocca, Kubernetes, cuubber needs, WiFi, wifi, ESP32, esp32, ESP 32, derived, routes, committed, provisional, vendor -- /private/tmp/claude-502/-Users-jason-Dev-tools-AgentEar/33723602-1e71-4fcc-a8b4-cbcd366361fc/scratchpad/asr/corpus/wav/en/en001.wav
+--help
+transcribe --help
+transcribe --engine qwen3 -m 0.6B --context=raw, road, row, ro, roll, knowledge base, notice base, MacBook, macbook, mac book, Mac mini, mark mini, mac mini, 24R, 24 r, idea, report, Docker, doocca, Kubernetes, cuubber needs, WiFi, wifi, ESP32, esp32, ESP 32, derived, routes, committed, provisional, vendor -- /private/tmp/claude-502/-Users-jason-Dev-tools-AgentEar/33723602-1e71-4fcc-a8b4-cbcd366361fc/scratchpad/asr/corpus/wav/en/en002.wav
+--help
+transcribe --help
+transcribe --engine qwen3 -m 0.6B --context=raw, road, row, ro, roll, knowledge base, notice base, MacBook, macbook, mac book, Mac mini, mark mini, mac mini, 24R, 24 r, idea, report, Docker, doocca, Kubernetes, cuubber needs, WiFi, wifi, ESP32, esp32, ESP 32, derived, routes, committed, provisional, vendor -- /private/tmp/claude-502/-Users-jason-Dev-tools-AgentEar/33723602-1e71-4fcc-a8b4-cbcd366361fc/scratchpad/asr/corpus/wav/en/en003.wav
+--help
+transcribe --help
+transcribe --engine qwen3 -m 0.6B --context=raw, road, row, ro, roll, knowledge base, notice base, MacBook, macbook, mac book, Mac mini, mark mini, mac mini, 24R, 24 r, idea, report, Docker, doocca, Kubernetes, cuubber needs, WiFi, wifi, ESP32, esp32, ESP 32, derived, routes, committed, provisional, vendor -- /private/tmp/claude-502/-Users-jason-Dev-tools-AgentEar/33723602-1e71-4fcc-a8b4-cbcd366361fc/scratchpad/asr/corpus/wav/en/en004.wav
+--help
+transcribe --help
+transcribe --engine qwen3 -m 0.6B --context=raw, road, row, ro, roll, knowledge base, notice base, MacBook, macbook, mac book, Mac mini, mark mini, mac mini, 24R, 24 r, idea, report, Docker, doocca, Kubernetes, cuubber needs, WiFi, wifi, ESP32, esp32, ESP 32, derived, routes, committed, provisional, vendor -- /private/tmp/claude-502/-Users-jason-Dev-tools-AgentEar/33723602-1e71-4fcc-a8b4-cbcd366361fc/scratchpad/asr/corpus/wav/en/en005.wav
+--help
+transcribe --help
+transcribe --engine qwen3 -m 0.6B --context=raw, road, row, ro, roll, knowledge base, notice base, MacBook, macbook, mac book, Mac mini, mark mini, mac mini, 24R, 24 r, idea, report, Docker, doocca, Kubernetes, cuubber needs, WiFi, wifi, ESP32, esp32, ESP 32, derived, routes, committed, provisional, vendor -- /private/tmp/claude-502/-Users-jason-Dev-tools-AgentEar/33723602-1e71-4fcc-a8b4-cbcd366361fc/scratchpad/asr/corpus/wav/en/en006.wav
+--help
+transcribe --help
+transcribe --engine qwen3 -m 0.6B --context=raw, road, row, ro, roll, knowledge base, notice base, MacBook, macbook, mac book, Mac mini, mark mini, mac mini, 24R, 24 r, idea, report, Docker, doocca, Kubernetes, cuubber needs, WiFi, wifi, ESP32, esp32, ESP 32, derived, routes, committed, provisional, vendor -- /private/tmp/claude-502/-Users-jason-Dev-tools-AgentEar/33723602-1e71-4fcc-a8b4-cbcd366361fc/scratchpad/asr/corpus/wav/en/en007.wav
+--help
+transcribe --help
+transcribe --engine qwen3 -m 0.6B --context=raw, road, row, ro, roll, knowledge base, notice base, MacBook, macbook, mac book, Mac mini, mark mini, mac mini, 24R, 24 r, idea, report, Docker, doocca, Kubernetes, cuubber needs, WiFi, wifi, ESP32, esp32, ESP 32, derived, routes, committed, provisional, vendor -- /private/tmp/claude-502/-Users-jason-Dev-tools-AgentEar/33723602-1e71-4fcc-a8b4-cbcd366361fc/scratchpad/asr/corpus/wav/en/en008.wav
+--help
+transcribe --help
+transcribe --engine qwen3 -m 0.6B --context=raw, road, row, ro, roll, knowledge base, notice base, MacBook, macbook, mac book, Mac mini, mark mini, mac mini, 24R, 24 r, idea, report, Docker, doocca, Kubernetes, cuubber needs, WiFi, wifi, ESP32, esp32, ESP 32, derived, routes, committed, provisional, vendor -- /private/tmp/claude-502/-Users-jason-Dev-tools-AgentEar/33723602-1e71-4fcc-a8b4-cbcd366361fc/scratchpad/asr/corpus/wav/en/en009.wav
+--help
+transcribe --help
+transcribe --engine qwen3 -m 0.6B --context=raw, road, row, ro, roll, knowledge base, notice base, MacBook, macbook, mac book, Mac mini, mark mini, mac mini, 24R, 24 r, idea, report, Docker, doocca, Kubernetes, cuubber needs, WiFi, wifi, ESP32, esp32, ESP 32, derived, routes, committed, provisional, vendor -- /private/tmp/claude-502/-Users-jason-Dev-tools-AgentEar/33723602-1e71-4fcc-a8b4-cbcd366361fc/scratchpad/asr/corpus/wav/en/en010.wav
+--help
+transcribe --help
+transcribe --engine qwen3 -m 0.6B --context=raw, road, row, ro, roll, knowledge base, notice base, MacBook, macbook, mac book, Mac mini, mark mini, mac mini, 24R, 24 r, idea, report, Docker, doocca, Kubernetes, cuubber needs, WiFi, wifi, ESP32, esp32, ESP 32, derived, routes, committed, provisional, vendor -- /private/tmp/claude-502/-Users-jason-Dev-tools-AgentEar/33723602-1e71-4fcc-a8b4-cbcd366361fc/scratchpad/asr/corpus/wav/en/en011.wav
+--help
+transcribe --help
+transcribe --engine qwen3 -m 0.6B --context=raw, road, row, ro, roll, knowledge base, notice base, MacBook, macbook, mac book, Mac mini, mark mini, mac mini, 24R, 24 r, idea, report, Docker, doocca, Kubernetes, cuubber needs, WiFi, wifi, ESP32, esp32, ESP 32, derived, routes, committed, provisional, vendor -- /private/tmp/claude-502/-Users-jason-Dev-tools-AgentEar/33723602-1e71-4fcc-a8b4-cbcd366361fc/scratchpad/asr/corpus/wav/en/en012.wav
+--help
+transcribe --help
+transcribe --engine qwen3 -m 0.6B --context=raw, road, row, ro, roll, knowledge base, notice base, MacBook, macbook, mac book, Mac mini, mark mini, mac mini, 24R, 24 r, idea, report, Docker, doocca, Kubernetes, cuubber needs, WiFi, wifi, ESP32, esp32, ESP 32, derived, routes, committed, provisional, vendor -- /private/tmp/claude-502/-Users-jason-Dev-tools-AgentEar/33723602-1e71-4fcc-a8b4-cbcd366361fc/scratchpad/asr/corpus/wav/en/en013.wav
+--help
+transcribe --help
+transcribe --engine qwen3 -m 0.6B --context=raw, road, row, ro, roll, knowledge base, notice base, MacBook, macbook, mac book, Mac mini, mark mini, mac mini, 24R, 24 r, idea, report, Docker, doocca, Kubernetes, cuubber needs, WiFi, wifi, ESP32, esp32, ESP 32, derived, routes, committed, provisional, vendor -- /private/tmp/claude-502/-Users-jason-Dev-tools-AgentEar/33723602-1e71-4fcc-a8b4-cbcd366361fc/scratchpad/asr/corpus/wav/en/en014.wav
+--help
+transcribe --help
+transcribe --engine qwen3 -m 0.6B --context=raw, road, row, ro, roll, knowledge base, notice base, MacBook, macbook, mac book, Mac mini, mark mini, mac mini, 24R, 24 r, idea, report, Docker, doocca, Kubernetes, cuubber needs, WiFi, wifi, ESP32, esp32, ESP 32, derived, routes, committed, provisional, vendor -- /private/tmp/claude-502/-Users-jason-Dev-tools-AgentEar/33723602-1e71-4fcc-a8b4-cbcd366361fc/scratchpad/asr/corpus/wav/en/en015.wav
+--help
+transcribe --help
+transcribe --engine qwen3 -m 0.6B --context=raw, road, row, ro, roll, knowledge base, notice base, MacBook, macbook, mac book, Mac mini, mark mini, mac mini, 24R, 24 r, idea, report, Docker, doocca, Kubernetes, cuubber needs, WiFi, wifi, ESP32, esp32, ESP 32, derived, routes, committed, provisional, vendor -- /private/tmp/claude-502/-Users-jason-Dev-tools-AgentEar/33723602-1e71-4fcc-a8b4-cbcd366361fc/scratchpad/asr/corpus/wav/en/en016.wav
+--help
+transcribe --help
+transcribe --engine qwen3 -m 0.6B --context=raw, road, row, ro, roll, knowledge base, notice base, MacBook, macbook, mac book, Mac mini, mark mini, mac mini, 24R, 24 r, idea, report, Docker, doocca, Kubernetes, cuubber needs, WiFi, wifi, ESP32, esp32, ESP 32, derived, routes, committed, provisional, vendor -- /private/tmp/claude-502/-Users-jason-Dev-tools-AgentEar/33723602-1e71-4fcc-a8b4-cbcd366361fc/scratchpad/asr/corpus/wav/en/en017.wav
+--help
+transcribe --help
+transcribe --engine qwen3 -m 0.6B --context=raw, road, row, ro, roll, knowledge base, notice base, MacBook, macbook, mac book, Mac mini, mark mini, mac mini, 24R, 24 r, idea, report, Docker, doocca, Kubernetes, cuubber needs, WiFi, wifi, ESP32, esp32, ESP 32, derived, routes, committed, provisional, vendor -- /private/tmp/claude-502/-Users-jason-Dev-tools-AgentEar/33723602-1e71-4fcc-a8b4-cbcd366361fc/scratchpad/asr/corpus/wav/en/en018.wav
+--help
+transcribe --help
+transcribe --engine qwen3 -m 0.6B --context=raw, road, row, ro, roll, knowledge base, notice base, MacBook, macbook, mac book, Mac mini, mark mini, mac mini, 24R, 24 r, idea, report, Docker, doocca, Kubernetes, cuubber needs, WiFi, wifi, ESP32, esp32, ESP 32, derived, routes, committed, provisional, vendor -- /private/tmp/claude-502/-Users-jason-Dev-tools-AgentEar/33723602-1e71-4fcc-a8b4-cbcd366361fc/scratchpad/asr/corpus/wav/en/en019.wav
+--help
+transcribe --help
+transcribe --engine qwen3 -m 0.6B --context=raw, road, row, ro, roll, knowledge base, notice base, MacBook, macbook, mac book, Mac mini, mark mini, mac mini, 24R, 24 r, idea, report, Docker, doocca, Kubernetes, cuubber needs, WiFi, wifi, ESP32, esp32, ESP 32, derived, routes, committed, provisional, vendor -- /private/tmp/claude-502/-Users-jason-Dev-tools-AgentEar/33723602-1e71-4fcc-a8b4-cbcd366361fc/scratchpad/asr/corpus/wav/en/en020.wav
+--help
+transcribe --help
+transcribe --engine qwen3 -m 0.6B --context=raw, road, row, ro, roll, knowledge base, notice base, MacBook, macbook, mac book, Mac mini, mark mini, mac mini, 24R, 24 r, idea, report, Docker, doocca, Kubernetes, cuubber needs, WiFi, wifi, ESP32, esp32, ESP 32, derived, routes, committed, provisional, vendor -- /private/tmp/claude-502/-Users-jason-Dev-tools-AgentEar/33723602-1e71-4fcc-a8b4-cbcd366361fc/scratchpad/asr/corpus/wav/en/en021.wav
+--help
+transcribe --help
+transcribe --engine qwen3 -m 0.6B --context=raw, road, row, ro, roll, knowledge base, notice base, MacBook, macbook, mac book, Mac mini, mark mini, mac mini, 24R, 24 r, idea, report, Docker, doocca, Kubernetes, cuubber needs, WiFi, wifi, ESP32, esp32, ESP 32, derived, routes, committed, provisional, vendor -- /private/tmp/claude-502/-Users-jason-Dev-tools-AgentEar/33723602-1e71-4fcc-a8b4-cbcd366361fc/scratchpad/asr/corpus/wav/en/en022.wav
+--help
+transcribe --help
+transcribe --engine qwen3 -m 0.6B --context=raw, road, row, ro, roll, knowledge base, notice base, MacBook, macbook, mac book, Mac mini, mark mini, mac mini, 24R, 24 r, idea, report, Docker, doocca, Kubernetes, cuubber needs, WiFi, wifi, ESP32, esp32, ESP 32, derived, routes, committed, provisional, vendor -- /private/tmp/claude-502/-Users-jason-Dev-tools-AgentEar/33723602-1e71-4fcc-a8b4-cbcd366361fc/scratchpad/asr/corpus/wav/en/en023.wav
+--help
+transcribe --help
+transcribe --engine qwen3 -m 0.6B --context=raw, road, row, ro, roll, knowledge base, notice base, MacBook, macbook, mac book, Mac mini, mark mini, mac mini, 24R, 24 r, idea, report, Docker, doocca, Kubernetes, cuubber needs, WiFi, wifi, ESP32, esp32, ESP 32, derived, routes, committed, provisional, vendor -- /private/tmp/claude-502/-Users-jason-Dev-tools-AgentEar/33723602-1e71-4fcc-a8b4-cbcd366361fc/scratchpad/asr/corpus/wav/en/en024.wav
+--help
+transcribe --help
+transcribe --engine qwen3 -m 0.6B --context=raw, road, row, ro, roll, knowledge base, notice base, MacBook, macbook, mac book, Mac mini, mark mini, mac mini, 24R, 24 r, idea, report, Docker, doocca, Kubernetes, cuubber needs, WiFi, wifi, ESP32, esp32, ESP 32, derived, routes, committed, provisional, vendor -- /private/tmp/claude-502/-Users-jason-Dev-tools-AgentEar/33723602-1e71-4fcc-a8b4-cbcd366361fc/scratchpad/asr/corpus/wav/en/en025.wav
+--help
+transcribe --help
+transcribe --engine qwen3 -m 0.6B --context=raw, road, row, ro, roll, knowledge base, notice base, MacBook, macbook, mac book, Mac mini, mark mini, mac mini, 24R, 24 r, idea, report, Docker, doocca, Kubernetes, cuubber needs, WiFi, wifi, ESP32, esp32, ESP 32, derived, routes, committed, provisional, vendor -- /private/tmp/claude-502/-Users-jason-Dev-tools-AgentEar/33723602-1e71-4fcc-a8b4-cbcd366361fc/scratchpad/asr/corpus/wav/en/en026.wav
+--help
+transcribe --help
+transcribe --engine qwen3 -m 0.6B --context=raw, road, row, ro, roll, knowledge base, notice base, MacBook, macbook, mac book, Mac mini, mark mini, mac mini, 24R, 24 r, idea, report, Docker, doocca, Kubernetes, cuubber needs, WiFi, wifi, ESP32, esp32, ESP 32, derived, routes, committed, provisional, vendor -- /private/tmp/claude-502/-Users-jason-Dev-tools-AgentEar/33723602-1e71-4fcc-a8b4-cbcd366361fc/scratchpad/asr/corpus/wav/en/en027.wav
+--help
+transcribe --help
+transcribe --engine qwen3 -m 0.6B --context=raw, road, row, ro, roll, knowledge base, notice base, MacBook, macbook, mac book, Mac mini, mark mini, mac mini, 24R, 24 r, idea, report, Docker, doocca, Kubernetes, cuubber needs, WiFi, wifi, ESP32, esp32, ESP 32, derived, routes, committed, provisional, vendor -- /private/tmp/claude-502/-Users-jason-Dev-tools-AgentEar/33723602-1e71-4fcc-a8b4-cbcd366361fc/scratchpad/asr/corpus/wav/en/en028.wav
+--help
+transcribe --help
+transcribe --engine qwen3 -m 0.6B --context=raw, road, row, ro, roll, knowledge base, notice base, MacBook, macbook, mac book, Mac mini, mark mini, mac mini, 24R, 24 r, idea, report, Docker, doocca, Kubernetes, cuubber needs, WiFi, wifi, ESP32, esp32, ESP 32, derived, routes, committed, provisional, vendor -- /private/tmp/claude-502/-Users-jason-Dev-tools-AgentEar/33723602-1e71-4fcc-a8b4-cbcd366361fc/scratchpad/asr/corpus/wav/en/en029.wav
+--help
+transcribe --help
+transcribe --engine qwen3 -m 0.6B --context=raw, road, row, ro, roll, knowledge base, notice base, MacBook, macbook, mac book, Mac mini, mark mini, mac mini, 24R, 24 r, idea, report, Docker, doocca, Kubernetes, cuubber needs, WiFi, wifi, ESP32, esp32, ESP 32, derived, routes, committed, provisional, vendor -- /private/tmp/claude-502/-Users-jason-Dev-tools-AgentEar/33723602-1e71-4fcc-a8b4-cbcd366361fc/scratchpad/asr/corpus/wav/en/en030.wav
+--help
+transcribe --help
+transcribe --engine qwen3 -m 0.6B --context=raw, road, row, ro, roll, knowledge base, notice base, MacBook, macbook, mac book, Mac mini, mark mini, mac mini, 24R, 24 r, idea, report, Docker, doocca, Kubernetes, cuubber needs, WiFi, wifi, ESP32, esp32, ESP 32, derived, routes, committed, provisional, vendor -- /private/tmp/claude-502/-Users-jason-Dev-tools-AgentEar/33723602-1e71-4fcc-a8b4-cbcd366361fc/scratchpad/asr/corpus/wav/en/en031.wav
+--help
+transcribe --help
+transcribe --engine qwen3 -m 0.6B --context=raw, road, row, ro, roll, knowledge base, notice base, MacBook, macbook, mac book, Mac mini, mark mini, mac mini, 24R, 24 r, idea, report, Docker, doocca, Kubernetes, cuubber needs, WiFi, wifi, ESP32, esp32, ESP 32, derived, routes, committed, provisional, vendor -- /private/tmp/claude-502/-Users-jason-Dev-tools-AgentEar/33723602-1e71-4fcc-a8b4-cbcd366361fc/scratchpad/asr/corpus/wav/en/en032.wav
+--help
+transcribe --help
+transcribe --engine qwen3 -m 0.6B --context=raw, road, row, ro, roll, knowledge base, notice base, MacBook, macbook, mac book, Mac mini, mark mini, mac mini, 24R, 24 r, idea, report, Docker, doocca, Kubernetes, cuubber needs, WiFi, wifi, ESP32, esp32, ESP 32, derived, routes, committed, provisional, vendor -- /private/tmp/claude-502/-Users-jason-Dev-tools-AgentEar/33723602-1e71-4fcc-a8b4-cbcd366361fc/scratchpad/asr/corpus/wav/en/en033.wav
+--help
+transcribe --help
+transcribe --engine qwen3 -m 0.6B --context=raw, road, row, ro, roll, knowledge base, notice base, MacBook, macbook, mac book, Mac mini, mark mini, mac mini, 24R, 24 r, idea, report, Docker, doocca, Kubernetes, cuubber needs, WiFi, wifi, ESP32, esp32, ESP 32, derived, routes, committed, provisional, vendor -- /private/tmp/claude-502/-Users-jason-Dev-tools-AgentEar/33723602-1e71-4fcc-a8b4-cbcd366361fc/scratchpad/asr/corpus/wav/en/en034.wav
+--help
+transcribe --help
+transcribe --engine qwen3 -m 0.6B --context=raw, road, row, ro, roll, knowledge base, notice base, MacBook, macbook, mac book, Mac mini, mark mini, mac mini, 24R, 24 r, idea, report, Docker, doocca, Kubernetes, cuubber needs, WiFi, wifi, ESP32, esp32, ESP 32, derived, routes, committed, provisional, vendor -- /private/tmp/claude-502/-Users-jason-Dev-tools-AgentEar/33723602-1e71-4fcc-a8b4-cbcd366361fc/scratchpad/asr/corpus/wav/en/en035.wav
+--help
+transcribe --help
+transcribe --engine qwen3 -m 0.6B --context=raw, road, row, ro, roll, knowledge base, notice base, MacBook, macbook, mac book, Mac mini, mark mini, mac mini, 24R, 24 r, idea, report, Docker, doocca, Kubernetes, cuubber needs, WiFi, wifi, ESP32, esp32, ESP 32, derived, routes, committed, provisional, vendor -- /private/tmp/claude-502/-Users-jason-Dev-tools-AgentEar/33723602-1e71-4fcc-a8b4-cbcd366361fc/scratchpad/asr/corpus/wav/en/en036.wav
+--help
+transcribe --help
+transcribe --engine qwen3 -m 0.6B --context=raw, road, row, ro, roll, knowledge base, notice base, MacBook, macbook, mac book, Mac mini, mark mini, mac mini, 24R, 24 r, idea, report, Docker, doocca, Kubernetes, cuubber needs, WiFi, wifi, ESP32, esp32, ESP 32, derived, routes, committed, provisional, vendor -- /private/tmp/claude-502/-Users-jason-Dev-tools-AgentEar/33723602-1e71-4fcc-a8b4-cbcd366361fc/scratchpad/asr/corpus/wav/en/en037.wav
+--help
+transcribe --help
+transcribe --engine qwen3 -m 0.6B --context=raw, road, row, ro, roll, knowledge base, notice base, MacBook, macbook, mac book, Mac mini, mark mini, mac mini, 24R, 24 r, idea, report, Docker, doocca, Kubernetes, cuubber needs, WiFi, wifi, ESP32, esp32, ESP 32, derived, routes, committed, provisional, vendor -- /private/tmp/claude-502/-Users-jason-Dev-tools-AgentEar/33723602-1e71-4fcc-a8b4-cbcd366361fc/scratchpad/asr/corpus/wav/en/en038.wav
+--help
+transcribe --help
+transcribe --engine qwen3 -m 0.6B --context=raw, road, row, ro, roll, knowledge base, notice base, MacBook, macbook, mac book, Mac mini, mark mini, mac mini, 24R, 24 r, idea, report, Docker, doocca, Kubernetes, cuubber needs, WiFi, wifi, ESP32, esp32, ESP 32, derived, routes, committed, provisional, vendor -- /private/tmp/claude-502/-Users-jason-Dev-tools-AgentEar/33723602-1e71-4fcc-a8b4-cbcd366361fc/scratchpad/asr/corpus/wav/en/en039.wav
+--help
+transcribe --help
+transcribe --engine qwen3 -m 0.6B --context=raw, road, row, ro, roll, knowledge base, notice base, MacBook, macbook, mac book, Mac mini, mark mini, mac mini, 24R, 24 r, idea, report, Docker, doocca, Kubernetes, cuubber needs, WiFi, wifi, ESP32, esp32, ESP 32, derived, routes, committed, provisional, vendor -- /private/tmp/claude-502/-Users-jason-Dev-tools-AgentEar/33723602-1e71-4fcc-a8b4-cbcd366361fc/scratchpad/asr/corpus/wav/en/en040.wav
+--help
+transcribe --help
+transcribe --engine qwen3 -m 0.6B --context=raw, road, row, ro, roll, knowledge base, notice base, MacBook, macbook, mac book, Mac mini, mark mini, mac mini, 24R, 24 r, idea, report, Docker, doocca, Kubernetes, cuubber needs, WiFi, wifi, ESP32, esp32, ESP 32, derived, routes, committed, provisional, vendor -- /private/tmp/claude-502/-Users-jason-Dev-tools-AgentEar/33723602-1e71-4fcc-a8b4-cbcd366361fc/scratchpad/asr/corpus/wav/en/en041.wav
+--help
+transcribe --help
+transcribe --engine qwen3 -m 0.6B --context=raw, road, row, ro, roll, knowledge base, notice base, MacBook, macbook, mac book, Mac mini, mark mini, mac mini, 24R, 24 r, idea, report, Docker, doocca, Kubernetes, cuubber needs, WiFi, wifi, ESP32, esp32, ESP 32, derived, routes, committed, provisional, vendor -- /private/tmp/claude-502/-Users-jason-Dev-tools-AgentEar/33723602-1e71-4fcc-a8b4-cbcd366361fc/scratchpad/asr/corpus/wav/en/en042.wav
+--help
+transcribe --help
+transcribe --engine qwen3 -m 0.6B --context=raw, road, row, ro, roll, knowledge base, notice base, MacBook, macbook, mac book, Mac mini, mark mini, mac mini, 24R, 24 r, idea, report, Docker, doocca, Kubernetes, cuubber needs, WiFi, wifi, ESP32, esp32, ESP 32, derived, routes, committed, provisional, vendor -- /private/tmp/claude-502/-Users-jason-Dev-tools-AgentEar/33723602-1e71-4fcc-a8b4-cbcd366361fc/scratchpad/asr/corpus/wav/en/en043.wav
+--help
+transcribe --help
+transcribe --engine qwen3 -m 0.6B --context=raw, road, row, ro, roll, knowledge base, notice base, MacBook, macbook, mac book, Mac mini, mark mini, mac mini, 24R, 24 r, idea, report, Docker, doocca, Kubernetes, cuubber needs, WiFi, wifi, ESP32, esp32, ESP 32, derived, routes, committed, provisional, vendor -- /private/tmp/claude-502/-Users-jason-Dev-tools-AgentEar/33723602-1e71-4fcc-a8b4-cbcd366361fc/scratchpad/asr/corpus/wav/en/en044.wav
+--help
+transcribe --help
+transcribe --engine qwen3 -m 0.6B --context=raw, road, row, ro, roll, knowledge base, notice base, MacBook, macbook, mac book, Mac mini, mark mini, mac mini, 24R, 24 r, idea, report, Docker, doocca, Kubernetes, cuubber needs, WiFi, wifi, ESP32, esp32, ESP 32, derived, routes, committed, provisional, vendor -- /private/tmp/claude-502/-Users-jason-Dev-tools-AgentEar/33723602-1e71-4fcc-a8b4-cbcd366361fc/scratchpad/asr/corpus/wav/en/en045.wav
+--help
+transcribe --help
+transcribe --engine qwen3 -m 0.6B --context=raw, road, row, ro, roll, knowledge base, notice base, MacBook, macbook, mac book, Mac mini, mark mini, mac mini, 24R, 24 r, idea, report, Docker, doocca, Kubernetes, cuubber needs, WiFi, wifi, ESP32, esp32, ESP 32, derived, routes, committed, provisional, vendor -- /private/tmp/claude-502/-Users-jason-Dev-tools-AgentEar/33723602-1e71-4fcc-a8b4-cbcd366361fc/scratchpad/asr/corpus/wav/en/en046.wav
+--help
+transcribe --help
+transcribe --engine qwen3 -m 0.6B --context=raw, road, row, ro, roll, knowledge base, notice base, MacBook, macbook, mac book, Mac mini, mark mini, mac mini, 24R, 24 r, idea, report, Docker, doocca, Kubernetes, cuubber needs, WiFi, wifi, ESP32, esp32, ESP 32, derived, routes, committed, provisional, vendor -- /private/tmp/claude-502/-Users-jason-Dev-tools-AgentEar/33723602-1e71-4fcc-a8b4-cbcd366361fc/scratchpad/asr/corpus/wav/en/en047.wav
+--help
+transcribe --help
+transcribe --engine qwen3 -m 0.6B --context=raw, road, row, ro, roll, knowledge base, notice base, MacBook, macbook, mac book, Mac mini, mark mini, mac mini, 24R, 24 r, idea, report, Docker, doocca, Kubernetes, cuubber needs, WiFi, wifi, ESP32, esp32, ESP 32, derived, routes, committed, provisional, vendor -- /private/tmp/claude-502/-Users-jason-Dev-tools-AgentEar/33723602-1e71-4fcc-a8b4-cbcd366361fc/scratchpad/asr/corpus/wav/en/en048.wav
+--help
+transcribe --help
+transcribe --engine qwen3 -m 0.6B --context=raw, road, row, ro, roll, knowledge base, notice base, MacBook, macbook, mac book, Mac mini, mark mini, mac mini, 24R, 24 r, idea, report, Docker, doocca, Kubernetes, cuubber needs, WiFi, wifi, ESP32, esp32, ESP 32, derived, routes, committed, provisional, vendor -- /private/tmp/claude-502/-Users-jason-Dev-tools-AgentEar/33723602-1e71-4fcc-a8b4-cbcd366361fc/scratchpad/asr/corpus/wav/en/en049.wav
+--help
+transcribe --help
+transcribe --engine qwen3 -m 0.6B --context=raw, road, row, ro, roll, knowledge base, notice base, MacBook, macbook, mac book, Mac mini, mark mini, mac mini, 24R, 24 r, idea, report, Docker, doocca, Kubernetes, cuubber needs, WiFi, wifi, ESP32, esp32, ESP 32, derived, routes, committed, provisional, vendor -- /private/tmp/claude-502/-Users-jason-Dev-tools-AgentEar/33723602-1e71-4fcc-a8b4-cbcd366361fc/scratchpad/asr/corpus/wav/en/en050.wav
+--help
+transcribe --help
+transcribe --engine qwen3 -m 0.6B --context=raw, road, row, ro, roll, knowledge base, notice base, MacBook, macbook, mac book, Mac mini, mark mini, mac mini, 24R, 24 r, idea, report, Docker, doocca, Kubernetes, cuubber needs, WiFi, wifi, ESP32, esp32, ESP 32, derived, routes, committed, provisional, vendor -- /private/tmp/claude-502/-Users-jason-Dev-tools-AgentEar/33723602-1e71-4fcc-a8b4-cbcd366361fc/scratchpad/asr/corpus/wav/en/en051.wav
+--help
+transcribe --help
+transcribe --engine qwen3 -m 0.6B --context=raw, road, row, ro, roll, knowledge base, notice base, MacBook, macbook, mac book, Mac mini, mark mini, mac mini, 24R, 24 r, idea, report, Docker, doocca, Kubernetes, cuubber needs, WiFi, wifi, ESP32, esp32, ESP 32, derived, routes, committed, provisional, vendor -- /private/tmp/claude-502/-Users-jason-Dev-tools-AgentEar/33723602-1e71-4fcc-a8b4-cbcd366361fc/scratchpad/asr/corpus/wav/en/en052.wav
+--help
+transcribe --help
+transcribe --engine qwen3 -m 0.6B --context=raw, road, row, ro, roll, knowledge base, notice base, MacBook, macbook, mac book, Mac mini, mark mini, mac mini, 24R, 24 r, idea, report, Docker, doocca, Kubernetes, cuubber needs, WiFi, wifi, ESP32, esp32, ESP 32, derived, routes, committed, provisional, vendor -- /private/tmp/claude-502/-Users-jason-Dev-tools-AgentEar/33723602-1e71-4fcc-a8b4-cbcd366361fc/scratchpad/asr/corpus/wav/en/en053.wav
+--help
+transcribe --help
+transcribe --engine qwen3 -m 0.6B --context=raw, road, row, ro, roll, knowledge base, notice base, MacBook, macbook, mac book, Mac mini, mark mini, mac mini, 24R, 24 r, idea, report, Docker, doocca, Kubernetes, cuubber needs, WiFi, wifi, ESP32, esp32, ESP 32, derived, routes, committed, provisional, vendor -- /private/tmp/claude-502/-Users-jason-Dev-tools-AgentEar/33723602-1e71-4fcc-a8b4-cbcd366361fc/scratchpad/asr/corpus/wav/en/en054.wav
+--help
+transcribe --help
+transcribe --engine qwen3 -m 0.6B --context=raw, road, row, ro, roll, knowledge base, notice base, MacBook, macbook, mac book, Mac mini, mark mini, mac mini, 24R, 24 r, idea, report, Docker, doocca, Kubernetes, cuubber needs, WiFi, wifi, ESP32, esp32, ESP 32, derived, routes, committed, provisional, vendor -- /private/tmp/claude-502/-Users-jason-Dev-tools-AgentEar/33723602-1e71-4fcc-a8b4-cbcd366361fc/scratchpad/asr/corpus/wav/en/en055.wav
+--help
+transcribe --help
+transcribe --engine qwen3 -m 0.6B --context=raw, road, row, ro, roll, knowledge base, notice base, MacBook, macbook, mac book, Mac mini, mark mini, mac mini, 24R, 24 r, idea, report, Docker, doocca, Kubernetes, cuubber needs, WiFi, wifi, ESP32, esp32, ESP 32, derived, routes, committed, provisional, vendor -- /private/tmp/claude-502/-Users-jason-Dev-tools-AgentEar/33723602-1e71-4fcc-a8b4-cbcd366361fc/scratchpad/asr/corpus/wav/en/en056.wav
+--help
+transcribe --help
+transcribe --engine qwen3 -m 0.6B --context=raw, road, row, ro, roll, knowledge base, notice base, MacBook, macbook, mac book, Mac mini, mark mini, mac mini, 24R, 24 r, idea, report, Docker, doocca, Kubernetes, cuubber needs, WiFi, wifi, ESP32, esp32, ESP 32, derived, routes, committed, provisional, vendor -- /private/tmp/claude-502/-Users-jason-Dev-tools-AgentEar/33723602-1e71-4fcc-a8b4-cbcd366361fc/scratchpad/asr/corpus/wav/en/en057.wav
+--help
+transcribe --help
+transcribe --engine qwen3 -m 0.6B --context=raw, road, row, ro, roll, knowledge base, notice base, MacBook, macbook, mac book, Mac mini, mark mini, mac mini, 24R, 24 r, idea, report, Docker, doocca, Kubernetes, cuubber needs, WiFi, wifi, ESP32, esp32, ESP 32, derived, routes, committed, provisional, vendor -- /private/tmp/claude-502/-Users-jason-Dev-tools-AgentEar/33723602-1e71-4fcc-a8b4-cbcd366361fc/scratchpad/asr/corpus/wav/en/en058.wav
+--help
+transcribe --help
+transcribe --engine qwen3 -m 0.6B --context=raw, road, row, ro, roll, knowledge base, notice base, MacBook, macbook, mac book, Mac mini, mark mini, mac mini, 24R, 24 r, idea, report, Docker, doocca, Kubernetes, cuubber needs, WiFi, wifi, ESP32, esp32, ESP 32, derived, routes, committed, provisional, vendor -- /private/tmp/claude-502/-Users-jason-Dev-tools-AgentEar/33723602-1e71-4fcc-a8b4-cbcd366361fc/scratchpad/asr/corpus/wav/en/en059.wav
+--help
+transcribe --help
+transcribe --engine qwen3 -m 0.6B --context=raw, road, row, ro, roll, knowledge base, notice base, MacBook, macbook, mac book, Mac mini, mark mini, mac mini, 24R, 24 r, idea, report, Docker, doocca, Kubernetes, cuubber needs, WiFi, wifi, ESP32, esp32, ESP 32, derived, routes, committed, provisional, vendor -- /private/tmp/claude-502/-Users-jason-Dev-tools-AgentEar/33723602-1e71-4fcc-a8b4-cbcd366361fc/scratchpad/asr/corpus/wav/mixed/mixed000.wav
+--help
+transcribe --help
+transcribe --engine qwen3 -m 0.6B --context=raw, road, row, ro, roll, knowledge base, notice base, MacBook, macbook, mac book, Mac mini, mark mini, mac mini, 24R, 24 r, idea, report, Docker, doocca, Kubernetes, cuubber needs, WiFi, wifi, ESP32, esp32, ESP 32, derived, routes, committed, provisional, vendor -- /private/tmp/claude-502/-Users-jason-Dev-tools-AgentEar/33723602-1e71-4fcc-a8b4-cbcd366361fc/scratchpad/asr/corpus/wav/mixed/mixed001.wav
+--help
+transcribe --help
+transcribe --engine qwen3 -m 0.6B --context=raw, road, row, ro, roll, knowledge base, notice base, MacBook, macbook, mac book, Mac mini, mark mini, mac mini, 24R, 24 r, idea, report, Docker, doocca, Kubernetes, cuubber needs, WiFi, wifi, ESP32, esp32, ESP 32, derived, routes, committed, provisional, vendor -- /private/tmp/claude-502/-Users-jason-Dev-tools-AgentEar/33723602-1e71-4fcc-a8b4-cbcd366361fc/scratchpad/asr/corpus/wav/mixed/mixed002.wav
+--help
+transcribe --help
+transcribe --engine qwen3 -m 0.6B --context=raw, road, row, ro, roll, knowledge base, notice base, MacBook, macbook, mac book, Mac mini, mark mini, mac mini, 24R, 24 r, idea, report, Docker, doocca, Kubernetes, cuubber needs, WiFi, wifi, ESP32, esp32, ESP 32, derived, routes, committed, provisional, vendor -- /private/tmp/claude-502/-Users-jason-Dev-tools-AgentEar/33723602-1e71-4fcc-a8b4-cbcd366361fc/scratchpad/asr/corpus/wav/mixed/mixed003.wav
+--help
+transcribe --help
+transcribe --engine qwen3 -m 0.6B --context=raw, road, row, ro, roll, knowledge base, notice base, MacBook, macbook, mac book, Mac mini, mark mini, mac mini, 24R, 24 r, idea, report, Docker, doocca, Kubernetes, cuubber needs, WiFi, wifi, ESP32, esp32, ESP 32, derived, routes, committed, provisional, vendor -- /private/tmp/claude-502/-Users-jason-Dev-tools-AgentEar/33723602-1e71-4fcc-a8b4-cbcd366361fc/scratchpad/asr/corpus/wav/mixed/mixed004.wav
+--help
+transcribe --help
+transcribe --engine qwen3 -m 0.6B --context=raw, road, row, ro, roll, knowledge base, notice base, MacBook, macbook, mac book, Mac mini, mark mini, mac mini, 24R, 24 r, idea, report, Docker, doocca, Kubernetes, cuubber needs, WiFi, wifi, ESP32, esp32, ESP 32, derived, routes, committed, provisional, vendor -- /private/tmp/claude-502/-Users-jason-Dev-tools-AgentEar/33723602-1e71-4fcc-a8b4-cbcd366361fc/scratchpad/asr/corpus/wav/mixed/mixed005.wav
+--help
+transcribe --help
+transcribe --engine qwen3 -m 0.6B --context=raw, road, row, ro, roll, knowledge base, notice base, MacBook, macbook, mac book, Mac mini, mark mini, mac mini, 24R, 24 r, idea, report, Docker, doocca, Kubernetes, cuubber needs, WiFi, wifi, ESP32, esp32, ESP 32, derived, routes, committed, provisional, vendor -- /private/tmp/claude-502/-Users-jason-Dev-tools-AgentEar/33723602-1e71-4fcc-a8b4-cbcd366361fc/scratchpad/asr/corpus/wav/mixed/mixed006.wav
+--help
+transcribe --help
+transcribe --engine qwen3 -m 0.6B --context=raw, road, row, ro, roll, knowledge base, notice base, MacBook, macbook, mac book, Mac mini, mark mini, mac mini, 24R, 24 r, idea, report, Docker, doocca, Kubernetes, cuubber needs, WiFi, wifi, ESP32, esp32, ESP 32, derived, routes, committed, provisional, vendor -- /private/tmp/claude-502/-Users-jason-Dev-tools-AgentEar/33723602-1e71-4fcc-a8b4-cbcd366361fc/scratchpad/asr/corpus/wav/mixed/mixed007.wav
+--help
+transcribe --help
+transcribe --engine qwen3 -m 0.6B --context=raw, road, row, ro, roll, knowledge base, notice base, MacBook, macbook, mac book, Mac mini, mark mini, mac mini, 24R, 24 r, idea, report, Docker, doocca, Kubernetes, cuubber needs, WiFi, wifi, ESP32, esp32, ESP 32, derived, routes, committed, provisional, vendor -- /private/tmp/claude-502/-Users-jason-Dev-tools-AgentEar/33723602-1e71-4fcc-a8b4-cbcd366361fc/scratchpad/asr/corpus/wav/mixed/mixed008.wav
+--help
+transcribe --help
+transcribe --engine qwen3 -m 0.6B --context=raw, road, row, ro, roll, knowledge base, notice base, MacBook, macbook, mac book, Mac mini, mark mini, mac mini, 24R, 24 r, idea, report, Docker, doocca, Kubernetes, cuubber needs, WiFi, wifi, ESP32, esp32, ESP 32, derived, routes, committed, provisional, vendor -- /private/tmp/claude-502/-Users-jason-Dev-tools-AgentEar/33723602-1e71-4fcc-a8b4-cbcd366361fc/scratchpad/asr/corpus/wav/mixed/mixed009.wav
+--help
+transcribe --help
+transcribe --engine qwen3 -m 0.6B --context=raw, road, row, ro, roll, knowledge base, notice base, MacBook, macbook, mac book, Mac mini, mark mini, mac mini, 24R, 24 r, idea, report, Docker, doocca, Kubernetes, cuubber needs, WiFi, wifi, ESP32, esp32, ESP 32, derived, routes, committed, provisional, vendor -- /private/tmp/claude-502/-Users-jason-Dev-tools-AgentEar/33723602-1e71-4fcc-a8b4-cbcd366361fc/scratchpad/asr/corpus/wav/mixed/mixed010.wav
+--help
+transcribe --help
+transcribe --engine qwen3 -m 0.6B --context=raw, road, row, ro, roll, knowledge base, notice base, MacBook, macbook, mac book, Mac mini, mark mini, mac mini, 24R, 24 r, idea, report, Docker, doocca, Kubernetes, cuubber needs, WiFi, wifi, ESP32, esp32, ESP 32, derived, routes, committed, provisional, vendor -- /private/tmp/claude-502/-Users-jason-Dev-tools-AgentEar/33723602-1e71-4fcc-a8b4-cbcd366361fc/scratchpad/asr/corpus/wav/mixed/mixed011.wav
+--help
+transcribe --help
+transcribe --engine qwen3 -m 0.6B --context=raw, road, row, ro, roll, knowledge base, notice base, MacBook, macbook, mac book, Mac mini, mark mini, mac mini, 24R, 24 r, idea, report, Docker, doocca, Kubernetes, cuubber needs, WiFi, wifi, ESP32, esp32, ESP 32, derived, routes, committed, provisional, vendor -- /private/tmp/claude-502/-Users-jason-Dev-tools-AgentEar/33723602-1e71-4fcc-a8b4-cbcd366361fc/scratchpad/asr/corpus/wav/mixed/mixed012.wav
+--help
+transcribe --help
+transcribe --engine qwen3 -m 0.6B --context=raw, road, row, ro, roll, knowledge base, notice base, MacBook, macbook, mac book, Mac mini, mark mini, mac mini, 24R, 24 r, idea, report, Docker, doocca, Kubernetes, cuubber needs, WiFi, wifi, ESP32, esp32, ESP 32, derived, routes, committed, provisional, vendor -- /private/tmp/claude-502/-Users-jason-Dev-tools-AgentEar/33723602-1e71-4fcc-a8b4-cbcd366361fc/scratchpad/asr/corpus/wav/mixed/mixed013.wav
+--help
+transcribe --help
+transcribe --engine qwen3 -m 0.6B --context=raw, road, row, ro, roll, knowledge base, notice base, MacBook, macbook, mac book, Mac mini, mark mini, mac mini, 24R, 24 r, idea, report, Docker, doocca, Kubernetes, cuubber needs, WiFi, wifi, ESP32, esp32, ESP 32, derived, routes, committed, provisional, vendor -- /private/tmp/claude-502/-Users-jason-Dev-tools-AgentEar/33723602-1e71-4fcc-a8b4-cbcd366361fc/scratchpad/asr/corpus/wav/mixed/mixed014.wav
+--help
+transcribe --help
+transcribe --engine qwen3 -m 0.6B --context=raw, road, row, ro, roll, knowledge base, notice base, MacBook, macbook, mac book, Mac mini, mark mini, mac mini, 24R, 24 r, idea, report, Docker, doocca, Kubernetes, cuubber needs, WiFi, wifi, ESP32, esp32, ESP 32, derived, routes, committed, provisional, vendor -- /private/tmp/claude-502/-Users-jason-Dev-tools-AgentEar/33723602-1e71-4fcc-a8b4-cbcd366361fc/scratchpad/asr/corpus/wav/mixed/mixed015.wav
+--help
+transcribe --help
+transcribe --engine qwen3 -m 0.6B --context=raw, road, row, ro, roll, knowledge base, notice base, MacBook, macbook, mac book, Mac mini, mark mini, mac mini, 24R, 24 r, idea, report, Docker, doocca, Kubernetes, cuubber needs, WiFi, wifi, ESP32, esp32, ESP 32, derived, routes, committed, provisional, vendor -- /private/tmp/claude-502/-Users-jason-Dev-tools-AgentEar/33723602-1e71-4fcc-a8b4-cbcd366361fc/scratchpad/asr/corpus/wav/mixed/mixed016.wav
+--help
+transcribe --help
+transcribe --engine qwen3 -m 0.6B --context=raw, road, row, ro, roll, knowledge base, notice base, MacBook, macbook, mac book, Mac mini, mark mini, mac mini, 24R, 24 r, idea, report, Docker, doocca, Kubernetes, cuubber needs, WiFi, wifi, ESP32, esp32, ESP 32, derived, routes, committed, provisional, vendor -- /private/tmp/claude-502/-Users-jason-Dev-tools-AgentEar/33723602-1e71-4fcc-a8b4-cbcd366361fc/scratchpad/asr/corpus/wav/mixed/mixed017.wav
+--help
+transcribe --help
+transcribe --engine qwen3 -m 0.6B --context=raw, road, row, ro, roll, knowledge base, notice base, MacBook, macbook, mac book, Mac mini, mark mini, mac mini, 24R, 24 r, idea, report, Docker, doocca, Kubernetes, cuubber needs, WiFi, wifi, ESP32, esp32, ESP 32, derived, routes, committed, provisional, vendor -- /private/tmp/claude-502/-Users-jason-Dev-tools-AgentEar/33723602-1e71-4fcc-a8b4-cbcd366361fc/scratchpad/asr/corpus/wav/mixed/mixed018.wav
+--help
+transcribe --help
+transcribe --engine qwen3 -m 0.6B --context=raw, road, row, ro, roll, knowledge base, notice base, MacBook, macbook, mac book, Mac mini, mark mini, mac mini, 24R, 24 r, idea, report, Docker, doocca, Kubernetes, cuubber needs, WiFi, wifi, ESP32, esp32, ESP 32, derived, routes, committed, provisional, vendor -- /private/tmp/claude-502/-Users-jason-Dev-tools-AgentEar/33723602-1e71-4fcc-a8b4-cbcd366361fc/scratchpad/asr/corpus/wav/mixed/mixed019.wav
+--help
+transcribe --help
+transcribe --engine qwen3 -m 0.6B --context=raw, road, row, ro, roll, knowledge base, notice base, MacBook, macbook, mac book, Mac mini, mark mini, mac mini, 24R, 24 r, idea, report, Docker, doocca, Kubernetes, cuubber needs, WiFi, wifi, ESP32, esp32, ESP 32, derived, routes, committed, provisional, vendor -- /private/tmp/claude-502/-Users-jason-Dev-tools-AgentEar/33723602-1e71-4fcc-a8b4-cbcd366361fc/scratchpad/asr/corpus/wav/mixed/mixed020.wav
+--help
+transcribe --help
+transcribe --engine qwen3 -m 0.6B --context=raw, road, row, ro, roll, knowledge base, notice base, MacBook, macbook, mac book, Mac mini, mark mini, mac mini, 24R, 24 r, idea, report, Docker, doocca, Kubernetes, cuubber needs, WiFi, wifi, ESP32, esp32, ESP 32, derived, routes, committed, provisional, vendor -- /private/tmp/claude-502/-Users-jason-Dev-tools-AgentEar/33723602-1e71-4fcc-a8b4-cbcd366361fc/scratchpad/asr/corpus/wav/mixed/mixed021.wav
+--help
+transcribe --help
+transcribe --engine qwen3 -m 0.6B --context=raw, road, row, ro, roll, knowledge base, notice base, MacBook, macbook, mac book, Mac mini, mark mini, mac mini, 24R, 24 r, idea, report, Docker, doocca, Kubernetes, cuubber needs, WiFi, wifi, ESP32, esp32, ESP 32, derived, routes, committed, provisional, vendor -- /private/tmp/claude-502/-Users-jason-Dev-tools-AgentEar/33723602-1e71-4fcc-a8b4-cbcd366361fc/scratchpad/asr/corpus/wav/mixed/mixed022.wav
+--help
+transcribe --help
+transcribe --engine qwen3 -m 0.6B --context=raw, road, row, ro, roll, knowledge base, notice base, MacBook, macbook, mac book, Mac mini, mark mini, mac mini, 24R, 24 r, idea, report, Docker, doocca, Kubernetes, cuubber needs, WiFi, wifi, ESP32, esp32, ESP 32, derived, routes, committed, provisional, vendor -- /private/tmp/claude-502/-Users-jason-Dev-tools-AgentEar/33723602-1e71-4fcc-a8b4-cbcd366361fc/scratchpad/asr/corpus/wav/mixed/mixed023.wav
+--help
+transcribe --help
+transcribe --engine qwen3 -m 0.6B --context=raw, road, row, ro, roll, knowledge base, notice base, MacBook, macbook, mac book, Mac mini, mark mini, mac mini, 24R, 24 r, idea, report, Docker, doocca, Kubernetes, cuubber needs, WiFi, wifi, ESP32, esp32, ESP 32, derived, routes, committed, provisional, vendor -- /private/tmp/claude-502/-Users-jason-Dev-tools-AgentEar/33723602-1e71-4fcc-a8b4-cbcd366361fc/scratchpad/asr/corpus/wav/mixed/mixed024.wav
+--help
+transcribe --help
+transcribe --engine qwen3 -m 0.6B --context=raw, road, row, ro, roll, knowledge base, notice base, MacBook, macbook, mac book, Mac mini, mark mini, mac mini, 24R, 24 r, idea, report, Docker, doocca, Kubernetes, cuubber needs, WiFi, wifi, ESP32, esp32, ESP 32, derived, routes, committed, provisional, vendor -- /private/tmp/claude-502/-Users-jason-Dev-tools-AgentEar/33723602-1e71-4fcc-a8b4-cbcd366361fc/scratchpad/asr/corpus/wav/mixed/mixed025.wav
+--help
+transcribe --help
+transcribe --engine qwen3 -m 0.6B --context=raw, road, row, ro, roll, knowledge base, notice base, MacBook, macbook, mac book, Mac mini, mark mini, mac mini, 24R, 24 r, idea, report, Docker, doocca, Kubernetes, cuubber needs, WiFi, wifi, ESP32, esp32, ESP 32, derived, routes, committed, provisional, vendor -- /private/tmp/claude-502/-Users-jason-Dev-tools-AgentEar/33723602-1e71-4fcc-a8b4-cbcd366361fc/scratchpad/asr/corpus/wav/mixed/mixed026.wav
+--help
+transcribe --help
+transcribe --engine qwen3 -m 0.6B --context=raw, road, row, ro, roll, knowledge base, notice base, MacBook, macbook, mac book, Mac mini, mark mini, mac mini, 24R, 24 r, idea, report, Docker, doocca, Kubernetes, cuubber needs, WiFi, wifi, ESP32, esp32, ESP 32, derived, routes, committed, provisional, vendor -- /private/tmp/claude-502/-Users-jason-Dev-tools-AgentEar/33723602-1e71-4fcc-a8b4-cbcd366361fc/scratchpad/asr/corpus/wav/mixed/mixed027.wav
+--help
+transcribe --help
+transcribe --engine qwen3 -m 0.6B --context=raw, road, row, ro, roll, knowledge base, notice base, MacBook, macbook, mac book, Mac mini, mark mini, mac mini, 24R, 24 r, idea, report, Docker, doocca, Kubernetes, cuubber needs, WiFi, wifi, ESP32, esp32, ESP 32, derived, routes, committed, provisional, vendor -- /private/tmp/claude-502/-Users-jason-Dev-tools-AgentEar/33723602-1e71-4fcc-a8b4-cbcd366361fc/scratchpad/asr/corpus/wav/mixed/mixed028.wav
+--help
+transcribe --help
+transcribe --engine qwen3 -m 0.6B --context=raw, road, row, ro, roll, knowledge base, notice base, MacBook, macbook, mac book, Mac mini, mark mini, mac mini, 24R, 24 r, idea, report, Docker, doocca, Kubernetes, cuubber needs, WiFi, wifi, ESP32, esp32, ESP 32, derived, routes, committed, provisional, vendor -- /private/tmp/claude-502/-Users-jason-Dev-tools-AgentEar/33723602-1e71-4fcc-a8b4-cbcd366361fc/scratchpad/asr/corpus/wav/mixed/mixed029.wav
+--help
+transcribe --help
+transcribe --engine qwen3 -m 0.6B --context=raw, road, row, ro, roll, knowledge base, notice base, MacBook, macbook, mac book, Mac mini, mark mini, mac mini, 24R, 24 r, idea, report, Docker, doocca, Kubernetes, cuubber needs, WiFi, wifi, ESP32, esp32, ESP 32, derived, routes, committed, provisional, vendor -- /private/tmp/claude-502/-Users-jason-Dev-tools-AgentEar/33723602-1e71-4fcc-a8b4-cbcd366361fc/scratchpad/asr/corpus/wav/mixed/mixed030.wav
+--help
+transcribe --help
+transcribe --engine qwen3 -m 0.6B --context=raw, road, row, ro, roll, knowledge base, notice base, MacBook, macbook, mac book, Mac mini, mark mini, mac mini, 24R, 24 r, idea, report, Docker, doocca, Kubernetes, cuubber needs, WiFi, wifi, ESP32, esp32, ESP 32, derived, routes, committed, provisional, vendor -- /private/tmp/claude-502/-Users-jason-Dev-tools-AgentEar/33723602-1e71-4fcc-a8b4-cbcd366361fc/scratchpad/asr/corpus/wav/mixed/mixed031.wav
+--help
+transcribe --help
+transcribe --engine qwen3 -m 0.6B --context=raw, road, row, ro, roll, knowledge base, notice base, MacBook, macbook, mac book, Mac mini, mark mini, mac mini, 24R, 24 r, idea, report, Docker, doocca, Kubernetes, cuubber needs, WiFi, wifi, ESP32, esp32, ESP 32, derived, routes, committed, provisional, vendor -- /private/tmp/claude-502/-Users-jason-Dev-tools-AgentEar/33723602-1e71-4fcc-a8b4-cbcd366361fc/scratchpad/asr/corpus/wav/mixed/mixed032.wav
+--help
+transcribe --help
+transcribe --engine qwen3 -m 0.6B --context=raw, road, row, ro, roll, knowledge base, notice base, MacBook, macbook, mac book, Mac mini, mark mini, mac mini, 24R, 24 r, idea, report, Docker, doocca, Kubernetes, cuubber needs, WiFi, wifi, ESP32, esp32, ESP 32, derived, routes, committed, provisional, vendor -- /private/tmp/claude-502/-Users-jason-Dev-tools-AgentEar/33723602-1e71-4fcc-a8b4-cbcd366361fc/scratchpad/asr/corpus/wav/mixed/mixed033.wav
+--help
+transcribe --help
+transcribe --engine qwen3 -m 0.6B --context=raw, road, row, ro, roll, knowledge base, notice base, MacBook, macbook, mac book, Mac mini, mark mini, mac mini, 24R, 24 r, idea, report, Docker, doocca, Kubernetes, cuubber needs, WiFi, wifi, ESP32, esp32, ESP 32, derived, routes, committed, provisional, vendor -- /private/tmp/claude-502/-Users-jason-Dev-tools-AgentEar/33723602-1e71-4fcc-a8b4-cbcd366361fc/scratchpad/asr/corpus/wav/mixed/mixed034.wav
+--help
+transcribe --help
+transcribe --engine qwen3 -m 0.6B --context=raw, road, row, ro, roll, knowledge base, notice base, MacBook, macbook, mac book, Mac mini, mark mini, mac mini, 24R, 24 r, idea, report, Docker, doocca, Kubernetes, cuubber needs, WiFi, wifi, ESP32, esp32, ESP 32, derived, routes, committed, provisional, vendor -- /private/tmp/claude-502/-Users-jason-Dev-tools-AgentEar/33723602-1e71-4fcc-a8b4-cbcd366361fc/scratchpad/asr/corpus/wav/mixed/mixed035.wav
+--help
+transcribe --help
+transcribe --engine qwen3 -m 0.6B --context=raw, road, row, ro, roll, knowledge base, notice base, MacBook, macbook, mac book, Mac mini, mark mini, mac mini, 24R, 24 r, idea, report, Docker, doocca, Kubernetes, cuubber needs, WiFi, wifi, ESP32, esp32, ESP 32, derived, routes, committed, provisional, vendor -- /private/tmp/claude-502/-Users-jason-Dev-tools-AgentEar/33723602-1e71-4fcc-a8b4-cbcd366361fc/scratchpad/asr/corpus/wav/mixed/mixed036.wav
+--help
+transcribe --help
+transcribe --engine qwen3 -m 0.6B --context=raw, road, row, ro, roll, knowledge base, notice base, MacBook, macbook, mac book, Mac mini, mark mini, mac mini, 24R, 24 r, idea, report, Docker, doocca, Kubernetes, cuubber needs, WiFi, wifi, ESP32, esp32, ESP 32, derived, routes, committed, provisional, vendor -- /private/tmp/claude-502/-Users-jason-Dev-tools-AgentEar/33723602-1e71-4fcc-a8b4-cbcd366361fc/scratchpad/asr/corpus/wav/mixed/mixed037.wav
+--help
+transcribe --help
+transcribe --engine qwen3 -m 0.6B --context=raw, road, row, ro, roll, knowledge base, notice base, MacBook, macbook, mac book, Mac mini, mark mini, mac mini, 24R, 24 r, idea, report, Docker, doocca, Kubernetes, cuubber needs, WiFi, wifi, ESP32, esp32, ESP 32, derived, routes, committed, provisional, vendor -- /private/tmp/claude-502/-Users-jason-Dev-tools-AgentEar/33723602-1e71-4fcc-a8b4-cbcd366361fc/scratchpad/asr/corpus/wav/mixed/mixed038.wav
+--help
+transcribe --help
+transcribe --engine qwen3 -m 0.6B --context=raw, road, row, ro, roll, knowledge base, notice base, MacBook, macbook, mac book, Mac mini, mark mini, mac mini, 24R, 24 r, idea, report, Docker, doocca, Kubernetes, cuubber needs, WiFi, wifi, ESP32, esp32, ESP 32, derived, routes, committed, provisional, vendor -- /private/tmp/claude-502/-Users-jason-Dev-tools-AgentEar/33723602-1e71-4fcc-a8b4-cbcd366361fc/scratchpad/asr/corpus/wav/mixed/mixed039.wav
+--help
+transcribe --help
+transcribe --engine qwen3 -m 0.6B --context=raw, road, row, ro, roll, knowledge base, notice base, MacBook, macbook, mac book, Mac mini, mark mini, mac mini, 24R, 24 r, idea, report, Docker, doocca, Kubernetes, cuubber needs, WiFi, wifi, ESP32, esp32, ESP 32, derived, routes, committed, provisional, vendor -- /private/tmp/claude-502/-Users-jason-Dev-tools-AgentEar/33723602-1e71-4fcc-a8b4-cbcd366361fc/scratchpad/asr/corpus/wav/mixed/mixed040.wav
+--help
+transcribe --help
+transcribe --engine qwen3 -m 0.6B --context=raw, road, row, ro, roll, knowledge base, notice base, MacBook, macbook, mac book, Mac mini, mark mini, mac mini, 24R, 24 r, idea, report, Docker, doocca, Kubernetes, cuubber needs, WiFi, wifi, ESP32, esp32, ESP 32, derived, routes, committed, provisional, vendor -- /private/tmp/claude-502/-Users-jason-Dev-tools-AgentEar/33723602-1e71-4fcc-a8b4-cbcd366361fc/scratchpad/asr/corpus/wav/mixed/mixed041.wav
+--help
+transcribe --help
+transcribe --engine qwen3 -m 0.6B --context=raw, road, row, ro, roll, knowledge base, notice base, MacBook, macbook, mac book, Mac mini, mark mini, mac mini, 24R, 24 r, idea, report, Docker, doocca, Kubernetes, cuubber needs, WiFi, wifi, ESP32, esp32, ESP 32, derived, routes, committed, provisional, vendor -- /private/tmp/claude-502/-Users-jason-Dev-tools-AgentEar/33723602-1e71-4fcc-a8b4-cbcd366361fc/scratchpad/asr/corpus/wav/mixed/mixed042.wav
+--help
+transcribe --help
+transcribe --engine qwen3 -m 0.6B --context=raw, road, row, ro, roll, knowledge base, notice base, MacBook, macbook, mac book, Mac mini, mark mini, mac mini, 24R, 24 r, idea, report, Docker, doocca, Kubernetes, cuubber needs, WiFi, wifi, ESP32, esp32, ESP 32, derived, routes, committed, provisional, vendor -- /private/tmp/claude-502/-Users-jason-Dev-tools-AgentEar/33723602-1e71-4fcc-a8b4-cbcd366361fc/scratchpad/asr/corpus/wav/mixed/mixed043.wav
+--help
+transcribe --help
+transcribe --engine qwen3 -m 0.6B --context=raw, road, row, ro, roll, knowledge base, notice base, MacBook, macbook, mac book, Mac mini, mark mini, mac mini, 24R, 24 r, idea, report, Docker, doocca, Kubernetes, cuubber needs, WiFi, wifi, ESP32, esp32, ESP 32, derived, routes, committed, provisional, vendor -- /private/tmp/claude-502/-Users-jason-Dev-tools-AgentEar/33723602-1e71-4fcc-a8b4-cbcd366361fc/scratchpad/asr/corpus/wav/mixed/mixed044.wav
+--help
+transcribe --help
+transcribe --engine qwen3 -m 0.6B --context=raw, road, row, ro, roll, knowledge base, notice base, MacBook, macbook, mac book, Mac mini, mark mini, mac mini, 24R, 24 r, idea, report, Docker, doocca, Kubernetes, cuubber needs, WiFi, wifi, ESP32, esp32, ESP 32, derived, routes, committed, provisional, vendor -- /private/tmp/claude-502/-Users-jason-Dev-tools-AgentEar/33723602-1e71-4fcc-a8b4-cbcd366361fc/scratchpad/asr/corpus/wav/mixed/mixed045.wav
+--help
+transcribe --help
+transcribe --engine qwen3 -m 0.6B --context=raw, road, row, ro, roll, knowledge base, notice base, MacBook, macbook, mac book, Mac mini, mark mini, mac mini, 24R, 24 r, idea, report, Docker, doocca, Kubernetes, cuubber needs, WiFi, wifi, ESP32, esp32, ESP 32, derived, routes, committed, provisional, vendor -- /private/tmp/claude-502/-Users-jason-Dev-tools-AgentEar/33723602-1e71-4fcc-a8b4-cbcd366361fc/scratchpad/asr/corpus/wav/mixed/mixed046.wav
+--help
+transcribe --help
+transcribe --engine qwen3 -m 0.6B --context=raw, road, row, ro, roll, knowledge base, notice base, MacBook, macbook, mac book, Mac mini, mark mini, mac mini, 24R, 24 r, idea, report, Docker, doocca, Kubernetes, cuubber needs, WiFi, wifi, ESP32, esp32, ESP 32, derived, routes, committed, provisional, vendor -- /private/tmp/claude-502/-Users-jason-Dev-tools-AgentEar/33723602-1e71-4fcc-a8b4-cbcd366361fc/scratchpad/asr/corpus/wav/mixed/mixed047.wav
+--help
+transcribe --help
+transcribe --engine qwen3 -m 0.6B --context=raw, road, row, ro, roll, knowledge base, notice base, MacBook, macbook, mac book, Mac mini, mark mini, mac mini, 24R, 24 r, idea, report, Docker, doocca, Kubernetes, cuubber needs, WiFi, wifi, ESP32, esp32, ESP 32, derived, routes, committed, provisional, vendor -- /private/tmp/claude-502/-Users-jason-Dev-tools-AgentEar/33723602-1e71-4fcc-a8b4-cbcd366361fc/scratchpad/asr/corpus/wav/mixed/mixed048.wav
+--help
+transcribe --help
+transcribe --engine qwen3 -m 0.6B --context=raw, road, row, ro, roll, knowledge base, notice base, MacBook, macbook, mac book, Mac mini, mark mini, mac mini, 24R, 24 r, idea, report, Docker, doocca, Kubernetes, cuubber needs, WiFi, wifi, ESP32, esp32, ESP 32, derived, routes, committed, provisional, vendor -- /private/tmp/claude-502/-Users-jason-Dev-tools-AgentEar/33723602-1e71-4fcc-a8b4-cbcd366361fc/scratchpad/asr/corpus/wav/mixed/mixed049.wav
+--help
+transcribe --help
+transcribe --engine qwen3 -m 0.6B --context=raw, road, row, ro, roll, knowledge base, notice base, MacBook, macbook, mac book, Mac mini, mark mini, mac mini, 24R, 24 r, idea, report, Docker, doocca, Kubernetes, cuubber needs, WiFi, wifi, ESP32, esp32, ESP 32, derived, routes, committed, provisional, vendor -- /private/tmp/claude-502/-Users-jason-Dev-tools-AgentEar/33723602-1e71-4fcc-a8b4-cbcd366361fc/scratchpad/asr/corpus/wav/mixed/mixed050.wav
+--help
+transcribe --help
+transcribe --engine qwen3 -m 0.6B --context=raw, road, row, ro, roll, knowledge base, notice base, MacBook, macbook, mac book, Mac mini, mark mini, mac mini, 24R, 24 r, idea, report, Docker, doocca, Kubernetes, cuubber needs, WiFi, wifi, ESP32, esp32, ESP 32, derived, routes, committed, provisional, vendor -- /private/tmp/claude-502/-Users-jason-Dev-tools-AgentEar/33723602-1e71-4fcc-a8b4-cbcd366361fc/scratchpad/asr/corpus/wav/mixed/mixed051.wav
+--help
+transcribe --help
+transcribe --engine qwen3 -m 0.6B --context=raw, road, row, ro, roll, knowledge base, notice base, MacBook, macbook, mac book, Mac mini, mark mini, mac mini, 24R, 24 r, idea, report, Docker, doocca, Kubernetes, cuubber needs, WiFi, wifi, ESP32, esp32, ESP 32, derived, routes, committed, provisional, vendor -- /private/tmp/claude-502/-Users-jason-Dev-tools-AgentEar/33723602-1e71-4fcc-a8b4-cbcd366361fc/scratchpad/asr/corpus/wav/mixed/mixed052.wav
+--help
+transcribe --help
+transcribe --engine qwen3 -m 0.6B --context=raw, road, row, ro, roll, knowledge base, notice base, MacBook, macbook, mac book, Mac mini, mark mini, mac mini, 24R, 24 r, idea, report, Docker, doocca, Kubernetes, cuubber needs, WiFi, wifi, ESP32, esp32, ESP 32, derived, routes, committed, provisional, vendor -- /private/tmp/claude-502/-Users-jason-Dev-tools-AgentEar/33723602-1e71-4fcc-a8b4-cbcd366361fc/scratchpad/asr/corpus/wav/mixed/mixed053.wav
+--help
+transcribe --help
+transcribe --engine qwen3 -m 0.6B --context=raw, road, row, ro, roll, knowledge base, notice base, MacBook, macbook, mac book, Mac mini, mark mini, mac mini, 24R, 24 r, idea, report, Docker, doocca, Kubernetes, cuubber needs, WiFi, wifi, ESP32, esp32, ESP 32, derived, routes, committed, provisional, vendor -- /private/tmp/claude-502/-Users-jason-Dev-tools-AgentEar/33723602-1e71-4fcc-a8b4-cbcd366361fc/scratchpad/asr/corpus/wav/mixed/mixed054.wav
+--help
+transcribe --help
+transcribe --engine qwen3 -m 0.6B --context=raw, road, row, ro, roll, knowledge base, notice base, MacBook, macbook, mac book, Mac mini, mark mini, mac mini, 24R, 24 r, idea, report, Docker, doocca, Kubernetes, cuubber needs, WiFi, wifi, ESP32, esp32, ESP 32, derived, routes, committed, provisional, vendor -- /private/tmp/claude-502/-Users-jason-Dev-tools-AgentEar/33723602-1e71-4fcc-a8b4-cbcd366361fc/scratchpad/asr/corpus/wav/mixed/mixed055.wav
+--help
+transcribe --help
+transcribe --engine qwen3 -m 0.6B --context=raw, road, row, ro, roll, knowledge base, notice base, MacBook, macbook, mac book, Mac mini, mark mini, mac mini, 24R, 24 r, idea, report, Docker, doocca, Kubernetes, cuubber needs, WiFi, wifi, ESP32, esp32, ESP 32, derived, routes, committed, provisional, vendor -- /private/tmp/claude-502/-Users-jason-Dev-tools-AgentEar/33723602-1e71-4fcc-a8b4-cbcd366361fc/scratchpad/asr/corpus/wav/mixed/mixed056.wav
+--help
+transcribe --help
+transcribe --engine qwen3 -m 0.6B --context=raw, road, row, ro, roll, knowledge base, notice base, MacBook, macbook, mac book, Mac mini, mark mini, mac mini, 24R, 24 r, idea, report, Docker, doocca, Kubernetes, cuubber needs, WiFi, wifi, ESP32, esp32, ESP 32, derived, routes, committed, provisional, vendor -- /private/tmp/claude-502/-Users-jason-Dev-tools-AgentEar/33723602-1e71-4fcc-a8b4-cbcd366361fc/scratchpad/asr/corpus/wav/mixed/mixed057.wav
+--help
+transcribe --help
+transcribe --engine qwen3 -m 0.6B --context=raw, road, row, ro, roll, knowledge base, notice base, MacBook, macbook, mac book, Mac mini, mark mini, mac mini, 24R, 24 r, idea, report, Docker, doocca, Kubernetes, cuubber needs, WiFi, wifi, ESP32, esp32, ESP 32, derived, routes, committed, provisional, vendor -- /private/tmp/claude-502/-Users-jason-Dev-tools-AgentEar/33723602-1e71-4fcc-a8b4-cbcd366361fc/scratchpad/asr/corpus/wav/mixed/mixed058.wav
+--help
+transcribe --help
+transcribe --engine qwen3 -m 0.6B --context=raw, road, row, ro, roll, knowledge base, notice base, MacBook, macbook, mac book, Mac mini, mark mini, mac mini, 24R, 24 r, idea, report, Docker, doocca, Kubernetes, cuubber needs, WiFi, wifi, ESP32, esp32, ESP 32, derived, routes, committed, provisional, vendor -- /private/tmp/claude-502/-Users-jason-Dev-tools-AgentEar/33723602-1e71-4fcc-a8b4-cbcd366361fc/scratchpad/asr/corpus/wav/mixed/mixed059.wav
+--help
+transcribe --help
+transcribe --engine qwen3 -m 0.6B --context=raw, road, row, ro, roll, knowledge base, notice base, MacBook, macbook, mac book, Mac mini, mark mini, mac mini, 24R, 24 r, idea, report, Docker, doocca, Kubernetes, cuubber needs, WiFi, wifi, ESP32, esp32, ESP 32, derived, routes, committed, provisional, vendor -- /private/tmp/claude-502/-Users-jason-Dev-tools-AgentEar/33723602-1e71-4fcc-a8b4-cbcd366361fc/scratchpad/asr/corpus/wav/zh/zh000.wav
+--help
+transcribe --help
+transcribe --engine qwen3 -m 0.6B --context=raw, road, row, ro, roll, knowledge base, notice base, MacBook, macbook, mac book, Mac mini, mark mini, mac mini, 24R, 24 r, idea, report, Docker, doocca, Kubernetes, cuubber needs, WiFi, wifi, ESP32, esp32, ESP 32, derived, routes, committed, provisional, vendor -- /private/tmp/claude-502/-Users-jason-Dev-tools-AgentEar/33723602-1e71-4fcc-a8b4-cbcd366361fc/scratchpad/asr/corpus/wav/zh/zh001.wav
+--help
+transcribe --help
+transcribe --engine qwen3 -m 0.6B --context=raw, road, row, ro, roll, knowledge base, notice base, MacBook, macbook, mac book, Mac mini, mark mini, mac mini, 24R, 24 r, idea, report, Docker, doocca, Kubernetes, cuubber needs, WiFi, wifi, ESP32, esp32, ESP 32, derived, routes, committed, provisional, vendor -- /private/tmp/claude-502/-Users-jason-Dev-tools-AgentEar/33723602-1e71-4fcc-a8b4-cbcd366361fc/scratchpad/asr/corpus/wav/zh/zh002.wav
+--help
+transcribe --help
+transcribe --engine qwen3 -m 0.6B --context=raw, road, row, ro, roll, knowledge base, notice base, MacBook, macbook, mac book, Mac mini, mark mini, mac mini, 24R, 24 r, idea, report, Docker, doocca, Kubernetes, cuubber needs, WiFi, wifi, ESP32, esp32, ESP 32, derived, routes, committed, provisional, vendor -- /private/tmp/claude-502/-Users-jason-Dev-tools-AgentEar/33723602-1e71-4fcc-a8b4-cbcd366361fc/scratchpad/asr/corpus/wav/zh/zh003.wav
+--help
+transcribe --help
+transcribe --engine qwen3 -m 0.6B --context=raw, road, row, ro, roll, knowledge base, notice base, MacBook, macbook, mac book, Mac mini, mark mini, mac mini, 24R, 24 r, idea, report, Docker, doocca, Kubernetes, cuubber needs, WiFi, wifi, ESP32, esp32, ESP 32, derived, routes, committed, provisional, vendor -- /private/tmp/claude-502/-Users-jason-Dev-tools-AgentEar/33723602-1e71-4fcc-a8b4-cbcd366361fc/scratchpad/asr/corpus/wav/zh/zh004.wav
+--help
+transcribe --help
+transcribe --engine qwen3 -m 0.6B --context=raw, road, row, ro, roll, knowledge base, notice base, MacBook, macbook, mac book, Mac mini, mark mini, mac mini, 24R, 24 r, idea, report, Docker, doocca, Kubernetes, cuubber needs, WiFi, wifi, ESP32, esp32, ESP 32, derived, routes, committed, provisional, vendor -- /private/tmp/claude-502/-Users-jason-Dev-tools-AgentEar/33723602-1e71-4fcc-a8b4-cbcd366361fc/scratchpad/asr/corpus/wav/zh/zh005.wav
+--help
+transcribe --help
+transcribe --engine qwen3 -m 0.6B --context=raw, road, row, ro, roll, knowledge base, notice base, MacBook, macbook, mac book, Mac mini, mark mini, mac mini, 24R, 24 r, idea, report, Docker, doocca, Kubernetes, cuubber needs, WiFi, wifi, ESP32, esp32, ESP 32, derived, routes, committed, provisional, vendor -- /private/tmp/claude-502/-Users-jason-Dev-tools-AgentEar/33723602-1e71-4fcc-a8b4-cbcd366361fc/scratchpad/asr/corpus/wav/zh/zh006.wav
+--help
+transcribe --help
+transcribe --engine qwen3 -m 0.6B --context=raw, road, row, ro, roll, knowledge base, notice base, MacBook, macbook, mac book, Mac mini, mark mini, mac mini, 24R, 24 r, idea, report, Docker, doocca, Kubernetes, cuubber needs, WiFi, wifi, ESP32, esp32, ESP 32, derived, routes, committed, provisional, vendor -- /private/tmp/claude-502/-Users-jason-Dev-tools-AgentEar/33723602-1e71-4fcc-a8b4-cbcd366361fc/scratchpad/asr/corpus/wav/zh/zh007.wav
+--help
+transcribe --help
+transcribe --engine qwen3 -m 0.6B --context=raw, road, row, ro, roll, knowledge base, notice base, MacBook, macbook, mac book, Mac mini, mark mini, mac mini, 24R, 24 r, idea, report, Docker, doocca, Kubernetes, cuubber needs, WiFi, wifi, ESP32, esp32, ESP 32, derived, routes, committed, provisional, vendor -- /private/tmp/claude-502/-Users-jason-Dev-tools-AgentEar/33723602-1e71-4fcc-a8b4-cbcd366361fc/scratchpad/asr/corpus/wav/zh/zh008.wav
+--help
+transcribe --help
+transcribe --engine qwen3 -m 0.6B --context=raw, road, row, ro, roll, knowledge base, notice base, MacBook, macbook, mac book, Mac mini, mark mini, mac mini, 24R, 24 r, idea, report, Docker, doocca, Kubernetes, cuubber needs, WiFi, wifi, ESP32, esp32, ESP 32, derived, routes, committed, provisional, vendor -- /private/tmp/claude-502/-Users-jason-Dev-tools-AgentEar/33723602-1e71-4fcc-a8b4-cbcd366361fc/scratchpad/asr/corpus/wav/zh/zh009.wav
+--help
+transcribe --help
+transcribe --engine qwen3 -m 0.6B --context=raw, road, row, ro, roll, knowledge base, notice base, MacBook, macbook, mac book, Mac mini, mark mini, mac mini, 24R, 24 r, idea, report, Docker, doocca, Kubernetes, cuubber needs, WiFi, wifi, ESP32, esp32, ESP 32, derived, routes, committed, provisional, vendor -- /private/tmp/claude-502/-Users-jason-Dev-tools-AgentEar/33723602-1e71-4fcc-a8b4-cbcd366361fc/scratchpad/asr/corpus/wav/zh/zh010.wav
+--help
+transcribe --help
+transcribe --engine qwen3 -m 0.6B --context=raw, road, row, ro, roll, knowledge base, notice base, MacBook, macbook, mac book, Mac mini, mark mini, mac mini, 24R, 24 r, idea, report, Docker, doocca, Kubernetes, cuubber needs, WiFi, wifi, ESP32, esp32, ESP 32, derived, routes, committed, provisional, vendor -- /private/tmp/claude-502/-Users-jason-Dev-tools-AgentEar/33723602-1e71-4fcc-a8b4-cbcd366361fc/scratchpad/asr/corpus/wav/zh/zh011.wav
+--help
+transcribe --help
+transcribe --engine qwen3 -m 0.6B --context=raw, road, row, ro, roll, knowledge base, notice base, MacBook, macbook, mac book, Mac mini, mark mini, mac mini, 24R, 24 r, idea, report, Docker, doocca, Kubernetes, cuubber needs, WiFi, wifi, ESP32, esp32, ESP 32, derived, routes, committed, provisional, vendor -- /private/tmp/claude-502/-Users-jason-Dev-tools-AgentEar/33723602-1e71-4fcc-a8b4-cbcd366361fc/scratchpad/asr/corpus/wav/zh/zh012.wav
+--help
+transcribe --help
+transcribe --engine qwen3 -m 0.6B --context=raw, road, row, ro, roll, knowledge base, notice base, MacBook, macbook, mac book, Mac mini, mark mini, mac mini, 24R, 24 r, idea, report, Docker, doocca, Kubernetes, cuubber needs, WiFi, wifi, ESP32, esp32, ESP 32, derived, routes, committed, provisional, vendor -- /private/tmp/claude-502/-Users-jason-Dev-tools-AgentEar/33723602-1e71-4fcc-a8b4-cbcd366361fc/scratchpad/asr/corpus/wav/zh/zh013.wav
+--help
+transcribe --help
+transcribe --engine qwen3 -m 0.6B --context=raw, road, row, ro, roll, knowledge base, notice base, MacBook, macbook, mac book, Mac mini, mark mini, mac mini, 24R, 24 r, idea, report, Docker, doocca, Kubernetes, cuubber needs, WiFi, wifi, ESP32, esp32, ESP 32, derived, routes, committed, provisional, vendor -- /private/tmp/claude-502/-Users-jason-Dev-tools-AgentEar/33723602-1e71-4fcc-a8b4-cbcd366361fc/scratchpad/asr/corpus/wav/zh/zh014.wav
+--help
+transcribe --help
+transcribe --engine qwen3 -m 0.6B --context=raw, road, row, ro, roll, knowledge base, notice base, MacBook, macbook, mac book, Mac mini, mark mini, mac mini, 24R, 24 r, idea, report, Docker, doocca, Kubernetes, cuubber needs, WiFi, wifi, ESP32, esp32, ESP 32, derived, routes, committed, provisional, vendor -- /private/tmp/claude-502/-Users-jason-Dev-tools-AgentEar/33723602-1e71-4fcc-a8b4-cbcd366361fc/scratchpad/asr/corpus/wav/zh/zh015.wav
+--help
+transcribe --help
+transcribe --engine qwen3 -m 0.6B --context=raw, road, row, ro, roll, knowledge base, notice base, MacBook, macbook, mac book, Mac mini, mark mini, mac mini, 24R, 24 r, idea, report, Docker, doocca, Kubernetes, cuubber needs, WiFi, wifi, ESP32, esp32, ESP 32, derived, routes, committed, provisional, vendor -- /private/tmp/claude-502/-Users-jason-Dev-tools-AgentEar/33723602-1e71-4fcc-a8b4-cbcd366361fc/scratchpad/asr/corpus/wav/zh/zh016.wav
+--help
+transcribe --help
+transcribe --engine qwen3 -m 0.6B --context=raw, road, row, ro, roll, knowledge base, notice base, MacBook, macbook, mac book, Mac mini, mark mini, mac mini, 24R, 24 r, idea, report, Docker, doocca, Kubernetes, cuubber needs, WiFi, wifi, ESP32, esp32, ESP 32, derived, routes, committed, provisional, vendor -- /private/tmp/claude-502/-Users-jason-Dev-tools-AgentEar/33723602-1e71-4fcc-a8b4-cbcd366361fc/scratchpad/asr/corpus/wav/zh/zh017.wav
+--help
+transcribe --help
+transcribe --engine qwen3 -m 0.6B --context=raw, road, row, ro, roll, knowledge base, notice base, MacBook, macbook, mac book, Mac mini, mark mini, mac mini, 24R, 24 r, idea, report, Docker, doocca, Kubernetes, cuubber needs, WiFi, wifi, ESP32, esp32, ESP 32, derived, routes, committed, provisional, vendor -- /private/tmp/claude-502/-Users-jason-Dev-tools-AgentEar/33723602-1e71-4fcc-a8b4-cbcd366361fc/scratchpad/asr/corpus/wav/zh/zh018.wav
+--help
+transcribe --help
+transcribe --engine qwen3 -m 0.6B --context=raw, road, row, ro, roll, knowledge base, notice base, MacBook, macbook, mac book, Mac mini, mark mini, mac mini, 24R, 24 r, idea, report, Docker, doocca, Kubernetes, cuubber needs, WiFi, wifi, ESP32, esp32, ESP 32, derived, routes, committed, provisional, vendor -- /private/tmp/claude-502/-Users-jason-Dev-tools-AgentEar/33723602-1e71-4fcc-a8b4-cbcd366361fc/scratchpad/asr/corpus/wav/zh/zh019.wav
+--help
+transcribe --help
+transcribe --engine qwen3 -m 0.6B --context=raw, road, row, ro, roll, knowledge base, notice base, MacBook, macbook, mac book, Mac mini, mark mini, mac mini, 24R, 24 r, idea, report, Docker, doocca, Kubernetes, cuubber needs, WiFi, wifi, ESP32, esp32, ESP 32, derived, routes, committed, provisional, vendor -- /private/tmp/claude-502/-Users-jason-Dev-tools-AgentEar/33723602-1e71-4fcc-a8b4-cbcd366361fc/scratchpad/asr/corpus/wav/zh/zh020.wav
+--help
+transcribe --help
+transcribe --engine qwen3 -m 0.6B --context=raw, road, row, ro, roll, knowledge base, notice base, MacBook, macbook, mac book, Mac mini, mark mini, mac mini, 24R, 24 r, idea, report, Docker, doocca, Kubernetes, cuubber needs, WiFi, wifi, ESP32, esp32, ESP 32, derived, routes, committed, provisional, vendor -- /private/tmp/claude-502/-Users-jason-Dev-tools-AgentEar/33723602-1e71-4fcc-a8b4-cbcd366361fc/scratchpad/asr/corpus/wav/zh/zh021.wav
+--help
+transcribe --help
+transcribe --engine qwen3 -m 0.6B --context=raw, road, row, ro, roll, knowledge base, notice base, MacBook, macbook, mac book, Mac mini, mark mini, mac mini, 24R, 24 r, idea, report, Docker, doocca, Kubernetes, cuubber needs, WiFi, wifi, ESP32, esp32, ESP 32, derived, routes, committed, provisional, vendor -- /private/tmp/claude-502/-Users-jason-Dev-tools-AgentEar/33723602-1e71-4fcc-a8b4-cbcd366361fc/scratchpad/asr/corpus/wav/zh/zh022.wav
+--help
+transcribe --help
+transcribe --engine qwen3 -m 0.6B --context=raw, road, row, ro, roll, knowledge base, notice base, MacBook, macbook, mac book, Mac mini, mark mini, mac mini, 24R, 24 r, idea, report, Docker, doocca, Kubernetes, cuubber needs, WiFi, wifi, ESP32, esp32, ESP 32, derived, routes, committed, provisional, vendor -- /private/tmp/claude-502/-Users-jason-Dev-tools-AgentEar/33723602-1e71-4fcc-a8b4-cbcd366361fc/scratchpad/asr/corpus/wav/zh/zh023.wav
+--help
+transcribe --help
+transcribe --engine qwen3 -m 0.6B --context=raw, road, row, ro, roll, knowledge base, notice base, MacBook, macbook, mac book, Mac mini, mark mini, mac mini, 24R, 24 r, idea, report, Docker, doocca, Kubernetes, cuubber needs, WiFi, wifi, ESP32, esp32, ESP 32, derived, routes, committed, provisional, vendor -- /private/tmp/claude-502/-Users-jason-Dev-tools-AgentEar/33723602-1e71-4fcc-a8b4-cbcd366361fc/scratchpad/asr/corpus/wav/zh/zh024.wav
+--help
+transcribe --help
+transcribe --engine qwen3 -m 0.6B --context=raw, road, row, ro, roll, knowledge base, notice base, MacBook, macbook, mac book, Mac mini, mark mini, mac mini, 24R, 24 r, idea, report, Docker, doocca, Kubernetes, cuubber needs, WiFi, wifi, ESP32, esp32, ESP 32, derived, routes, committed, provisional, vendor -- /private/tmp/claude-502/-Users-jason-Dev-tools-AgentEar/33723602-1e71-4fcc-a8b4-cbcd366361fc/scratchpad/asr/corpus/wav/zh/zh025.wav
+--help
+transcribe --help
+transcribe --engine qwen3 -m 0.6B --context=raw, road, row, ro, roll, knowledge base, notice base, MacBook, macbook, mac book, Mac mini, mark mini, mac mini, 24R, 24 r, idea, report, Docker, doocca, Kubernetes, cuubber needs, WiFi, wifi, ESP32, esp32, ESP 32, derived, routes, committed, provisional, vendor -- /private/tmp/claude-502/-Users-jason-Dev-tools-AgentEar/33723602-1e71-4fcc-a8b4-cbcd366361fc/scratchpad/asr/corpus/wav/zh/zh026.wav
+--help
+transcribe --help
+transcribe --engine qwen3 -m 0.6B --context=raw, road, row, ro, roll, knowledge base, notice base, MacBook, macbook, mac book, Mac mini, mark mini, mac mini, 24R, 24 r, idea, report, Docker, doocca, Kubernetes, cuubber needs, WiFi, wifi, ESP32, esp32, ESP 32, derived, routes, committed, provisional, vendor -- /private/tmp/claude-502/-Users-jason-Dev-tools-AgentEar/33723602-1e71-4fcc-a8b4-cbcd366361fc/scratchpad/asr/corpus/wav/zh/zh027.wav
+--help
+transcribe --help
+transcribe --engine qwen3 -m 0.6B --context=raw, road, row, ro, roll, knowledge base, notice base, MacBook, macbook, mac book, Mac mini, mark mini, mac mini, 24R, 24 r, idea, report, Docker, doocca, Kubernetes, cuubber needs, WiFi, wifi, ESP32, esp32, ESP 32, derived, routes, committed, provisional, vendor -- /private/tmp/claude-502/-Users-jason-Dev-tools-AgentEar/33723602-1e71-4fcc-a8b4-cbcd366361fc/scratchpad/asr/corpus/wav/zh/zh028.wav
+--help
+transcribe --help
+transcribe --engine qwen3 -m 0.6B --context=raw, road, row, ro, roll, knowledge base, notice base, MacBook, macbook, mac book, Mac mini, mark mini, mac mini, 24R, 24 r, idea, report, Docker, doocca, Kubernetes, cuubber needs, WiFi, wifi, ESP32, esp32, ESP 32, derived, routes, committed, provisional, vendor -- /private/tmp/claude-502/-Users-jason-Dev-tools-AgentEar/33723602-1e71-4fcc-a8b4-cbcd366361fc/scratchpad/asr/corpus/wav/zh/zh029.wav
+--help
+transcribe --help
+transcribe --engine qwen3 -m 0.6B --context=raw, road, row, ro, roll, knowledge base, notice base, MacBook, macbook, mac book, Mac mini, mark mini, mac mini, 24R, 24 r, idea, report, Docker, doocca, Kubernetes, cuubber needs, WiFi, wifi, ESP32, esp32, ESP 32, derived, routes, committed, provisional, vendor -- /private/tmp/claude-502/-Users-jason-Dev-tools-AgentEar/33723602-1e71-4fcc-a8b4-cbcd366361fc/scratchpad/asr/corpus/wav/zh/zh030.wav
+--help
+transcribe --help
+transcribe --engine qwen3 -m 0.6B --context=raw, road, row, ro, roll, knowledge base, notice base, MacBook, macbook, mac book, Mac mini, mark mini, mac mini, 24R, 24 r, idea, report, Docker, doocca, Kubernetes, cuubber needs, WiFi, wifi, ESP32, esp32, ESP 32, derived, routes, committed, provisional, vendor -- /private/tmp/claude-502/-Users-jason-Dev-tools-AgentEar/33723602-1e71-4fcc-a8b4-cbcd366361fc/scratchpad/asr/corpus/wav/zh/zh031.wav
+--help
+transcribe --help
+transcribe --engine qwen3 -m 0.6B --context=raw, road, row, ro, roll, knowledge base, notice base, MacBook, macbook, mac book, Mac mini, mark mini, mac mini, 24R, 24 r, idea, report, Docker, doocca, Kubernetes, cuubber needs, WiFi, wifi, ESP32, esp32, ESP 32, derived, routes, committed, provisional, vendor -- /private/tmp/claude-502/-Users-jason-Dev-tools-AgentEar/33723602-1e71-4fcc-a8b4-cbcd366361fc/scratchpad/asr/corpus/wav/zh/zh032.wav
+--help
+transcribe --help
+transcribe --engine qwen3 -m 0.6B --context=raw, road, row, ro, roll, knowledge base, notice base, MacBook, macbook, mac book, Mac mini, mark mini, mac mini, 24R, 24 r, idea, report, Docker, doocca, Kubernetes, cuubber needs, WiFi, wifi, ESP32, esp32, ESP 32, derived, routes, committed, provisional, vendor -- /private/tmp/claude-502/-Users-jason-Dev-tools-AgentEar/33723602-1e71-4fcc-a8b4-cbcd366361fc/scratchpad/asr/corpus/wav/zh/zh033.wav
+--help
+transcribe --help
+transcribe --engine qwen3 -m 0.6B --context=raw, road, row, ro, roll, knowledge base, notice base, MacBook, macbook, mac book, Mac mini, mark mini, mac mini, 24R, 24 r, idea, report, Docker, doocca, Kubernetes, cuubber needs, WiFi, wifi, ESP32, esp32, ESP 32, derived, routes, committed, provisional, vendor -- /private/tmp/claude-502/-Users-jason-Dev-tools-AgentEar/33723602-1e71-4fcc-a8b4-cbcd366361fc/scratchpad/asr/corpus/wav/zh/zh034.wav
+--help
+transcribe --help
+transcribe --engine qwen3 -m 0.6B --context=raw, road, row, ro, roll, knowledge base, notice base, MacBook, macbook, mac book, Mac mini, mark mini, mac mini, 24R, 24 r, idea, report, Docker, doocca, Kubernetes, cuubber needs, WiFi, wifi, ESP32, esp32, ESP 32, derived, routes, committed, provisional, vendor -- /private/tmp/claude-502/-Users-jason-Dev-tools-AgentEar/33723602-1e71-4fcc-a8b4-cbcd366361fc/scratchpad/asr/corpus/wav/zh/zh035.wav
+--help
+transcribe --help
+transcribe --engine qwen3 -m 0.6B --context=raw, road, row, ro, roll, knowledge base, notice base, MacBook, macbook, mac book, Mac mini, mark mini, mac mini, 24R, 24 r, idea, report, Docker, doocca, Kubernetes, cuubber needs, WiFi, wifi, ESP32, esp32, ESP 32, derived, routes, committed, provisional, vendor -- /private/tmp/claude-502/-Users-jason-Dev-tools-AgentEar/33723602-1e71-4fcc-a8b4-cbcd366361fc/scratchpad/asr/corpus/wav/zh/zh036.wav
+--help
+transcribe --help
+transcribe --engine qwen3 -m 0.6B --context=raw, road, row, ro, roll, knowledge base, notice base, MacBook, macbook, mac book, Mac mini, mark mini, mac mini, 24R, 24 r, idea, report, Docker, doocca, Kubernetes, cuubber needs, WiFi, wifi, ESP32, esp32, ESP 32, derived, routes, committed, provisional, vendor -- /private/tmp/claude-502/-Users-jason-Dev-tools-AgentEar/33723602-1e71-4fcc-a8b4-cbcd366361fc/scratchpad/asr/corpus/wav/zh/zh037.wav
+--help
+transcribe --help
+transcribe --engine qwen3 -m 0.6B --context=raw, road, row, ro, roll, knowledge base, notice base, MacBook, macbook, mac book, Mac mini, mark mini, mac mini, 24R, 24 r, idea, report, Docker, doocca, Kubernetes, cuubber needs, WiFi, wifi, ESP32, esp32, ESP 32, derived, routes, committed, provisional, vendor -- /private/tmp/claude-502/-Users-jason-Dev-tools-AgentEar/33723602-1e71-4fcc-a8b4-cbcd366361fc/scratchpad/asr/corpus/wav/zh/zh038.wav
+--help
+transcribe --help
+transcribe --engine qwen3 -m 0.6B --context=raw, road, row, ro, roll, knowledge base, notice base, MacBook, macbook, mac book, Mac mini, mark mini, mac mini, 24R, 24 r, idea, report, Docker, doocca, Kubernetes, cuubber needs, WiFi, wifi, ESP32, esp32, ESP 32, derived, routes, committed, provisional, vendor -- /private/tmp/claude-502/-Users-jason-Dev-tools-AgentEar/33723602-1e71-4fcc-a8b4-cbcd366361fc/scratchpad/asr/corpus/wav/zh/zh039.wav
+--help
+transcribe --help
+transcribe --engine qwen3 -m 0.6B --context=raw, road, row, ro, roll, knowledge base, notice base, MacBook, macbook, mac book, Mac mini, mark mini, mac mini, 24R, 24 r, idea, report, Docker, doocca, Kubernetes, cuubber needs, WiFi, wifi, ESP32, esp32, ESP 32, derived, routes, committed, provisional, vendor -- /private/tmp/claude-502/-Users-jason-Dev-tools-AgentEar/33723602-1e71-4fcc-a8b4-cbcd366361fc/scratchpad/asr/corpus/wav/zh/zh040.wav
+--help
+transcribe --help
+transcribe --engine qwen3 -m 0.6B --context=raw, road, row, ro, roll, knowledge base, notice base, MacBook, macbook, mac book, Mac mini, mark mini, mac mini, 24R, 24 r, idea, report, Docker, doocca, Kubernetes, cuubber needs, WiFi, wifi, ESP32, esp32, ESP 32, derived, routes, committed, provisional, vendor -- /private/tmp/claude-502/-Users-jason-Dev-tools-AgentEar/33723602-1e71-4fcc-a8b4-cbcd366361fc/scratchpad/asr/corpus/wav/zh/zh041.wav
+--help
+transcribe --help
+transcribe --engine qwen3 -m 0.6B --context=raw, road, row, ro, roll, knowledge base, notice base, MacBook, macbook, mac book, Mac mini, mark mini, mac mini, 24R, 24 r, idea, report, Docker, doocca, Kubernetes, cuubber needs, WiFi, wifi, ESP32, esp32, ESP 32, derived, routes, committed, provisional, vendor -- /private/tmp/claude-502/-Users-jason-Dev-tools-AgentEar/33723602-1e71-4fcc-a8b4-cbcd366361fc/scratchpad/asr/corpus/wav/zh/zh042.wav
+--help
+transcribe --help
+transcribe --engine qwen3 -m 0.6B --context=raw, road, row, ro, roll, knowledge base, notice base, MacBook, macbook, mac book, Mac mini, mark mini, mac mini, 24R, 24 r, idea, report, Docker, doocca, Kubernetes, cuubber needs, WiFi, wifi, ESP32, esp32, ESP 32, derived, routes, committed, provisional, vendor -- /private/tmp/claude-502/-Users-jason-Dev-tools-AgentEar/33723602-1e71-4fcc-a8b4-cbcd366361fc/scratchpad/asr/corpus/wav/zh/zh043.wav
+--help
+transcribe --help
+transcribe --engine qwen3 -m 0.6B --context=raw, road, row, ro, roll, knowledge base, notice base, MacBook, macbook, mac book, Mac mini, mark mini, mac mini, 24R, 24 r, idea, report, Docker, doocca, Kubernetes, cuubber needs, WiFi, wifi, ESP32, esp32, ESP 32, derived, routes, committed, provisional, vendor -- /private/tmp/claude-502/-Users-jason-Dev-tools-AgentEar/33723602-1e71-4fcc-a8b4-cbcd366361fc/scratchpad/asr/corpus/wav/zh/zh044.wav
+--help
+transcribe --help
+transcribe --engine qwen3 -m 0.6B --context=raw, road, row, ro, roll, knowledge base, notice base, MacBook, macbook, mac book, Mac mini, mark mini, mac mini, 24R, 24 r, idea, report, Docker, doocca, Kubernetes, cuubber needs, WiFi, wifi, ESP32, esp32, ESP 32, derived, routes, committed, provisional, vendor -- /private/tmp/claude-502/-Users-jason-Dev-tools-AgentEar/33723602-1e71-4fcc-a8b4-cbcd366361fc/scratchpad/asr/corpus/wav/zh/zh045.wav
+--help
+transcribe --help
+transcribe --engine qwen3 -m 0.6B --context=raw, road, row, ro, roll, knowledge base, notice base, MacBook, macbook, mac book, Mac mini, mark mini, mac mini, 24R, 24 r, idea, report, Docker, doocca, Kubernetes, cuubber needs, WiFi, wifi, ESP32, esp32, ESP 32, derived, routes, committed, provisional, vendor -- /private/tmp/claude-502/-Users-jason-Dev-tools-AgentEar/33723602-1e71-4fcc-a8b4-cbcd366361fc/scratchpad/asr/corpus/wav/zh/zh046.wav
+--help
+transcribe --help
+transcribe --engine qwen3 -m 0.6B --context=raw, road, row, ro, roll, knowledge base, notice base, MacBook, macbook, mac book, Mac mini, mark mini, mac mini, 24R, 24 r, idea, report, Docker, doocca, Kubernetes, cuubber needs, WiFi, wifi, ESP32, esp32, ESP 32, derived, routes, committed, provisional, vendor -- /private/tmp/claude-502/-Users-jason-Dev-tools-AgentEar/33723602-1e71-4fcc-a8b4-cbcd366361fc/scratchpad/asr/corpus/wav/zh/zh047.wav
+--help
+transcribe --help
+transcribe --engine qwen3 -m 0.6B --context=raw, road, row, ro, roll, knowledge base, notice base, MacBook, macbook, mac book, Mac mini, mark mini, mac mini, 24R, 24 r, idea, report, Docker, doocca, Kubernetes, cuubber needs, WiFi, wifi, ESP32, esp32, ESP 32, derived, routes, committed, provisional, vendor -- /private/tmp/claude-502/-Users-jason-Dev-tools-AgentEar/33723602-1e71-4fcc-a8b4-cbcd366361fc/scratchpad/asr/corpus/wav/zh/zh048.wav
+--help
+transcribe --help
+transcribe --engine qwen3 -m 0.6B --context=raw, road, row, ro, roll, knowledge base, notice base, MacBook, macbook, mac book, Mac mini, mark mini, mac mini, 24R, 24 r, idea, report, Docker, doocca, Kubernetes, cuubber needs, WiFi, wifi, ESP32, esp32, ESP 32, derived, routes, committed, provisional, vendor -- /private/tmp/claude-502/-Users-jason-Dev-tools-AgentEar/33723602-1e71-4fcc-a8b4-cbcd366361fc/scratchpad/asr/corpus/wav/zh/zh049.wav
+--help
+transcribe --help
+transcribe --engine qwen3 -m 0.6B --context=raw, road, row, ro, roll, knowledge base, notice base, MacBook, macbook, mac book, Mac mini, mark mini, mac mini, 24R, 24 r, idea, report, Docker, doocca, Kubernetes, cuubber needs, WiFi, wifi, ESP32, esp32, ESP 32, derived, routes, committed, provisional, vendor -- /private/tmp/claude-502/-Users-jason-Dev-tools-AgentEar/33723602-1e71-4fcc-a8b4-cbcd366361fc/scratchpad/asr/corpus/wav/zh/zh050.wav
+--help
+transcribe --help
+transcribe --engine qwen3 -m 0.6B --context=raw, road, row, ro, roll, knowledge base, notice base, MacBook, macbook, mac book, Mac mini, mark mini, mac mini, 24R, 24 r, idea, report, Docker, doocca, Kubernetes, cuubber needs, WiFi, wifi, ESP32, esp32, ESP 32, derived, routes, committed, provisional, vendor -- /private/tmp/claude-502/-Users-jason-Dev-tools-AgentEar/33723602-1e71-4fcc-a8b4-cbcd366361fc/scratchpad/asr/corpus/wav/zh/zh051.wav
+--help
+transcribe --help
+transcribe --engine qwen3 -m 0.6B --context=raw, road, row, ro, roll, knowledge base, notice base, MacBook, macbook, mac book, Mac mini, mark mini, mac mini, 24R, 24 r, idea, report, Docker, doocca, Kubernetes, cuubber needs, WiFi, wifi, ESP32, esp32, ESP 32, derived, routes, committed, provisional, vendor -- /private/tmp/claude-502/-Users-jason-Dev-tools-AgentEar/33723602-1e71-4fcc-a8b4-cbcd366361fc/scratchpad/asr/corpus/wav/zh/zh052.wav
+--help
+transcribe --help
+transcribe --engine qwen3 -m 0.6B --context=raw, road, row, ro, roll, knowledge base, notice base, MacBook, macbook, mac book, Mac mini, mark mini, mac mini, 24R, 24 r, idea, report, Docker, doocca, Kubernetes, cuubber needs, WiFi, wifi, ESP32, esp32, ESP 32, derived, routes, committed, provisional, vendor -- /private/tmp/claude-502/-Users-jason-Dev-tools-AgentEar/33723602-1e71-4fcc-a8b4-cbcd366361fc/scratchpad/asr/corpus/wav/zh/zh053.wav
+--help
+transcribe --help
+transcribe --engine qwen3 -m 0.6B --context=raw, road, row, ro, roll, knowledge base, notice base, MacBook, macbook, mac book, Mac mini, mark mini, mac mini, 24R, 24 r, idea, report, Docker, doocca, Kubernetes, cuubber needs, WiFi, wifi, ESP32, esp32, ESP 32, derived, routes, committed, provisional, vendor -- /private/tmp/claude-502/-Users-jason-Dev-tools-AgentEar/33723602-1e71-4fcc-a8b4-cbcd366361fc/scratchpad/asr/corpus/wav/zh/zh054.wav
+--help
+transcribe --help
+transcribe --engine qwen3 -m 0.6B --context=raw, road, row, ro, roll, knowledge base, notice base, MacBook, macbook, mac book, Mac mini, mark mini, mac mini, 24R, 24 r, idea, report, Docker, doocca, Kubernetes, cuubber needs, WiFi, wifi, ESP32, esp32, ESP 32, derived, routes, committed, provisional, vendor -- /private/tmp/claude-502/-Users-jason-Dev-tools-AgentEar/33723602-1e71-4fcc-a8b4-cbcd366361fc/scratchpad/asr/corpus/wav/zh/zh055.wav
+--help
+transcribe --help
+transcribe --engine qwen3 -m 0.6B --context=raw, road, row, ro, roll, knowledge base, notice base, MacBook, macbook, mac book, Mac mini, mark mini, mac mini, 24R, 24 r, idea, report, Docker, doocca, Kubernetes, cuubber needs, WiFi, wifi, ESP32, esp32, ESP 32, derived, routes, committed, provisional, vendor -- /private/tmp/claude-502/-Users-jason-Dev-tools-AgentEar/33723602-1e71-4fcc-a8b4-cbcd366361fc/scratchpad/asr/corpus/wav/zh/zh056.wav
+--help
+transcribe --help
+transcribe --engine qwen3 -m 0.6B --context=raw, road, row, ro, roll, knowledge base, notice base, MacBook, macbook, mac book, Mac mini, mark mini, mac mini, 24R, 24 r, idea, report, Docker, doocca, Kubernetes, cuubber needs, WiFi, wifi, ESP32, esp32, ESP 32, derived, routes, committed, provisional, vendor -- /private/tmp/claude-502/-Users-jason-Dev-tools-AgentEar/33723602-1e71-4fcc-a8b4-cbcd366361fc/scratchpad/asr/corpus/wav/zh/zh057.wav
+--help
+transcribe --help
+transcribe --engine qwen3 -m 0.6B --context=raw, road, row, ro, roll, knowledge base, notice base, MacBook, macbook, mac book, Mac mini, mark mini, mac mini, 24R, 24 r, idea, report, Docker, doocca, Kubernetes, cuubber needs, WiFi, wifi, ESP32, esp32, ESP 32, derived, routes, committed, provisional, vendor -- /private/tmp/claude-502/-Users-jason-Dev-tools-AgentEar/33723602-1e71-4fcc-a8b4-cbcd366361fc/scratchpad/asr/corpus/wav/zh/zh058.wav
+--help
+transcribe --help
+transcribe --engine qwen3 -m 0.6B --context=raw, road, row, ro, roll, knowledge base, notice base, MacBook, macbook, mac book, Mac mini, mark mini, mac mini, 24R, 24 r, idea, report, Docker, doocca, Kubernetes, cuubber needs, WiFi, wifi, ESP32, esp32, ESP 32, derived, routes, committed, provisional, vendor -- /private/tmp/claude-502/-Users-jason-Dev-tools-AgentEar/33723602-1e71-4fcc-a8b4-cbcd366361fc/scratchpad/asr/corpus/wav/zh/zh059.wav

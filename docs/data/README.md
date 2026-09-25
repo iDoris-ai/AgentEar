@@ -13,6 +13,7 @@ ADR-0004 的数字从这里来。**保留逐样本数据**，免得只剩一张�
 | `thai-cer-per-sample/*.json` | **逐句** hyp、edits、参考长度 | `scripts/cer-thai.py <模型> <cli> <数据目录>` |
 | `thai-coldstart-raw.txt` | 载入时间 / 端到端墙钟 / RSS（whisper vs SenseVoice） | 见文件尾的命令。**脚本原样输出** |
 | `thai-rtf-repeat.txt` | 同一模型重复三次的 RTF | `scripts/bench-thai.sh <模型>` 连跑三次。⚠️ **人工汇总**，不是原样输出 |
+| `asr-zh-en-2026-09/` | T3.5.1 中英 ASR 横比：子集 manifest、逐条转写（`hyp/`，3 次运行）、打分输出 `score.md`、性能 `perf-raw.tsv`、sample02 对账 `sample02-score.md` | `scripts/asr-zhen-score.py` 直接重算（**不跑推理，输出与 `score.md` 逐字一致**）；推理与性能见 `docs/benchmarks-asr-zh-en.md` §8。**脚本原样输出** |
 | `thai-cer-stats.txt` | CI 与配对比较 | `scripts/cer-stats.py docs/data/thai-cer-per-sample 4000` — 除开头 3 行说明外**逐字节一致，已验**。⚠️ 它会 **exit 4**：这六份结果产出于指纹机制之前，「跑在同一批录音上」这个前提无法事后验证 |
 
 统计量**不需要重跑推理**——`cer-stats.py` 直接吃 `thai-cer-per-sample/`，
