@@ -863,11 +863,18 @@
 - **验收命令**：待定——遗留 1 可以照抄这次 spawn 的模式加单测；
   遗留 2 需要先确认怎么在测试里模拟"进程退出时还有 afplay 在播"这个场景。
 
-### T3.5.1 中文/英文 ASR 横比  `READY`
+### T3.5.1 中文/英文 ASR 横比  `PR_OPEN`（2026-09-25，分支 `feat/T3.5.1-asr-compare`）
 - **为什么必须做**：`benchmarks-m3.md` 只测了泰语。
   换默认 ASR 影响**全部语种**，不能凭泰语结果推断 SenseVoice 该不该换。
 - 用 M0 的中文语料，横比 SenseVoice vs Qwen3-ASR，分语种给 CER。
 - **这是「换默认引擎」拍板的前置**，没有它 jason 无法决策。
+- **产出**：[`benchmarks-asr-zh-en.md`](../benchmarks-asr-zh-en.md)。
+  M0 只有一条伪参考样本，所以另外加了 FLEURS 中/英 + ASCEND 中英混合（各 n=60）。
+  M0 的 sample02 也复跑了一遍对账：SenseVoice 25.08%，和当年的数逐字一致。
+  结论：英文、混合两组 Qwen3-ASR 1.7B 更好；中文组主口径下未检出差异，
+  剔除数字写法的干扰后变成 1.7B 更好（这是事后定的口径）。
+  代价是每次多约 2s 冷启动，峰值 2.4–2.6 GiB，只能进高资源档。
+  **Q4（换不换）仍待 jason 拍板。**
 
 ### T3.5.2 whisper 逐条 CER 入库  `READY`
 - **为什么**：`RESULTS.md` 只存了汇总指标，导致
