@@ -25,10 +25,12 @@ use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, Sel};
 use objc2::{define_class, msg_send, sel, MainThreadMarker, MainThreadOnly};
 use objc2_app_kit::{
-    NSApplication, NSApplicationActivationPolicy, NSControlStateValueOff, NSControlStateValueOn,
-    NSMenu, NSMenuDelegate, NSMenuItem, NSStatusBar, NSStatusItem, NSVariableStatusItemLength,
+    NSApplication, NSApplicationActivationPolicy, NSBackingStoreType, NSButton, NSControl,
+    NSControlStateValueOff, NSControlStateValueOn, NSMenu, NSMenuDelegate, NSMenuItem,
+    NSPopUpButton, NSStatusBar, NSStatusItem, NSTextField, NSVariableStatusItemLength, NSView,
+    NSWindow, NSWindowStyleMask,
 };
-use objc2_foundation::{NSObjectProtocol, NSString, NSTimer};
+use objc2_foundation::{NSObjectProtocol, NSPoint, NSRect, NSSize, NSString, NSTimer};
 
 use crate::asr::AsrLang;
 use crate::config::{self, Trigger};
@@ -102,6 +104,8 @@ const TAG_CORRECT_TERMS: isize = 5;
 const TAG_OPEN_TERMS: isize = 6;
 const TAG_START_SIDECAR: isize = 7;
 const TAG_OPEN_COMMANDS: isize = 8;
+const TAG_OPEN_SETTINGS: isize = 9;
+const TAG_LAUNCH_AT_LOGIN: isize = 10;
 /// `+0` 是「系统默认」，`+1..` 对应 `DEVICE_SNAPSHOT` 的下标。
 const TAG_DEVICE_BASE: isize = 1000;
 
@@ -179,6 +183,25 @@ define_class!(
         #[unsafe(method(onItem:))]
         fn on_item(&self, sender: &NSMenuItem) {
             handle(sender.tag(), MainThreadMarker::from(self));
+        }
+
+        /// 设置窗口里的按钮/勾选框走这个——**跟 `onItem:` 分开**，
+        /// 而不是把 `sender` 硬转成 `&NSMenuItem`：`NSButton` 不是
+        /// `NSMenuItem`，混用类型是未定义行为的边界，哪怕两边都恰好
+        /// 有 `tag()` 这个方法。`NSControl` 是两者共同的父类之一
+        /// （按钮/勾选框都继承它），签名写对，`handle()` 复用同一套
+        /// tag 分发不用改。
+        #[unsafe(method(onControl:))]
+        fn on_control(&self, sender: &NSControl) {
+            handle(sender.tag(), MainThreadMarker::from(self));
+        }
+
+        /// 保留期那个下拉框（`NSPopUpButton`）单独一个方法：它要读的是
+        /// `selectedTag()`（当前选中项的 tag），跟按钮/勾选框读自己的
+        /// `tag()` 不是一回事，不能共用 `onControl:`。
+        #[unsafe(method(onPopup:))]
+        fn on_popup(&self, sender: &NSPopUpButton) {
+            handle(sender.selectedTag(), MainThreadMarker::from(self));
         }
     }
 
@@ -541,104 +564,21 @@ fn populate(menu: &NSMenu, mtm: MainThreadMarker, target: &MenuTarget) {
         cfg.auto_paste,
     ));
 
-    // —— 术语纠错 ——
+    // —— 设置…（原生窗口）——
     //
-    // 开关下面跟一行边车状态：开着纠错但边车没起时，用户看到的是
-    // 「勾了但没效果」——不给状态的话他无从知道问题在哪。
-    //
-    // 边车没起时**照样可点**，只是文案改成「服务未启动」。
-    // 置灰的话用户没法预先打开它（先勾上、再去起服务是合理顺序），
-    // 而且置灰不解释原因比什么都不做更让人困惑。
-    // ⚠️ **不在这里现探**：`menuNeedsUpdate:` 跑在 AppKit 主线程上，
-    // 而一次 curl 探测最多要几秒——每次打开菜单都冻住几秒是不能接受的
-    // （codex Medium 2）。改读生命周期维护的健康状态，那是个内存读。
-    // 代价是状态可能滞后一点，由 0.5s 定时器那边的后台刷新兜住。
-    let reachable = crate::sidecar::is_ready();
-    menu.addItem(&item(
-        mtm,
-        target,
-        i18n::t(
-            lang,
-            if reachable { Key::CorrectTerms } else { Key::CorrectTermsOffline },
-        ),
-        TAG_CORRECT_TERMS,
-        cfg.correct_terms,
-    ));
-
-    // 边车状态行。**只在纠错开着时显示**——关着的时候它是噪音。
-    if cfg.correct_terms {
-        let url = cfg.llm_url.clone().unwrap_or_else(|| crate::correct::DEFAULT_URL.to_string());
-        let _ = &url;
-        let (key, tag) = match crate::sidecar::health() {
-            crate::sidecar::Health::Up => (Key::SidecarUp, -1),
-            // 端口被占：再拉起也没用，所以不给「点击拉起」的入口
-            crate::sidecar::Health::WrongService => (Key::SidecarWrongService, -1),
-            // **没有拉起命令时也不给那个入口**——点了必然什么都不发生
-            // （codex Low 2）
-            crate::sidecar::Health::Down => {
-                if cfg.llm_autostart && !cfg.llm_start_command.is_empty() {
-                    (Key::SidecarDown, TAG_START_SIDECAR)
-                } else {
-                    (Key::SidecarDown, -1)
-                }
-            }
-        };
-        menu.addItem(&item(mtm, target, i18n::t(lang, key), tag, false));
-    }
-
-    // —— 保留期 ——
-    let ret_item = item(mtm, target, i18n::t(lang, Key::RetentionSection), -1, false);
-    ret_item.setEnabled(true);
-    submenu(
-        mtm,
-        &ret_item,
-        RETENTION_CHOICES
-            .iter()
-            .enumerate()
-            .map(|(i, (days, key))| {
-                item(
-                    mtm,
-                    target,
-                    i18n::t(lang, *key),
-                    TAG_RETENTION_BASE + i as isize,
-                    cfg.retention_days == *days,
-                )
-            })
-            .collect(),
-    );
-    menu.addItem(&ret_item);
-
+    // 2026-09-23（jason 拍板）：菜单栏越堆越长，「自动上屏」以下那一串
+    // （纠错开关/边车状态/保留期/术语表/指令表/数据目录/日志）挪进一个
+    // 独立的原生设置窗口，顶层菜单只留「自动上屏」和更急的那几项。
+    // 详见 `open_settings_window`。
     menu.addItem(&NSMenuItem::separatorItem(mtm));
-    // 术语表编辑入口紧跟在纠错开关那一组之后——它们是同一件事的两半：
-    // 开关决定要不要纠，术语表决定纠什么。
     menu.addItem(&item(
         mtm,
         target,
-        i18n::t(lang, Key::OpenTerms),
-        TAG_OPEN_TERMS,
+        i18n::t(lang, Key::OpenSettings),
+        TAG_OPEN_SETTINGS,
         false,
     ));
-    menu.addItem(&item(
-        mtm,
-        target,
-        i18n::t(lang, Key::OpenCommands),
-        TAG_OPEN_COMMANDS,
-        false,
-    ));
-    menu.addItem(&item(
-        mtm,
-        target,
-        i18n::t(lang, Key::OpenDataDir),
-        TAG_OPEN_DATA,
-        false,
-    ));
-    menu.addItem(&item(
-        mtm,
-        target,
-        i18n::t(lang, Key::ViewLog),
-        TAG_OPEN_LOG,
-        false,
-    ));
+
     menu.addItem(&NSMenuItem::separatorItem(mtm));
     menu.addItem(&item(mtm, target, i18n::t(lang, Key::Quit), TAG_QUIT, false));
 }
@@ -756,6 +696,15 @@ fn handle(tag: isize, mtm: MainThreadMarker) {
                 log::warn!("  ⚠️ 纠错服务没在跑，先跑 scripts/serve-llm.sh，否则每次录音会白等一次超时");
             }
         }
+        TAG_LAUNCH_AT_LOGIN => {
+            let on = !config::get().launch_at_login;
+            config::update(|c| c.launch_at_login = on);
+            log::info!("开机自动启动：{}", if on { "开" } else { "关" });
+            // 文件 I/O 没必要卡住点击这一下——设置窗口里其它控件照样能点。
+            // `apply()` 自己现读配置（上面这行 `config::update` 已经落盘），
+            // 不用把 `on` 带进闭包。
+            std::thread::spawn(crate::launch_agent::apply);
+        }
         TAG_START_SIDECAR => {
             let cfg = config::get();
             let url = cfg.llm_url.clone().unwrap_or_else(|| crate::correct::DEFAULT_URL.to_string());
@@ -824,6 +773,7 @@ fn handle(tag: isize, mtm: MainThreadMarker) {
         }
         TAG_OPEN_DATA => open_path(DATA_ROOT.get().cloned()),
         TAG_OPEN_LOG => open_path(DATA_ROOT.get().map(|r| r.join("agentear.log"))),
+        TAG_OPEN_SETTINGS => open_settings_window(mtm),
         TAG_QUIT => {
             log::info!("从菜单退出");
             // 收拾**我们自己拉起的**边车。不是我们拉起的一律不动——
@@ -928,6 +878,278 @@ fn open_path(p: Option<PathBuf>) {
     }
 }
 
+// —— 设置窗口 ——
+//
+// **一个进程只留一个设置窗口**：`thread_local!` 存着上次建好的那个，
+// 再点「设置…」就直接把它调到前台、重建内容（读最新配置），不会一点
+// 一个、点几次就叠出一摞重复窗口。用 `thread_local!` 而不是 `static`
+// 是因为 `Retained<NSWindow>` 这类 `MainThreadOnly` 类型本来就不是
+// `Send`/`Sync`——`thread_local!` 不要求这个，`static` 要求。反正这个
+// 值只会在主线程被摸到（`MainThreadMarker` 保证），跟线程本地存储的
+// 语义正合适。
+thread_local! {
+    static SETTINGS_WINDOW: std::cell::RefCell<Option<Retained<NSWindow>>> =
+        const { std::cell::RefCell::new(None) };
+    /// 菜单栏那份 `MenuTarget` 的一份拷贝（`Retained` 只是加了个引用计数，
+    /// 不是深拷贝）。设置窗口的控件要挂 target 时从这里取，**不新建一个**
+    /// ——分发逻辑全在自由函数 `handle()` 里，target 只是 selector 落点，
+    /// 多一个实例没有任何意义，只会多一份要管的生命周期。
+    /// 在 `install()` 里、菜单栏那份建好的同一刻写入。
+    static CURRENT_TARGET: std::cell::RefCell<Option<Retained<MenuTarget>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+const SETTINGS_WIDTH: f64 = 420.0;
+const ROW_H: f64 = 26.0;
+const ROW_GAP: f64 = 12.0;
+const MARGIN: f64 = 20.0;
+
+fn rect(x: f64, y: f64, w: f64, h: f64) -> NSRect {
+    NSRect::new(NSPoint::new(x, y), NSSize::new(w, h))
+}
+
+fn checkbox(
+    mtm: MainThreadMarker,
+    target: &MenuTarget,
+    title: &str,
+    tag: isize,
+    checked: bool,
+    y: f64,
+) -> Retained<NSButton> {
+    let b = unsafe {
+        NSButton::checkboxWithTitle_target_action(
+            &NSString::from_str(title),
+            Some(AsRef::<AnyObject>::as_ref(target)),
+            Some(sel!(onControl:)),
+            mtm,
+        )
+    };
+    b.setFrame(rect(MARGIN, y, SETTINGS_WIDTH - 2.0 * MARGIN, ROW_H));
+    b.setTag(tag);
+    b.setState(if checked { NSControlStateValueOn } else { NSControlStateValueOff });
+    b
+}
+
+fn action_button(
+    mtm: MainThreadMarker,
+    target: &MenuTarget,
+    title: &str,
+    tag: isize,
+    y: f64,
+) -> Retained<NSButton> {
+    let b = unsafe {
+        NSButton::buttonWithTitle_target_action(
+            &NSString::from_str(title),
+            Some(AsRef::<AnyObject>::as_ref(target)),
+            Some(sel!(onControl:)),
+            mtm,
+        )
+    };
+    b.setFrame(rect(MARGIN, y, SETTINGS_WIDTH - 2.0 * MARGIN, ROW_H));
+    b.setTag(tag);
+    b
+}
+
+fn info_label(mtm: MainThreadMarker, text: &str, y: f64) -> Retained<NSTextField> {
+    let f = NSTextField::labelWithString(&NSString::from_str(text), mtm);
+    f.setFrame(rect(MARGIN + 18.0, y, SETTINGS_WIDTH - 2.0 * MARGIN - 18.0, ROW_H));
+    f
+}
+
+/// 保留期下拉框。**内部菜单项不挂 target/action**——只有 `NSPopUpButton`
+/// 自己那一份 target/action 会触发（挂在弹出的那些 `NSMenuItem` 上会跟
+/// 外层重复触发，行为对不上）。选中哪项靠 `onPopup:` 读 `selectedTag()`。
+fn retention_popup(
+    mtm: MainThreadMarker,
+    target: &MenuTarget,
+    lang: Lang,
+    current_days: u32,
+    y: f64,
+) -> Retained<NSPopUpButton> {
+    let popup = NSPopUpButton::initWithFrame_pullsDown(
+        NSPopUpButton::alloc(mtm),
+        rect(MARGIN + 100.0, y, SETTINGS_WIDTH - 2.0 * MARGIN - 100.0, ROW_H),
+        false,
+    );
+    let menu = NSMenu::init(NSMenu::alloc(mtm));
+    for (i, (days, key)) in RETENTION_CHOICES.iter().enumerate() {
+        let it = unsafe {
+            NSMenuItem::initWithTitle_action_keyEquivalent(
+                NSMenuItem::alloc(mtm),
+                &NSString::from_str(i18n::t(lang, *key)),
+                None,
+                &NSString::from_str(""),
+            )
+        };
+        it.setTag(TAG_RETENTION_BASE + i as isize);
+        menu.addItem(&it);
+        let _ = days;
+    }
+    popup.setMenu(Some(&menu));
+    unsafe {
+        popup.setTarget(Some(AsRef::<AnyObject>::as_ref(target)));
+        popup.setAction(Some(sel!(onPopup:)));
+    }
+    if let Some(i) = RETENTION_CHOICES.iter().position(|(d, _)| *d == current_days) {
+        popup.selectItemAtIndex(i as isize);
+    }
+    popup
+}
+
+/// 弹出（或调到前台）设置窗口。**每次都重建内容**——跟菜单
+/// `menuNeedsUpdate:` 同一个做法：设置窗口不常开，重建的成本远低于
+/// 维护一份「点开后还要不要跟着配置活刷新」的状态。
+fn open_settings_window(mtm: MainThreadMarker) {
+    let cfg = config::get();
+    let lang = cfg.ui_lang;
+
+    let window = SETTINGS_WINDOW.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        if let Some(w) = slot.as_ref() {
+            return w.clone();
+        }
+        let w = unsafe {
+            NSWindow::initWithContentRect_styleMask_backing_defer(
+                NSWindow::alloc(mtm),
+                rect(0.0, 0.0, SETTINGS_WIDTH, 1.0),
+                NSWindowStyleMask::Titled | NSWindowStyleMask::Closable,
+                NSBackingStoreType::Buffered,
+                false,
+            )
+        };
+        unsafe { w.setReleasedWhenClosed(false) }; // 关窗口不能把它释放掉，下次还要用同一个实例
+        *slot = Some(w.clone());
+        w
+    });
+    window.setTitle(&NSString::from_str(i18n::t(lang, Key::SettingsTitle)));
+
+    build_settings_content(mtm, &window, &cfg, lang);
+
+    window.center();
+    window.makeKeyAndOrderFront(None);
+    // ⚠️ **不能用 `NSApplication::activate()`**：那是 macOS 14+ 才有的方法，
+    // `Info.plist` 的 `LSMinimumSystemVersion` 写的是 11.0——真在老系统上
+    // 跑会是「unrecognized selector」直接崩溃（codex 复查抓到的）。
+    // `activateIgnoringOtherApps:` 虽然标了 deprecated，但从 10.0 就有，
+    // 兼容面覆盖到 11.0——**这里正确性优先于消掉一条 deprecation 警告**。
+    #[allow(deprecated)]
+    NSApplication::sharedApplication(mtm).activateIgnoringOtherApps(true);
+}
+
+fn build_settings_content(
+    mtm: MainThreadMarker,
+    window: &NSWindow,
+    cfg: &config::Config,
+    lang: Lang,
+) {
+    // 这里拿到的 target 必须是菜单栏那份 `MenuTarget`，不能新建一个——
+    // 新建的话点按钮时 `on_control`/`on_popup` 是活的，但它读的全局状态
+    // （`DATA_ROOT` 等）没问题，问题在**多一个 target 实例本身没有意义**：
+    // 所有分发逻辑都在自由函数 `handle()` 里，target 只是个 selector 落点。
+    // 所以从菜单栏拿现成的那份。
+    let target = CURRENT_TARGET.with(|t| t.borrow().clone()).expect("菜单栏必须先装好");
+
+    let reachable = crate::sidecar::is_ready();
+    let correct_key = if reachable { Key::CorrectTerms } else { Key::CorrectTermsOffline };
+    // 和 `populate()` 里菜单那份完全同一套判据（codex 复查抓到：这里原来
+    // 全部渲染成不可点的 `NSTextField`，`TAG_START_SIDECAR` 变成了死代码，
+    // 但文案还留着"点击拉起"，跟按钮那种一样，不点开源码看不出区别）。
+    let sidecar_line: Option<(String, isize)> = if cfg.correct_terms {
+        let (key, tag) = match crate::sidecar::health() {
+            crate::sidecar::Health::Up => (Key::SidecarUp, -1),
+            crate::sidecar::Health::WrongService => (Key::SidecarWrongService, -1),
+            crate::sidecar::Health::Down => {
+                if cfg.llm_autostart && !cfg.llm_start_command.is_empty() {
+                    (Key::SidecarDown, TAG_START_SIDECAR)
+                } else {
+                    (Key::SidecarDown, -1)
+                }
+            }
+        };
+        Some((i18n::t(lang, key).to_string(), tag))
+    } else {
+        None
+    };
+
+    // 行数固定：勾选×2 + 边车状态(可能为空) + 保留期 + 4 个按钮。
+    // 边车状态那一行**即使是空文案也占位**——用固定行数换布局代码简单，
+    // 空标签不可见，视觉上跟"少一行"没区别。
+    let rows = 2 + 1 + 1 + 4;
+    let content_h = MARGIN * 2.0 + rows as f64 * ROW_H + (rows - 1) as f64 * ROW_GAP;
+    window.setContentSize(NSSize::new(SETTINGS_WIDTH, content_h));
+
+    let content = NSView::initWithFrame(NSView::alloc(mtm), rect(0.0, 0.0, SETTINGS_WIDTH, content_h));
+
+    let mut y = content_h - MARGIN - ROW_H;
+    let mut next_row = || {
+        let cur = y;
+        y -= ROW_H + ROW_GAP;
+        cur
+    };
+
+    content.addSubview(&checkbox(
+        mtm,
+        &target,
+        i18n::t(lang, Key::LaunchAtLogin),
+        TAG_LAUNCH_AT_LOGIN,
+        cfg.launch_at_login,
+        next_row(),
+    ));
+    content.addSubview(&checkbox(
+        mtm,
+        &target,
+        i18n::t(lang, correct_key),
+        TAG_CORRECT_TERMS,
+        cfg.correct_terms,
+        next_row(),
+    ));
+    {
+        let row_y = next_row();
+        match &sidecar_line {
+            Some((text, tag)) if *tag >= 0 => {
+                content.addSubview(&action_button(mtm, &target, text, *tag, row_y));
+            }
+            Some((text, _)) => content.addSubview(&info_label(mtm, text, row_y)),
+            None => content.addSubview(&info_label(mtm, "", row_y)),
+        }
+    }
+    {
+        let row_y = next_row();
+        content.addSubview(&info_label(mtm, i18n::t(lang, Key::RetentionSection), row_y));
+        content.addSubview(&retention_popup(mtm, &target, lang, cfg.retention_days, row_y));
+    }
+    content.addSubview(&action_button(
+        mtm,
+        &target,
+        i18n::t(lang, Key::OpenTerms),
+        TAG_OPEN_TERMS,
+        next_row(),
+    ));
+    content.addSubview(&action_button(
+        mtm,
+        &target,
+        i18n::t(lang, Key::OpenCommands),
+        TAG_OPEN_COMMANDS,
+        next_row(),
+    ));
+    content.addSubview(&action_button(
+        mtm,
+        &target,
+        i18n::t(lang, Key::OpenDataDir),
+        TAG_OPEN_DATA,
+        next_row(),
+    ));
+    content.addSubview(&action_button(
+        mtm,
+        &target,
+        i18n::t(lang, Key::ViewLog),
+        TAG_OPEN_LOG,
+        next_row(),
+    ));
+
+    window.setContentView(Some(&content));
+}
+
 pub struct Tray {
     _item: Retained<NSStatusItem>,
     _timer: Retained<NSTimer>,
@@ -949,6 +1171,7 @@ pub fn install(mtm: MainThreadMarker) -> Option<Tray> {
     }
 
     let target = MenuTarget::new(mtm);
+    CURRENT_TARGET.with(|t| *t.borrow_mut() = Some(target.clone()));
     let menu = NSMenu::init(NSMenu::alloc(mtm));
     menu.setAutoenablesItems(false);
     // 内容在 menuNeedsUpdate: 里填，这里只先建一次好让首次点击就有东西

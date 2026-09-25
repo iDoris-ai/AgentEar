@@ -18,6 +18,7 @@ mod i18n;
 mod index;
 mod kb;
 mod label;
+mod launch_agent;
 mod paste;
 mod route;
 mod session;
@@ -817,6 +818,13 @@ fn main() -> Result<()> {
     // 让 Ctrl+C / SIGTERM 也能收拾边车。**必须在拉起之前注册**，
     // 否则启动过程中收到信号会留下孤儿。
     sidecar::install_signal_handlers();
+
+    // 开机自动启动：每次启动都对一次账，不是只在用户点开关时才处理——
+    // 升级换了 .app 安装路径、或者用户手改了 config.json，都要在这里收敛
+    // 到"配置说的" == "磁盘上 plist 里写的"。放后台线程：文件 I/O 没有
+    // 理由挡住菜单栏图标出现。`apply()` 自己现读配置、自己持锁，
+    // 这里不用传参数。
+    std::thread::spawn(launch_agent::apply);
 
     // 边车按需拉起。**放后台线程**：拉起要等模型加载（实测冷启动几十秒），
     // 卡在这里会让菜单栏图标迟迟不出现，用户以为程序没启动。

@@ -102,6 +102,12 @@ pub enum Key {
     OpenDataDir,
     ViewLog,
     Quit,
+    /// 菜单栏里的「设置…」入口，点了弹出原生设置窗口。
+    OpenSettings,
+    /// 设置窗口的标题栏文字。
+    SettingsTitle,
+    /// 开机自动启动开关（写 LaunchAgent）。
+    LaunchAtLogin,
 }
 
 /// 三种语言的文案。参数顺序固定 `(en, zh, th)`。
@@ -237,6 +243,14 @@ pub fn t(lang: Lang, key: Key) -> &'static str {
         K::OpenDataDir => pick(lang, "Open Data Folder", "打开数据目录", "เปิดโฟลเดอร์ข้อมูล"),
         K::ViewLog => pick(lang, "View Log", "查看日志", "ดูบันทึก"),
         K::Quit => pick(lang, "Quit AgentEar", "退出 AgentEar", "ออกจาก AgentEar"),
+        K::OpenSettings => pick(lang, "Settings…", "设置…", "การตั้งค่า…"),
+        K::SettingsTitle => pick(lang, "AgentEar Settings", "AgentEar 设置", "การตั้งค่า AgentEar"),
+        K::LaunchAtLogin => pick(
+            lang,
+            "Launch at Login",
+            "开机自动启动",
+            "เปิดอัตโนมัติเมื่อเข้าระบบ",
+        ),
     }
 }
 
@@ -321,7 +335,7 @@ fn fail_reason(lang: Lang, f: crate::download::Fail) -> &'static str {
 mod tests {
     use super::*;
 
-    const ALL_KEYS: [Key; 26] = [
+    const ALL_KEYS: [Key; 29] = [
         Key::StartRecording,
         Key::Transcribing,
         Key::TitleTranscribing,
@@ -348,6 +362,9 @@ mod tests {
         Key::OpenDataDir,
         Key::ViewLog,
         Key::Quit,
+        Key::OpenSettings,
+        Key::SettingsTitle,
+        Key::LaunchAtLogin,
     ];
 
     #[test]

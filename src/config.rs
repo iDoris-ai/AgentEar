@@ -98,6 +98,12 @@ fn default_auto_paste() -> bool {
     true
 }
 
+/// 开机自动启动。**默认开**——jason 2026-09-23 拍板，普通用户不会自己去
+/// 系统设置里翻「登录项」，装完就该是能用的常驻状态。
+fn default_launch_at_login() -> bool {
+    true
+}
+
 fn default_autostart() -> bool {
     true
 }
@@ -127,6 +133,14 @@ pub struct Config {
     /// 转写完是否自动粘贴到光标处。
     #[serde(deserialize_with = "lenient_auto_paste")]
     pub auto_paste: bool,
+    /// 开机自动启动（写 `~/Library/LaunchAgents/ai.idoris.agentear.plist`）。
+    ///
+    /// **只在从 .app bundle 里跑的时候真正生效**——开发时跑裸二进制
+    /// （`target/release/agentear`）没有稳定的 bundle 路径可写进 plist，
+    /// 这个开关在那种环境下只落配置、不装 LaunchAgent，见
+    /// `launch_agent.rs::bundle_executable_path`。
+    #[serde(deserialize_with = "lenient_launch_at_login")]
+    pub launch_at_login: bool,
     /// 输入设备名。`None` = 跟随系统默认。
     ///
     /// 存名字而不是索引：设备顺序会随插拔变化，索引存下来就指错了。
@@ -439,10 +453,16 @@ fn lenient_auto_paste<'de, D: Deserializer<'de>>(d: D) -> Result<bool, D::Error>
     Ok(serde_json::from_value(v).unwrap_or_else(|_| default_auto_paste()))
 }
 
+fn lenient_launch_at_login<'de, D: Deserializer<'de>>(d: D) -> Result<bool, D::Error> {
+    let v = serde_json::Value::deserialize(d)?;
+    Ok(serde_json::from_value(v).unwrap_or_else(|_| default_launch_at_login()))
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {
             auto_paste: default_auto_paste(),
+            launch_at_login: default_launch_at_login(),
             input_device: None,
             trigger: Trigger::RightCommand,
             retention_days: default_retention_days(),
