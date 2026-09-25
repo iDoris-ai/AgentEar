@@ -2,7 +2,7 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-## 当前状态：**v0.19.0 —— 修复播放期间按录音键在守护进程里实际打不断的真 bug（此前 v0.6.0 起就没真正生效过）+ 泰语 code-switch 提示词**；M1/M2 已发布；**M3 通话链路已跑通，推键式打断这次才真正接通，AEC / VAD 自动打断未做**
+## 当前状态：**v0.20.0 —— 开机自动启动（默认开，只写/删 LaunchAgent plist、不调 launchctl）+ 原生设置窗口（菜单收进 `设置…`）；两者均未经真实点击验收**；M1/M2 已发布；**M3 通话链路已跑通，V1 打断定为推键式长期终态（v0.19.0 起才在守护进程里真正生效），不做 VAD 自动打断 / 双讲**
 
 M1 完成；**知识库投递 + 全文检索默认开（v0.4.2）**；M2 理解层已发布（v0.4.0）但默认关；
 **v0.6.0 加了通话链路（说一句答一句、可按键打断）**，**v0.5.0 加了可切换的 ASR 后端**（`--asr-backend` / `config.json` 的 `asr_backend`，
