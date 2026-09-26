@@ -101,7 +101,7 @@ $REPO/scripts/serve-talk-llm.sh
 ```bash
 cargo test                                                    # 期望 298 passed / 6 ignored
 python3 -m unittest discover -s services/tts -p 'test_*.py'   # 期望 46 passed
-scripts/serve-tts.sh & sleep 5; curl -s localhost:8765/health  # 看 mlx.cache_limit_set
+scripts/serve-tts.sh & sleep 5; curl -s localhost:8796/health  # 看 mlx.cache_limit_set
 ```
 
 ⚠️ **TTS 单测里响度那 3 条需要 numpy**：`normalize_loudness` 在没有 numpy 时

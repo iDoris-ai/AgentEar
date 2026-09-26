@@ -1828,6 +1828,8 @@ fn answer_out_loud(cfg: &config::Config, heard: &str, lang: talk::TalkLang) {
         Err(e) => {
             log::error!("通话没拿到回答（LLM 或 TTS 边车起了吗？）: {e:#}");
             println!("（这一轮没说出来，详见日志）");
+            // 原因是边车不可用时，用 `say` 念一句（带节流），别让用户以为「按了没反应」。
+            talk::notice_if_sidecars_down(cfg, lang);
             // ⚠️ **转写照样记一轮**：用户说了什么是有价值的记录，
             // 不能因为边车挂了就当这一轮不存在（session.rs 的用例钉住这条）。
             // 记完再把相标成 Failed——通话本身还活着，下一轮照常能开。
@@ -1849,6 +1851,7 @@ fn answer_out_loud(cfg: &config::Config, heard: &str, lang: talk::TalkLang) {
         }
     };
     println!("🔊 {reply}");
+    talk::note_turn_ok();
     // 全文补进这一轮（进 Speaking 相时还没有它）。
     if let Some(Err(e)) = with_session(|s| s.note_reply(reply.clone())) {
         log::warn!("补记回答失败: {e}");
@@ -2086,8 +2089,18 @@ fn diagnose(vendor: &std::path::Path) -> Result<()> {
             // 端口被别的程序占着：**不能**只报「没起」——用户照着去起，
             // 边车会撞端口立刻退出（2026-09-26 的真实情形）。
             (talk::EndpointHealth::WrongService, detail) => {
-                println!("  ❌ {}", talk::describe_port_taken("LLM", &llm_url, &detail));
-                missing.push("LLM");
+                let relocate = cfg.talk_autostart && !cfg.talk_llm_start_command.is_empty();
+                println!(
+                    "  {} {}",
+                    if relocate { "⚠️" } else { "❌" },
+                    talk::describe_port_taken("LLM", &llm_url, &detail, relocate)
+                );
+                // 守护进程这会儿可能已经换端口拉起来了（运行态记录里有）——
+                // 自检是另一个进程，看不到它的内存，只能读那份记录再探一次。
+                match talk::relocated_live("LLM", &llm_url) {
+                    Some(u) => println!("     ↪ 正在用避让端口：{u}（✅ 在跑）"),
+                    None => missing.push("LLM"),
+                }
             }
         }
     }
@@ -2102,8 +2115,18 @@ fn diagnose(vendor: &std::path::Path) -> Result<()> {
             // 端口被别的程序占着：**不能**只报「没起」——用户照着去起，
             // 边车会撞端口立刻退出（2026-09-26 的真实情形）。
             (talk::EndpointHealth::WrongService, detail) => {
-                println!("  ❌ {}", talk::describe_port_taken("TTS", &tts_url, &detail));
-                missing.push("TTS");
+                let relocate = cfg.talk_autostart && !cfg.talk_tts_start_command.is_empty();
+                println!(
+                    "  {} {}",
+                    if relocate { "⚠️" } else { "❌" },
+                    talk::describe_port_taken("TTS", &tts_url, &detail, relocate)
+                );
+                // 守护进程这会儿可能已经换端口拉起来了（运行态记录里有）——
+                // 自检是另一个进程，看不到它的内存，只能读那份记录再探一次。
+                match talk::relocated_live("TTS", &tts_url) {
+                    Some(u) => println!("     ↪ 正在用避让端口：{u}（✅ 在跑）"),
+                    None => missing.push("TTS"),
+                }
             }
         }
     }

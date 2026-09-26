@@ -778,9 +778,10 @@ impl Engines {
         let llm: Arc<dyn LlmEngine> = match cfg.talk_llm_engine.as_str() {
             "mock" => Arc::new(WeatherMock::new(cfg.weather_fact())),
             _ => Arc::new(OpenAiCompat::new(
-                cfg.talk_llm_url
-                    .clone()
-                    .unwrap_or_else(|| DEFAULT_LLM_URL.to_string()),
+                effective_url(
+                    "LLM",
+                    cfg.talk_llm_url.as_deref().unwrap_or(DEFAULT_LLM_URL),
+                ),
                 Arc::new(sidecar::Curl),
                 cfg.talk_timeout_secs,
             )),
@@ -789,9 +790,7 @@ impl Engines {
             "say" => Arc::new(SayTts::new(cfg.talk_timeout_secs)),
             _ => Arc::new(
                 HttpTts::new(
-                    cfg.tts_url
-                        .clone()
-                        .unwrap_or_else(|| DEFAULT_TTS_URL.to_string()),
+                    effective_url("TTS", cfg.tts_url.as_deref().unwrap_or(DEFAULT_TTS_URL)),
                     Arc::new(CurlAudio),
                     cfg.talk_timeout_secs,
                 )
@@ -951,15 +950,311 @@ pub fn port_taken_hint(name: &str) -> &'static str {
 }
 
 /// 一句完整的「端口被占」说明（给日志和 `--diagnose` 共用，两处措辞不许分叉）。
-pub fn describe_port_taken(name: &str, url: &str, detail: &str) -> String {
+///
+/// `relocate` = 我们会不会自动换一个空闲端口去拉起（有拉起命令且没关自动拉起时会，
+/// 见 [`SidecarAction::Relocate`]）。两种情况给用户的下一步完全不同，措辞必须分开。
+pub fn describe_port_taken(name: &str, url: &str, detail: &str, relocate: bool) -> String {
     let who = port_of(url)
         .and_then(port_occupant)
         .map(|w| format!("，占着它的是 {w}"))
         .unwrap_or_default();
-    format!(
-        "{name} 边车的地址 {url} 被别的程序占了（{detail}{who}）——不会去拉起。{}",
-        port_taken_hint(name)
-    )
+    if relocate {
+        format!(
+            "{name} 边车的地址 {url} 被别的程序占了（{detail}{who}）——\
+             对话模式会自动换一个空闲端口把它拉起来（不改你的 config.json）"
+        )
+    } else {
+        format!(
+            "{name} 边车的地址 {url} 被别的程序占了（{detail}{who}）——不会去拉起。{}",
+            port_taken_hint(name)
+        )
+    }
+}
+
+// ---------------------------------------------------------------- 端口避让（v0.22.0）
+//
+// jason 2026-09-26 拍板：「别人占了这个端口之后，我们可以自动地发现服务无效，
+// 再拉起、换一个端口」。落地规则：
+//
+// - **只对「我们会拉起的」边车生效**（有拉起命令、没关 talk_autostart）。
+//   没有拉起命令时保持「只报不拉」——我们不知道怎么在别的端口上起一个用户自己的服务。
+// - **不改用户的 config.json**：换出来的端口是**运行期覆盖**（[`effective_url`]），
+//   外加一份运行态记录（`<数据目录>/run/talk-sidecars.json`），见 [`RunEntry`]。
+// - 端口通过环境变量交给拉起命令（`AGENTEAR_TTS_PORT` / `AGENTEAR_TALK_LLM_PORT`，
+//   两个脚本都认）。命令里原来写死的同名变量会被**替换掉**，否则内层的赋值会赢
+//   （`env A=1 env A=2 …` 最终是 2）——jason 本机的拉起命令里就写着 `AGENTEAR_TTS_PORT=8766`。
+
+/// 这个边车的拉起脚本从哪个环境变量读端口。
+pub fn port_env_var(name: &str) -> &'static str {
+    match name {
+        "LLM" => "AGENTEAR_TALK_LLM_PORT",
+        _ => "AGENTEAR_TTS_PORT",
+    }
+}
+
+/// 纯函数：把 URL 里的端口换成 `port`。只认 `http://host[:port][/path]` 这种形状
+/// （IPv6 字面量也认）；认不出就 `None`——宁可不避让，也不拼出一个错地址去等 90 秒。
+pub fn replace_port(url: &str, port: u16) -> Option<String> {
+    let (scheme, rest) = url.split_once("://")?;
+    if scheme != "http" && scheme != "https" {
+        return None;
+    }
+    let (authority, path) = match rest.find('/') {
+        Some(i) => (&rest[..i], &rest[i..]),
+        None => (rest, ""),
+    };
+    if authority.is_empty() || authority.contains('@') {
+        return None;
+    }
+    let host = if authority.starts_with('[') {
+        let end = authority.find(']')?;
+        &authority[..=end]
+    } else {
+        authority.split(':').next().unwrap_or("")
+    };
+    if host.is_empty() {
+        return None;
+    }
+    Some(format!("{scheme}://{host}:{port}{path}"))
+}
+
+/// 纯函数：给拉起命令注入「用这个端口」。
+///
+/// - 命令本身以 `env` 开头：**删掉它参数段里的同名赋值**，把新值放在
+///   **紧挨着要跑的程序之前**（`env` 的选项如 `-i` / `-u NAME` 原样保留）；
+/// - 否则在最前面套一层 `/usr/bin/env VAR=port`。
+///
+/// 程序名之后的参数一律不动——那是脚本自己的参数，长得像赋值也不是环境变量。
+pub fn with_port_env(command: &[String], var: &str, port: u16) -> Vec<String> {
+    let assign = format!("{var}={port}");
+    let prefix = format!("{var}=");
+    let is_env = command
+        .first()
+        .map(|c| c == "env" || c.ends_with("/env"))
+        .unwrap_or(false);
+    if !is_env {
+        let mut out = vec!["/usr/bin/env".to_string(), assign];
+        out.extend(command.iter().cloned());
+        return out;
+    }
+    let mut out = vec![command[0].clone()];
+    let mut i = 1;
+    while i < command.len() {
+        let arg = &command[i];
+        if matches!(arg.as_str(), "-u" | "-P" | "-S" | "-C") {
+            // 带一个值的选项：连值一起原样保留
+            out.push(arg.clone());
+            if let Some(v) = command.get(i + 1) {
+                out.push(v.clone());
+            }
+            i += 2;
+        } else if arg.starts_with('-') {
+            out.push(arg.clone());
+            i += 1;
+        } else if arg.contains('=') {
+            if !arg.starts_with(&prefix) {
+                out.push(arg.clone()); // 旧的同名赋值丢掉，否则它会盖住我们的
+            }
+            i += 1;
+        } else {
+            break; // 到程序名了
+        }
+    }
+    out.push(assign);
+    out.extend(command[i..].iter().cloned());
+    out
+}
+
+/// 找一个本机空闲端口：让系统分一个（bind `127.0.0.1:0`）。
+///
+/// ⚠️ 有 TOCTOU：我们放开它到边车 bind 之间可能被别人抢走。
+/// 所以避让拉起失败（进程立刻退出）时会**再换一次**，见 `relocate_and_start`。
+pub fn free_local_port() -> Option<u16> {
+    std::net::TcpListener::bind(("127.0.0.1", 0))
+        .ok()?
+        .local_addr()
+        .ok()
+        .map(|a| a.port())
+}
+
+/// 运行期覆盖：`(边车名, 配置里的地址, 实际在用的地址)`。
+///
+/// 带上「配置里的地址」是为了**配置一改就失效**：用户后来把 `tts_url` 改掉了，
+/// 旧的覆盖不该继续把请求导到别处。
+static OVERRIDES: std::sync::Mutex<Vec<(&'static str, String, String)>> =
+    std::sync::Mutex::new(Vec::new());
+
+/// 纯函数：在覆盖表里查实际地址。
+pub fn resolve_override(
+    table: &[(&'static str, String, String)],
+    name: &str,
+    configured: &str,
+) -> Option<String> {
+    table
+        .iter()
+        .find(|(n, c, _)| *n == name && c == configured)
+        .map(|(_, _, e)| e.clone())
+}
+
+/// 本进程内存里的避让覆盖（只有守护进程自己换过端口才有）。
+fn override_url(name: &str, configured: &str) -> Option<String> {
+    let t = OVERRIDES.lock().unwrap_or_else(|e| e.into_inner());
+    resolve_override(&t, name, configured)
+}
+
+/// 这个边车现在实际该连哪里：
+/// ① 本进程换过端口 → 用它；② 否则运行态记录里有**正在应答**的避让地址
+/// （守护进程换的，`--ask` / `--say` / `--talk-turn` 这些 CLI 入口靠这条跟上）→ 用它；
+/// ③ 否则用配置的地址。
+///
+/// ②要探一次活（本机 curl，毫秒级），只在有记录时才探。
+pub fn effective_url(name: &str, configured: &str) -> String {
+    override_url(name, configured)
+        .or_else(|| relocated_live(name, configured))
+        .unwrap_or_else(|| configured.to_string())
+}
+
+fn set_override(name: &'static str, configured: &str, effective: &str) {
+    let mut t = OVERRIDES.lock().unwrap_or_else(|e| e.into_inner());
+    t.retain(|(n, _, _)| *n != name);
+    t.push((name, configured.to_string(), effective.to_string()));
+}
+
+fn clear_override(name: &str) {
+    OVERRIDES
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .retain(|(n, _, _)| *n != name);
+}
+
+/// 运行态记录：我们**在避让端口上**拉起的边车。
+///
+/// **为什么要落盘**：v0.20.1 起守护进程崩溃后会被 launchd 自动拉起，
+/// 而崩溃不走收尾，避让端口上的边车（常驻 2–4 GB）会活下来。没有这份记录，
+/// 重启后的我们只会再探一次被占的默认端口、再换一个端口、**再起一份**——
+/// 每崩一次多 4 GB。有了它，重启后先把上次那个**接回来**（确认 pid 对得上才接）。
+///
+/// **不写进 config.json**：那是用户的配置，端口避让是运行期的事，
+/// 占端口的那个程序一关，下次就该回到默认端口。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RunEntry {
+    pub name: String,
+    /// 配置里的地址（被占的那个）。配置改了，这条就作废。
+    pub configured: String,
+    /// 实际拉起的地址。
+    pub url: String,
+    pub pid: i32,
+}
+
+fn run_file() -> Option<PathBuf> {
+    crate::data_root().ok().map(|d| d.join("run").join("talk-sidecars.json"))
+}
+
+fn load_run_entries() -> Vec<RunEntry> {
+    run_file()
+        .and_then(|p| std::fs::read(p).ok())
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .unwrap_or_default()
+}
+
+fn save_run_entries(entries: &[RunEntry]) {
+    let Some(path) = run_file() else { return };
+    if entries.is_empty() {
+        let _ = std::fs::remove_file(&path);
+        return;
+    }
+    let write = || -> Result<()> {
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        let tmp = path.with_extension("json.tmp");
+        std::fs::write(&tmp, serde_json::to_vec_pretty(entries)?)?;
+        std::fs::rename(&tmp, &path)?;
+        Ok(())
+    };
+    if let Err(e) = write() {
+        log::warn!("写运行态记录 {} 失败：{e}（崩溃重启后可能多起一份边车）", path.display());
+    }
+}
+
+fn upsert_run_entry(entry: RunEntry) {
+    let mut all = load_run_entries();
+    all.retain(|e| e.name != entry.name);
+    all.push(entry);
+    save_run_entries(&all);
+}
+
+fn remove_run_entry(name: &str) {
+    let mut all = load_run_entries();
+    let before = all.len();
+    all.retain(|e| e.name != name);
+    if all.len() != before {
+        save_run_entries(&all);
+    }
+}
+
+/// 谁在听这个端口：只要 pid。
+pub fn port_listener_pid(port: u16) -> Option<i32> {
+    let out = Command::new("/usr/sbin/lsof")
+        .args(["-nP", &format!("-iTCP:{port}"), "-sTCP:LISTEN", "-Fp"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+    parse_lsof_pid(&String::from_utf8_lossy(&out.stdout))
+}
+
+fn parse_lsof_pid(out: &str) -> Option<i32> {
+    out.lines().find_map(|l| l.strip_prefix('p')).and_then(|p| p.parse().ok())
+}
+
+/// 纯函数：一条运行态记录能不能接回来。
+///
+/// 三条都要满足：① 配置没改过；② 那个地址 `/health` 是 `Up`；
+/// ③ 在听那个端口的**正是记录里的 pid**——pid 会被系统复用，
+/// 只凭「端口上有个健康的服务」就接，可能接走别人的进程、退出时还把它杀了。
+pub fn can_adopt(entry: &RunEntry, configured: &str, health: EndpointHealth, listener: Option<i32>) -> bool {
+    entry.configured == configured && health == EndpointHealth::Up && listener == Some(entry.pid)
+}
+
+/// 运行态记录里这个边车的避让地址——**只在它确实还是我们那个进程时**返回
+/// （同 [`can_adopt`] 的三条：配置没改、在应答、听端口的正是记录的 pid）。
+/// 只看「在应答」不够：守护进程被信号杀掉后记录会留下，那个端口之后
+/// 可能被别的健康服务占了，CLI 入口就会把请求送到别人那里。
+pub fn relocated_live(name: &str, configured: &str) -> Option<String> {
+    let entry = load_run_entries()
+        .into_iter()
+        .find(|e| e.name == name && e.configured == configured)?;
+    let health = probe_health(&entry.url).0;
+    let listener = port_of(&entry.url).and_then(port_listener_pid);
+    can_adopt(&entry, configured, health, listener).then_some(entry.url)
+}
+
+/// 我们「接回来」的边车（不是这个进程 spawn 的，没有 `Child` 句柄，只有 pid）。
+static ADOPTED: std::sync::Mutex<Vec<(&'static str, i32)>> = std::sync::Mutex::new(Vec::new());
+
+/// 试着把上次避让拉起的那个接回来。接上了返回它的地址。
+fn adopt_from_run_file(name: &'static str, configured: &str) -> Option<String> {
+    let entry = load_run_entries().into_iter().find(|e| e.name == name)?;
+    let (health, _) = probe_health(&entry.url);
+    let listener = port_of(&entry.url).and_then(port_listener_pid);
+    if !can_adopt(&entry, configured, health, listener) {
+        remove_run_entry(name);
+        return None;
+    }
+    log::info!(
+        "{name} 边车：接回上次换端口拉起的那个（{}，pid {}）——配置的地址 {configured} 仍被占着时就用它",
+        entry.url,
+        entry.pid
+    );
+    register_pid_raw(entry.pid);
+    ADOPTED
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .push((name, entry.pid));
+    set_override(name, configured, &entry.url);
+    Some(entry.url)
 }
 
 /// 一个通话边车的规格：叫什么、连哪、连不上时按什么命令拉。
@@ -970,6 +1265,9 @@ pub struct Sidecar {
     pub url: String,
     /// 空 = 不知道怎么拉。**这是默认值，不是缺陷**——见 `sidecar_action`。
     pub command: Vec<String>,
+    /// 地址是用户在 config.json 里**显式写的**（不是默认值）。
+    /// 显式地址被占时照样避让，但日志升一级——用户明确要的地址没用上，得让他看见。
+    pub explicit: bool,
 }
 
 /// 连不上时该干什么。**抽成纯函数是为了能把四种组合都测掉**：
@@ -985,16 +1283,24 @@ pub enum SidecarAction {
     CantStartNoCommand,
     /// 拉不了：用户把自动拉起关了。
     CantStartDisabled,
-    /// **不许拉**：那个端口上有别的程序（见 [`EndpointHealth::WrongService`]）。
-    /// 与 autostart / 命令无关——往一个被占的端口再起服务只会立刻失败，
-    /// 还把真正的原因盖住。
+    /// **不许拉**：那个端口上有别的程序（见 [`EndpointHealth::WrongService`]），
+    /// 而我们又没法自己拉（没有拉起命令，或关了自动拉起）——只报不拉。
     PortTaken,
+    /// 端口被别的程序占了，**换一个空闲端口拉起**（v0.22.0，jason 2026-09-26 拍板）。
+    /// 往原端口上再起服务只会立刻失败，所以不是 `Start`。
+    Relocate,
 }
 
 pub fn sidecar_action(health: EndpointHealth, autostart: bool, command: &[String]) -> SidecarAction {
     match health {
         EndpointHealth::Up => return SidecarAction::AlreadyUp,
-        EndpointHealth::WrongService => return SidecarAction::PortTaken,
+        EndpointHealth::WrongService => {
+            return if autostart && !command.is_empty() {
+                SidecarAction::Relocate
+            } else {
+                SidecarAction::PortTaken
+            };
+        }
         EndpointHealth::Down => {}
     }
     if !autostart {
@@ -1018,6 +1324,7 @@ pub fn sidecar_specs(cfg: &crate::config::Config) -> Vec<Sidecar> {
                 .clone()
                 .unwrap_or_else(|| DEFAULT_LLM_URL.to_string()),
             command: cfg.talk_llm_start_command.clone(),
+            explicit: cfg.talk_llm_url.is_some(),
         });
     }
     if cfg.talk_tts_engine != "say" {
@@ -1028,6 +1335,7 @@ pub fn sidecar_specs(cfg: &crate::config::Config) -> Vec<Sidecar> {
                 .clone()
                 .unwrap_or_else(|| DEFAULT_TTS_URL.to_string()),
             command: cfg.talk_tts_start_command.clone(),
+            explicit: cfg.tts_url.is_some(),
         });
     }
     out
@@ -1062,10 +1370,14 @@ pub fn kill_spawned_pids_from_signal() {
 }
 
 fn register_pid(child: &std::process::Child) {
+    register_pid_raw(child.id() as i32);
+}
+
+fn register_pid_raw(pid: i32) {
     use std::sync::atomic::Ordering;
     for slot in SPAWNED_PIDS.iter() {
         if slot
-            .compare_exchange(0, child.id() as i32, Ordering::SeqCst, Ordering::SeqCst)
+            .compare_exchange(0, pid, Ordering::SeqCst, Ordering::SeqCst)
             .is_ok()
         {
             return;
@@ -1092,6 +1404,24 @@ const READY_TIMEOUT: Duration = Duration::from_secs(90);
 pub fn ensure_sidecars(cfg: &crate::config::Config) -> Vec<(&'static str, bool)> {
     let mut out = Vec::new();
     for spec in sidecar_specs(cfg) {
+        // ① 这个进程里已经换过端口：换出来的那个还活着就接着用，死了就作废。
+        // ⚠️ 这里只看**内存**里的覆盖，不看运行态记录：记录里的那个要走下面的
+        // 「接回」（校验 pid、登记收尾），直接拿来用会漏掉退出时的收尾。
+        if let Some(current) = override_url(spec.name, &spec.url) {
+            if probe_health(&current).0 == EndpointHealth::Up {
+                log::info!("{} 边车已在跑（换过端口）：{current}", spec.name);
+                out.push((spec.name, true));
+                continue;
+            }
+            log::warn!("{} 边车换出来的端口 {current} 不再应答——作废，重新判断", spec.name);
+            clear_override(spec.name);
+            remove_run_entry(spec.name);
+        }
+        // ② 上次（崩溃前）换端口拉起的那个还活着：接回来，别再起一份。
+        if adopt_from_run_file(spec.name, &spec.url).is_some() {
+            out.push((spec.name, true));
+            continue;
+        }
         let (health, detail) = probe_health(&spec.url);
         match sidecar_action(health, cfg.talk_autostart, &spec.command) {
             SidecarAction::AlreadyUp => {
@@ -1099,8 +1429,11 @@ pub fn ensure_sidecars(cfg: &crate::config::Config) -> Vec<(&'static str, bool)>
                 out.push((spec.name, true));
             }
             SidecarAction::PortTaken => {
-                log::error!("{}", describe_port_taken(spec.name, &spec.url, &detail));
+                log::error!("{}", describe_port_taken(spec.name, &spec.url, &detail, false));
                 out.push((spec.name, false));
+            }
+            SidecarAction::Relocate => {
+                out.push((spec.name, relocate_and_start(&spec, &detail)));
             }
             SidecarAction::CantStartDisabled => {
                 log::warn!(
@@ -1125,8 +1458,8 @@ pub fn ensure_sidecars(cfg: &crate::config::Config) -> Vec<(&'static str, bool)>
                     spec.command.join(" ")
                 );
                 match spawn_sidecar(spec.name, &spec.command) {
-                    Ok(()) => {
-                        let ready = wait_ready(spec.name, &spec.url);
+                    Ok(_) => {
+                        let ready = wait_ready(spec.name, &spec.url) == ReadyOutcome::Ready;
                         if ready {
                             log::info!("{} 边车已就绪", spec.name);
                         } else {
@@ -1337,7 +1670,146 @@ pub fn await_sidecars_for_turn(seq_before: u64) -> bool {
     }
 }
 
-fn spawn_sidecar(name: &'static str, command: &[String]) -> Result<()> {
+/// 端口被占时：换一个空闲端口拉起。最多试两次（第二次是给 TOCTOU 的：
+/// 选好的端口在边车 bind 之前被别人抢了，边车会发现端口被占、立刻退出）。
+fn relocate_and_start(spec: &Sidecar, detail: &str) -> bool {
+    let old_port = port_of(&spec.url).map(|p| p.to_string()).unwrap_or_else(|| "?".into());
+    let who = port_of(&spec.url)
+        .and_then(port_occupant)
+        .unwrap_or_else(|| "别的程序".to_string());
+    for attempt in 1..=2 {
+        let Some(port) = free_local_port() else {
+            log::error!("{} 边车：找不到空闲端口，没法避让", spec.name);
+            return false;
+        };
+        let Some(new_url) = replace_port(&spec.url, port) else {
+            log::error!(
+                "{} 边车：地址 {} 认不出端口段，没法换端口（{detail}）——{}",
+                spec.name,
+                spec.url,
+                port_taken_hint(spec.name)
+            );
+            return false;
+        };
+        let command = with_port_env(&spec.command, port_env_var(spec.name), port);
+        let msg = format!(
+            "{} 边车：端口 {old_port} 被 {who} 占了（{detail}）→ 改用端口 {port} 拉起{}",
+            spec.name,
+            if attempt > 1 { "（第二次）" } else { "" }
+        );
+        if spec.explicit {
+            // 用户在 config.json 里明确写的地址没用上：升一级，让他看得见。
+            log::error!("{msg}——⚠️ 这是你在 config.json 里写的地址，本次运行不会用它");
+        } else {
+            log::warn!("{msg}");
+        }
+        let pid = match spawn_sidecar(spec.name, &command) {
+            Ok(pid) => pid,
+            Err(e) => {
+                log::error!("拉起 {} 边车失败：{e}", spec.name);
+                return false;
+            }
+        };
+        match wait_ready(spec.name, &new_url) {
+            ReadyOutcome::Ready => {
+                log::info!("{} 边车已在新端口就绪：{new_url}", spec.name);
+                set_override(spec.name, &spec.url, &new_url);
+                upsert_run_entry(RunEntry {
+                    name: spec.name.to_string(),
+                    configured: spec.url.clone(),
+                    url: new_url,
+                    pid,
+                });
+                return true;
+            }
+            ReadyOutcome::Exited if attempt == 1 => {
+                log::warn!("{} 边车在端口 {port} 上起来就退出了（多半是端口刚被抢走），再换一个试", spec.name);
+            }
+            _ => {
+                log::error!("{} 边车换到端口 {port} 也没起来，用 --diagnose 看详情", spec.name);
+                return false;
+            }
+        }
+    }
+    false
+}
+
+// ---------------------------------------------------------------- 边车不可用时念一句（v0.22.0）
+//
+// jason 2026-09-26 拍板「可以 say」：对话模式下这一轮没说出来、而原因是边车不可用时，
+// 用 macOS 自带的 `say`（零依赖，不需要任何边车）念一句提示——否则用户只会觉得
+// 「按了没反应」，而那正是 2026-09-26 那次的体验。
+//
+// **节流规则**：同一个原因（哪几个边车不可用）**3 分钟内只念一次**；
+// 原因变了（比如从「TTS 没起」变成「LLM 和 TTS 都没起」）立刻再念；
+// **有一轮正常说出来了就清零**，下一次出事第一时间就提示。
+// 只在对话模式里念（调用点只在对话模式那条路上）：输入法模式本来就不出声。
+
+/// 同一原因两次提示之间至少隔多久。
+pub const UNAVAILABLE_NOTICE_WINDOW: Duration = Duration::from_secs(180);
+
+/// 纯函数：这次要不要念。
+pub fn should_notice(last: Option<(&str, Instant)>, key: &str, now: Instant, window: Duration) -> bool {
+    match last {
+        None => true,
+        Some((k, _)) if k != key => true,
+        Some((_, at)) => now.saturating_duration_since(at) >= window,
+    }
+}
+
+/// 念给用户的那一句（按通话语言）。
+pub fn unavailable_notice(lang: TalkLang) -> &'static str {
+    match lang {
+        TalkLang::Zh => "语音服务没有启动，这一轮没法回答，请看日志。",
+        TalkLang::En => "The voice service isn't running, so I can't answer this time. Please check the log.",
+        TalkLang::Th => "บริการเสียงยังไม่ทำงาน ตอบรอบนี้ไม่ได้ กรุณาดูบันทึก",
+    }
+}
+
+static LAST_NOTICE: std::sync::Mutex<Option<(String, Instant)>> = std::sync::Mutex::new(None);
+
+/// 这一轮正常说出来了：清掉节流，下一次出事立刻提示。
+pub fn note_turn_ok() {
+    *LAST_NOTICE.lock().unwrap_or_else(|e| e.into_inner()) = None;
+}
+
+/// 现在哪几个边车不可用（按**实际在用的**地址探，换过端口的算换过之后的）。
+pub fn sidecars_down(cfg: &crate::config::Config) -> Vec<&'static str> {
+    sidecar_specs(cfg)
+        .into_iter()
+        .filter(|s| probe_health(&effective_url(s.name, &s.url)).0 != EndpointHealth::Up)
+        .map(|s| s.name)
+        .collect()
+}
+
+/// 对话模式这一轮没说出来之后调用：**如果原因是边车不可用**，用 `say` 念一句。
+/// 边车都在（失败是别的原因，比如模型回了空）就不念——那不是「服务没起」。
+pub fn notice_if_sidecars_down(cfg: &crate::config::Config, lang: TalkLang) {
+    let down = sidecars_down(cfg);
+    if down.is_empty() {
+        return;
+    }
+    let key = down.join("+");
+    {
+        let mut last = LAST_NOTICE.lock().unwrap_or_else(|e| e.into_inner());
+        let now = Instant::now();
+        let prev = last.as_ref().map(|(k, at)| (k.as_str(), *at));
+        if !should_notice(prev, &key, now, UNAVAILABLE_NOTICE_WINDOW) {
+            log::info!("{key} 边车不可用——{UNAVAILABLE_NOTICE_WINDOW:?} 内已经提示过，这次不念");
+            return;
+        }
+        *last = Some((key.clone(), now));
+    }
+    log::warn!("{key} 边车不可用：用 say 念一句提示");
+    let spoken = SayTts::new(15)
+        .synthesize(unavailable_notice(lang), lang)
+        .and_then(|wav| play_blocking(&wav));
+    if let Err(e) = spoken {
+        log::error!("连 say 的提示都念不出来：{e:#}");
+    }
+}
+
+fn spawn_sidecar(name: &'static str, command: &[String]) -> Result<i32> {
     let (prog, args) = command
         .split_first()
         .ok_or_else(|| anyhow::anyhow!("拉起命令为空"))?;
@@ -1350,33 +1822,43 @@ fn spawn_sidecar(name: &'static str, command: &[String]) -> Result<()> {
         .spawn()
         .with_context(|| format!("启动 {prog} 失败"))?;
     register_pid(&child);
+    let pid = child.id() as i32;
     SPAWNED
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .push((name, child));
-    Ok(())
+    Ok(pid)
+}
+
+/// 等边车就绪的结果。**把「进程退出了」和「等满了」分开**：前者可能是端口刚被抢
+/// （值得换个端口再试一次），后者是真的起不来（再试也是白等 90 秒）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReadyOutcome {
+    Ready,
+    Exited,
+    TimedOut,
 }
 
 /// 等某个边车就绪。**按名字盯住我们自己起的那个进程**：
 /// 它要是启动后就退出（命令写错、venv 缺包），不该再傻等满 90 秒。
-fn wait_ready(name: &'static str, url: &str) -> bool {
+fn wait_ready(name: &'static str, url: &str) -> ReadyOutcome {
     let start = Instant::now();
     while start.elapsed() < READY_TIMEOUT {
         std::thread::sleep(Duration::from_millis(1500));
         if probe_endpoint(url).is_ok() {
             log::info!("{name} 边车等了 {:.1}s", start.elapsed().as_secs_f32());
-            return true;
+            return ReadyOutcome::Ready;
         }
         let mut guard = SPAWNED.lock().unwrap_or_else(|e| e.into_inner());
         if let Some((_, child)) = guard.iter_mut().find(|(n, _)| *n == name) {
             if let Ok(Some(code)) = child.try_wait() {
                 log::error!("{name} 边车启动后立刻退出了（{code:?}），检查拉起命令能不能单独跑通");
                 guard.retain(|(n, _)| *n != name);
-                return false;
+                return ReadyOutcome::Exited;
             }
         }
     }
-    false
+    ReadyOutcome::TimedOut
 }
 
 /// 该跑哪条命令——**日志里必须给出这条**，否则「没声音」对用户就是无解的。
@@ -1401,6 +1883,18 @@ pub fn shutdown_spawned() {
         let _ = child.kill();
         let _ = child.wait();
     }
+    let adopted: Vec<(&'static str, i32)> =
+        std::mem::take(&mut *ADOPTED.lock().unwrap_or_else(|e| e.into_inner()));
+    for (name, pid) in adopted {
+        log::info!("退出：关掉接回来的 {name} 边车（pid {pid}）");
+        unsafe { libc::kill(pid, libc::SIGTERM) };
+    }
+    // 我们拉起的都收了：运行态记录跟着作废，下次启动从配置的地址重新判断。
+    let had_overrides = !OVERRIDES.lock().unwrap_or_else(|e| e.into_inner()).is_empty();
+    if had_overrides {
+        save_run_entries(&[]);
+    }
+    OVERRIDES.lock().unwrap_or_else(|e| e.into_inner()).clear();
     clear_pids();
 }
 
@@ -1467,7 +1961,12 @@ pub fn option_label(option: &(&'static str, &'static str, &'static str, &'static
 }
 
 pub const DEFAULT_LLM_URL: &str = "http://127.0.0.1:8794";
-pub const DEFAULT_TTS_URL: &str = "http://127.0.0.1:8765";
+/// ⚠️ **不是 8765 了**（v0.22.0）：8765 是 Python `websockets` 等一大批开发工具
+/// 示例里的默认端口，2026-09-26 在 jason 机器上被一个桌面 app 占着回 401，
+/// 对话模式因此整轮没声音。8796 与本仓库另外两个边车（8793 理解层 / 8794 通话 LLM）
+/// 挨着，好认；8795 留给 serve-talk-llm.sh 提示里的「手动换一个」。
+/// **与 `scripts/serve-tts.sh` 的默认端口必须一致**（tests/script_defaults.rs 钉住）。
+pub const DEFAULT_TTS_URL: &str = "http://127.0.0.1:8796";
 
 // ------------------------------------------------- 句子切分（流式合成用）
 
@@ -2174,11 +2673,130 @@ mod tests {
         assert_eq!(sidecar_action(Down, true, &cmd), SidecarAction::Start);
         // 已经在跑时，另外两个参数不该影响判断（别去动一个健康的服务）
         assert_eq!(sidecar_action(Up, true, &[]), SidecarAction::AlreadyUp);
-        // **端口被别人占着：四种 autostart × 命令组合一律不拉**（2026-09-26 的 bug：
-        // 占用者回 401 被当成「没起」，拉起后撞端口立刻退出，原因被盖住）
-        for (auto, c) in [(true, &cmd[..]), (true, &[][..]), (false, &cmd[..]), (false, &[][..])] {
+        // **端口被别人占着：绝不在原端口上 `Start`**（2026-09-26 的 bug：
+        // 占用者回 401 被当成「没起」，拉起后撞端口立刻退出，原因被盖住）。
+        // v0.22.0 起：能自己拉的就换端口拉（Relocate），拉不了的只报（PortTaken）。
+        assert_eq!(sidecar_action(WrongService, true, &cmd), SidecarAction::Relocate);
+        for (auto, c) in [(true, &[][..]), (false, &cmd[..]), (false, &[][..])] {
             assert_eq!(sidecar_action(WrongService, auto, c), SidecarAction::PortTaken);
         }
+        for (auto, c) in [(true, &cmd[..]), (true, &[][..]), (false, &cmd[..]), (false, &[][..])] {
+            assert_ne!(sidecar_action(WrongService, auto, c), SidecarAction::Start);
+        }
+    }
+
+    #[test]
+    fn replace_port_keeps_host_and_path() {
+        assert_eq!(replace_port("http://127.0.0.1:8796", 50123).as_deref(), Some("http://127.0.0.1:50123"));
+        assert_eq!(replace_port("http://127.0.0.1:8794/v1", 5).as_deref(), Some("http://127.0.0.1:5/v1"));
+        assert_eq!(replace_port("http://localhost", 9).as_deref(), Some("http://localhost:9"));
+        assert_eq!(replace_port("http://[::1]:8796/x", 7).as_deref(), Some("http://[::1]:7/x"));
+        // 认不出的形状一律不换：宁可不避让，也不拼一个错地址去白等 90 秒
+        assert_eq!(replace_port("127.0.0.1:8796", 1), None);
+        assert_eq!(replace_port("unix:///tmp/x.sock", 1), None);
+        assert_eq!(replace_port("http://user:pw@host:1", 2), None);
+        assert_eq!(replace_port("http://", 2), None);
+    }
+
+    fn v(xs: &[&str]) -> Vec<String> {
+        xs.iter().map(|x| x.to_string()).collect()
+    }
+
+    /// **jason 本机的拉起命令里写着 `AGENTEAR_TTS_PORT=8766`**——不删掉它，
+    /// 内层赋值会盖住我们的新端口，边车照样起在被占的那个上。
+    #[test]
+    fn with_port_env_replaces_an_existing_assignment() {
+        let cmd = v(&["/usr/bin/env", "AGENTEAR_TTS_QUANT=8bit", "AGENTEAR_TTS_PORT=8766", "/x/serve-tts.sh"]);
+        assert_eq!(
+            with_port_env(&cmd, "AGENTEAR_TTS_PORT", 50000),
+            v(&["/usr/bin/env", "AGENTEAR_TTS_QUANT=8bit", "AGENTEAR_TTS_PORT=50000", "/x/serve-tts.sh"])
+        );
+        // env 的选项原样保留，新赋值紧挨着程序名（放在 `-i` 前面会被当成程序名）
+        let cmd = v(&["env", "-i", "-u", "HOME", "AGENTEAR_TTS_PORT=8766", "/x/s.sh"]);
+        assert_eq!(
+            with_port_env(&cmd, "AGENTEAR_TTS_PORT", 9),
+            v(&["env", "-i", "-u", "HOME", "AGENTEAR_TTS_PORT=9", "/x/s.sh"])
+        );
+        // 不以 env 开头：外面套一层
+        assert_eq!(
+            with_port_env(&v(&["/x/serve-talk-llm.sh"]), "AGENTEAR_TALK_LLM_PORT", 7),
+            v(&["/usr/bin/env", "AGENTEAR_TALK_LLM_PORT=7", "/x/serve-talk-llm.sh"])
+        );
+        // 程序参数里长得像赋值的东西（在程序名之后）不许动
+        let cmd = v(&["env", "A=1", "/x/s.sh", "AGENTEAR_TTS_PORT=1"]);
+        assert_eq!(
+            with_port_env(&cmd, "AGENTEAR_TTS_PORT", 2),
+            v(&["env", "A=1", "AGENTEAR_TTS_PORT=2", "/x/s.sh", "AGENTEAR_TTS_PORT=1"])
+        );
+        // 结果里我们那条之后不能再有同名的环境赋值
+        let out = with_port_env(
+            &v(&["/usr/bin/env", "AGENTEAR_TTS_PORT=8766", "AGENTEAR_TTS_PORT=9", "/x/s.sh"]),
+            "AGENTEAR_TTS_PORT",
+            3,
+        );
+        assert_eq!(out.iter().filter(|a| a.starts_with("AGENTEAR_TTS_PORT=")).count(), 1);
+        assert_eq!(out, v(&["/usr/bin/env", "AGENTEAR_TTS_PORT=3", "/x/s.sh"]));
+    }
+
+    #[test]
+    fn free_local_port_gives_a_bindable_port() {
+        let p = free_local_port().expect("本机总该有一个空闲端口");
+        assert_ne!(p, 0);
+        std::net::TcpListener::bind(("127.0.0.1", p)).expect("刚分到的端口应当能 bind");
+    }
+
+    /// 覆盖只对「同一个配置地址」生效：用户改了 config，旧覆盖必须失效。
+    #[test]
+    fn overrides_follow_the_configured_url() {
+        let t = vec![("TTS", "http://127.0.0.1:8796".to_string(), "http://127.0.0.1:50001".to_string())];
+        assert_eq!(resolve_override(&t, "TTS", "http://127.0.0.1:8796").as_deref(), Some("http://127.0.0.1:50001"));
+        assert_eq!(resolve_override(&t, "TTS", "http://127.0.0.1:8766"), None, "配置改了就不再覆盖");
+        assert_eq!(resolve_override(&t, "LLM", "http://127.0.0.1:8796"), None, "不串到别的边车");
+    }
+
+    /// 接回崩溃前的边车：三条都满足才接（尤其 pid 必须对得上——pid 会被复用）。
+    #[test]
+    fn can_adopt_truth_table() {
+        use EndpointHealth::*;
+        let e = RunEntry {
+            name: "TTS".into(),
+            configured: "http://127.0.0.1:8796".into(),
+            url: "http://127.0.0.1:50001".into(),
+            pid: 4242,
+        };
+        let c = "http://127.0.0.1:8796";
+        assert!(can_adopt(&e, c, Up, Some(4242)));
+        assert!(!can_adopt(&e, c, Up, Some(999)), "端口上是别的进程：不接（退出时会误杀它）");
+        assert!(!can_adopt(&e, c, Up, None));
+        assert!(!can_adopt(&e, c, Down, Some(4242)));
+        assert!(!can_adopt(&e, c, WrongService, Some(4242)));
+        assert!(!can_adopt(&e, "http://127.0.0.1:8766", Up, Some(4242)), "配置改了：不接");
+    }
+
+    #[test]
+    fn parse_lsof_pid_takes_the_first_process() {
+        assert_eq!(parse_lsof_pid("p123\nfcwd\np456\n"), Some(123));
+        assert_eq!(parse_lsof_pid(""), None);
+        assert_eq!(parse_lsof_pid("pabc\n"), None);
+    }
+
+    /// 节流：同一原因 3 分钟内只念一次；原因变了立刻念。
+    #[test]
+    fn should_notice_truth_table() {
+        let t0 = Instant::now();
+        let w = UNAVAILABLE_NOTICE_WINDOW;
+        assert!(should_notice(None, "TTS", t0, w), "第一次一定念");
+        assert!(!should_notice(Some(("TTS", t0)), "TTS", t0 + Duration::from_secs(10), w), "刚念过：不念");
+        assert!(!should_notice(Some(("TTS", t0)), "TTS", t0 + w - Duration::from_millis(1), w));
+        assert!(should_notice(Some(("TTS", t0)), "TTS", t0 + w, w), "过了窗口：再念");
+        assert!(should_notice(Some(("TTS", t0)), "LLM+TTS", t0 + Duration::from_secs(1), w), "原因变了：立刻念");
+    }
+
+    #[test]
+    fn unavailable_notice_is_in_the_talk_language() {
+        assert!(unavailable_notice(TalkLang::Zh).contains("语音服务"));
+        assert!(unavailable_notice(TalkLang::En).contains("voice service"));
+        assert!(unavailable_notice(TalkLang::Th).chars().any(|c| ('\u{0E00}'..='\u{0E7F}').contains(&c)));
     }
 
     /// curl 退出码 × HTTP 状态 → 三种状态的真值表。**第一行就是 jason 撞上的那个**。
@@ -2274,11 +2892,14 @@ mod tests {
     /// 「被占了」必须同时说出**该改哪里**。
     #[test]
     fn port_taken_message_says_what_to_change() {
-        let m = describe_port_taken("TTS", "http://127.0.0.1:1", "HTTP 401");
+        let m = describe_port_taken("TTS", "http://127.0.0.1:1", "HTTP 401", false);
         assert!(m.contains("tts_url") && m.contains("AGENTEAR_TTS_PORT"), "{m}");
         assert!(m.contains("不会去拉起"), "{m}");
-        let m = describe_port_taken("LLM", "http://127.0.0.1:1", "HTTP 401");
+        let m = describe_port_taken("LLM", "http://127.0.0.1:1", "HTTP 401", false);
         assert!(m.contains("talk_llm_url") && m.contains("AGENTEAR_TALK_LLM_PORT"), "{m}");
+        // 会自动换端口时，不许再说「不会去拉起」（那样用户会去手改配置，白忙）
+        let m = describe_port_taken("TTS", "http://127.0.0.1:1", "HTTP 401", true);
+        assert!(!m.contains("不会去拉起") && m.contains("自动换"), "{m}");
     }
 
     // ---- 首轮与边车拉起赛跑（2026-09-26）----

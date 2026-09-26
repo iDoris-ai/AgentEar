@@ -166,3 +166,49 @@ fn cited_measurement_tools_are_in_the_repo() {
         }
     }
 }
+
+/// 从 `src/talk.rs` 里读出某个 `DEFAULT_*_URL` 常量的端口。
+fn rust_default_port(constant: &str) -> u16 {
+    let src = read("src/talk.rs");
+    let needle = format!("pub const {constant}: &str = \"");
+    let start = src.find(&needle).unwrap_or_else(|| panic!("src/talk.rs 里找不到 {constant}")) + needle.len();
+    let url = &src[start..start + src[start..].find('"').unwrap()];
+    url.rsplit(':').next().unwrap().trim_end_matches('/').parse().unwrap_or_else(|_| panic!("{constant} = {url} 读不出端口"))
+}
+
+/// 从脚本里读 `${VAR:-NNNN}` 的默认端口。
+fn script_default_port(rel: &str, var: &str) -> u16 {
+    let body = read(rel);
+    let needle = format!("${{{var}:-");
+    let start = body.find(&needle).unwrap_or_else(|| panic!("{rel} 里找不到 {needle}")) + needle.len();
+    body[start..start + body[start..].find('}').unwrap()].parse().unwrap()
+}
+
+/// **Rust 默认地址与拉起脚本的默认端口必须一致**（v0.22.0 换 TTS 端口时加）。
+///
+/// 两边漂移的症状是「请求一个端口、边车起在另一个」：守护进程探活永远是
+/// 「连接被拒」→ 拉起 → 边车在另一个端口上好好地跑着 → 90 秒后报「没就绪」。
+/// 编译、单测都不会报错，因为两边各自都是「对的」。
+#[test]
+fn rust_and_script_default_ports_agree() {
+    let tts = rust_default_port("DEFAULT_TTS_URL");
+    assert_eq!(tts, script_default_port("scripts/serve-tts.sh", "AGENTEAR_TTS_PORT"), "TTS：Rust 与 serve-tts.sh 默认端口不一致");
+    let server = read("services/tts/server.py");
+    assert!(
+        server.contains(&format!("\"--port\", type=int, default={tts})")),
+        "TTS：services/tts/server.py 的 --port 默认值与 Rust 的 DEFAULT_TTS_URL（{tts}）不一致"
+    );
+    let llm = rust_default_port("DEFAULT_LLM_URL");
+    assert_eq!(llm, script_default_port("scripts/serve-talk-llm.sh", "AGENTEAR_TALK_LLM_PORT"), "LLM：Rust 与 serve-talk-llm.sh 默认端口不一致");
+    assert_ne!(tts, 8765, "8765 是 jason 机器上被别的 app 占过的端口（2026-09-26），换掉了就别换回去");
+}
+
+/// 自动换端口靠环境变量把端口交给拉起脚本——两个脚本都必须认这个变量。
+#[test]
+fn both_sidecar_scripts_read_their_port_from_the_env() {
+    assert!(read("scripts/serve-tts.sh").contains("${AGENTEAR_TTS_PORT:-"));
+    assert!(read("scripts/serve-talk-llm.sh").contains("${AGENTEAR_TALK_LLM_PORT:-"));
+    let talk = read("src/talk.rs");
+    assert!(talk.contains("\"AGENTEAR_TTS_PORT\"") && talk.contains("\"AGENTEAR_TALK_LLM_PORT\""),
+        "src/talk.rs 的 port_env_var 与脚本读的变量名要一致");
+}
