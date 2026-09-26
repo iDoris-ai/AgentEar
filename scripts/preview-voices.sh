@@ -20,7 +20,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-TTS_URL="${AGENTEAR_TTS_URL:-http://127.0.0.1:8765}"
+TTS_URL="${AGENTEAR_TTS_URL:-http://127.0.0.1:8796}"
 OUT="${AGENTEAR_PREVIEW_OUT:-$ROOT/vendor/models/talk/voices/preview}"
 PLAY=1
 [ "${1:-}" = "--no-play" ] && PLAY=0

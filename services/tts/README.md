@@ -27,13 +27,13 @@ scripts/serve-tts.sh
 
 # or by hand
 ~/.agentear/llm/venv/bin/python services/tts/server.py \
-  --port 8765 --backend voxcpm2 --model vendor/models/talk/voxcpm2-4bit
+  --port 8796 --backend voxcpm2 --model vendor/models/talk/voxcpm2-4bit
 
 # zero-dependency fallback
 python3 services/tts/server.py --backend say
 ```
 
-The service listens only on `127.0.0.1:8765`. Use `--port 8766` if that port is
+The service listens only on `127.0.0.1:8796`. Use `--port 8797` if that port is
 occupied, or `--port 0` to select an available port (printed at startup).
 Stop with Ctrl+C. On shutdown, active audio subprocesses are killed and reaped,
 temporary files are removed, and request workers are joined before exit.
@@ -51,9 +51,9 @@ audio-quality check. Verify voices by synthesizing and listening.
 ## HTTP Interface
 
 ```bash
-curl --max-time 5 -i http://127.0.0.1:8765/health
-curl --max-time 5 -i http://127.0.0.1:8765/voices
-curl --max-time 60 --fail-with-body http://127.0.0.1:8765/speak \
+curl --max-time 5 -i http://127.0.0.1:8796/health
+curl --max-time 5 -i http://127.0.0.1:8796/voices
+curl --max-time 60 --fail-with-body http://127.0.0.1:8796/speak \
   -H 'Content-Type: application/json' \
   -d '{"text":"It will rain tomorrow morning","lang":"en"}' \
   --output /tmp/agentear-tts-en.wav

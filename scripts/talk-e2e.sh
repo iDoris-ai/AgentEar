@@ -10,7 +10,7 @@
 #
 # 前置：两个边车已经在跑
 #   scripts/serve-talk-llm.sh     # LLM，默认 127.0.0.1:8794
-#   scripts/serve-tts.sh          # TTS，默认 127.0.0.1:8765
+#   scripts/serve-tts.sh          # TTS，默认 127.0.0.1:8796
 #
 # ⚠️ **天气那句话是本地写死的场景，不是真的天气接口**（ADR-0007 §4.6）。
 # 它在整条链路里的作用是「让模型有东西可说」——证明 ASR→LLM→TTS 通了，
@@ -20,7 +20,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 LLM_URL="${AGENTEAR_TALK_LLM_URL:-http://127.0.0.1:8794}"
-TTS_URL="${AGENTEAR_TTS_URL:-http://127.0.0.1:8765}"
+TTS_URL="${AGENTEAR_TTS_URL:-http://127.0.0.1:8796}"
 AGENTEAR_BIN="${AGENTEAR_BIN:-$ROOT/target/release/agentear}"
 CITY="${AGENTEAR_TALK_CITY:-清迈}"
 WEATHER_NOTE="${AGENTEAR_TALK_WEATHER_NOTE:-今天${CITY}多云转晴，最高 32 度，傍晚有阵雨，风不大。}"
