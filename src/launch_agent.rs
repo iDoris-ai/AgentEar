@@ -42,6 +42,22 @@
 //! 那么直到下次登录之前,这个旧 job 依然会按旧路径被 launchd
 //! 记着——但旧路径的可执行文件在原地没动过（.app 内部升级只换文件
 //! 内容，不换路径),所以这不是一个真实会出问题的场景。
+//!
+//! ## 崩溃后自动拉起（2026-09-26，jason 拍板）
+//!
+//! `KeepAlive = { SuccessfulExit = false }`：**异常退出**（panic、`exit(1)`、
+//! 被 SIGKILL/SIGABRT 杀掉）由 launchd 在节流间隔（默认 10 秒）后拉起；
+//! **正常退出**（菜单 Quit → `NSApplication terminate` → 退出码 0；
+//! SIGTERM 在 `sidecar::install_signal_handlers` 里也以 0 退出）不拉。
+//! 代价是崩溃那一刻正在录的那段音频会丢（还在内存里，没落盘），
+//! jason 的判断是「丢就丢，能自动恢复就行」。
+//!
+//! 两条边界要说清楚：
+//! - **只对 launchd 拉起的那个实例生效**。从 Finder 双击打开的实例不归
+//!   launchd 管，崩了不会被拉起。
+//! - **升级用户的生效时间是「升级后第一次启动写入新 plist，再下一次登录」**：
+//!   `apply()` 启动时比对整份内容、不一致就重写，但按上一节的规矩只写文件、
+//!   不调 `bootstrap`，所以当前会话里 launchd 手上的仍是旧 job 定义。
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -105,11 +121,15 @@ fn plist_contents(exe: &Path) -> String {
     </array>
     <key>RunAtLoad</key>
     <true/>
-    <!-- 崩了不自动重启：一个开机自启的进程如果反复崩溃又反复重启，
-         用户只会看到菜单栏图标疯狂闪烁，比不启动更糟。崩溃排查走日志，
-         不该靠 launchd 硬重启掩盖。 -->
+    <!-- 异常退出才自动拉起，正常退出（菜单 Quit / SIGTERM，退出码 0）不拉。
+         jason 2026-09-26 拍板：崩溃丢掉当前那段录音可以接受，但必须自动恢复。
+         重启间隔用 launchd 默认的 10 秒节流（ThrottleInterval），
+         崩溃循环时最多每 10 秒一次，原因仍然要看日志。 -->
     <key>KeepAlive</key>
-    <false/>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
     <key>ProcessType</key>
     <string>Interactive</string>
 </dict>
@@ -224,11 +244,31 @@ mod tests {
     }
 
     #[test]
-    fn plist_contents_do_not_keep_alive() {
-        // 崩了不自动重启：写死钉住，免得以后有人为了"更可靠"顺手加上
-        // KeepAlive=true，反而把崩溃循环伪装成正常运行。
+    fn plist_passes_plutil_lint() {
+        // KeepAlive 从 `<false/>` 变成嵌套 dict，手写 XML 多一层就多一处
+        // 写错的机会；launchd 读不了的 plist 是静默失效（登录时不起，
+        // 也不报错）。让系统自己的解析器判一次。
+        let dir = std::env::temp_dir().join(format!("agentear-plist-lint-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("t.plist");
+        std::fs::write(&f, plist_contents(Path::new("/Applications/AgentEar.app/Contents/MacOS/AgentEar"))).unwrap();
+        let st = std::process::Command::new("/usr/bin/plutil").arg("-lint").arg(&f).status().unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(st.success(), "plutil -lint 不通过");
+    }
+
+    #[test]
+    fn plist_restarts_only_after_abnormal_exit() {
+        // jason 2026-09-26：崩了要自动拉起，但用户从菜单退出（退出码 0）
+        // 不许被拉回来——否则「退出」按钮等于失效。所以只能是
+        // SuccessfulExit=false，不能是裸 KeepAlive=true（那会无条件重启），
+        // 也不能退回 KeepAlive=false（崩了就一直不在）。
         let xml = plist_contents(Path::new("/Applications/AgentEar.app/Contents/MacOS/AgentEar"));
-        assert!(xml.contains("<key>KeepAlive</key>\n    <false/>"));
+        assert!(xml.contains(
+            "<key>KeepAlive</key>\n    <dict>\n        <key>SuccessfulExit</key>\n        <false/>\n    </dict>"
+        ));
+        assert!(!xml.contains("<key>KeepAlive</key>\n    <true/>"), "无条件重启会让菜单 Quit 失效");
+        assert!(!xml.contains("<key>KeepAlive</key>\n    <false/>"), "崩了不拉起是旧语义");
     }
 
     /// `RunAtLoad=true` 是给 launchd 在下次登录时用的语义。这条只钉住
