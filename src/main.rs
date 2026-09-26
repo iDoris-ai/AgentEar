@@ -1154,6 +1154,9 @@ fn worker(
                     if talk::stop_playback() {
                         log::info!("对话被打断，开始听下一句");
                     }
+                    // 还在等边车的上一轮回答靠这个序号知道「用户已经开口了」，
+                    // 从而作废自己，不在用户说话时开始播（见 talk::await_sidecars_for_turn）。
+                    talk::note_recording_started();
                     if let Some(conversation) = set_conversation {
                         let mode = if conversation {
                             config::TalkMode::Conversation
@@ -1491,11 +1494,18 @@ fn finish(state: State, store: &store::Store, asr: &dyn engine::AsrEngine) -> Re
                 // 从未被触发过。spawn 之后，worker 循环立刻能回到 `rx.try_recv()`，
                 // 用户按键时 `Intent::Begin` 分支会先 `stop_playback()` 掐掉这个
                 // 线程正在放的声音，再开新一段录音。
+                //
+                // ⚠️ **先等边车**（2026-09-26 jason 实测的 bug）：双击切进对话模式的
+                // 那一刻才在后台拉 LLM/TTS，而这一轮说完就来请求——TTS 还在加载，
+                // 第一轮必然失败。等待放在这条回答线程里，**worker 照样能读按键**。
                 let cfg_owned = cfg.clone();
                 let text_owned = text.clone();
                 let talk_lang = cfg.talk_lang;
+                let seq = talk::recording_seq();
                 std::thread::spawn(move || {
-                    answer_out_loud(&cfg_owned, &text_owned, talk_lang);
+                    if talk::await_sidecars_for_turn(seq) {
+                        answer_out_loud(&cfg_owned, &text_owned, talk_lang);
+                    }
                 });
             }
         }
@@ -2274,21 +2284,33 @@ fn diagnose(vendor: &std::path::Path) -> Result<()> {
     // 而自检骗人比没有自检更糟（这个仓库为这条栽过不止一次）。
     let mut missing: Vec<&str> = Vec::new();
     if cfg.talk_llm_engine != "mock" {
-        match talk::probe_endpoint(&llm_url) {
-            Ok(()) => println!("  ✅ LLM 边车在跑"),
-            Err(e) => {
-                println!("  ⚪ LLM 边车: {e}");
+        match talk::probe_health(&llm_url) {
+            (talk::EndpointHealth::Up, _) => println!("  ✅ LLM 边车在跑"),
+            (talk::EndpointHealth::Down, detail) => {
+                println!("  ⚪ LLM 边车: {detail}");
                 println!("     启动：scripts/serve-talk-llm.sh（首次需先跑 scripts/setup-talk.sh）");
+                missing.push("LLM");
+            }
+            // 端口被别的程序占着：**不能**只报「没起」——用户照着去起，
+            // 边车会撞端口立刻退出（2026-09-26 的真实情形）。
+            (talk::EndpointHealth::WrongService, detail) => {
+                println!("  ❌ {}", talk::describe_port_taken("LLM", &llm_url, &detail));
                 missing.push("LLM");
             }
         }
     }
     if cfg.talk_tts_engine != "say" {
-        match talk::probe_endpoint(&tts_url) {
-            Ok(()) => println!("  ✅ TTS 边车在跑"),
-            Err(e) => {
-                println!("  ⚪ TTS 边车: {e}");
+        match talk::probe_health(&tts_url) {
+            (talk::EndpointHealth::Up, _) => println!("  ✅ TTS 边车在跑"),
+            (talk::EndpointHealth::Down, detail) => {
+                println!("  ⚪ TTS 边车: {detail}");
                 println!("     启动：scripts/serve-tts.sh（首次需先跑 scripts/setup-talk.sh）");
+                missing.push("TTS");
+            }
+            // 端口被别的程序占着：**不能**只报「没起」——用户照着去起，
+            // 边车会撞端口立刻退出（2026-09-26 的真实情形）。
+            (talk::EndpointHealth::WrongService, detail) => {
+                println!("  ❌ {}", talk::describe_port_taken("TTS", &tts_url, &detail));
                 missing.push("TTS");
             }
         }
@@ -2296,7 +2318,7 @@ fn diagnose(vendor: &std::path::Path) -> Result<()> {
     println!("  通话语言: {}", cfg.talk_lang.as_str());
     if cfg.talk_mode == config::TalkMode::Conversation && !missing.is_empty() {
         println!(
-            "  ⚠️ 对话模式开着，但 {} 边车没起——这一轮会只有文字没有声音",
+            "  ⚠️ 对话模式开着，但 {} 边车不可用——这一轮会只有文字没有声音",
             missing.join(" / ")
         );
     }
