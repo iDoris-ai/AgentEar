@@ -21,6 +21,7 @@ mod kb;
 mod label;
 mod launch_agent;
 mod paste;
+mod qwen3;
 mod route;
 mod session;
 mod sidecar;
@@ -55,6 +56,11 @@ fn main() -> Result<()> {
     init_logging();
 
     let args: Vec<String> = std::env::args().collect();
+    // 一次性子命令结束时收掉它拉起的 Qwen3 常驻服务（守护进程不会走到 Drop）。
+    let _qwen3_server_guard = qwen3::ServerGuard;
+    // 信号处理**在所有子命令之前**就装上：`--transcribe` 这类命令在常驻模式下也会
+    // 拉起 speech-server，被 Ctrl+C / kill 打断时要把它一起收掉（守护进程之后会再装一次，幂等）。
+    sidecar::install_signal_handlers();
     let vendor = vendor_root()?;
     log::debug!("vendor 目录: {}", vendor.display());
 
@@ -92,7 +98,8 @@ fn main() -> Result<()> {
     //
     // 命令行能覆盖是为了排障——「换个引擎试试」不该逼用户先改配置再改回来，
     // 和 `--lang` 是同一个理由。
-    let backend = if args.iter().any(|a| a == "--asr-backend") {
+    let pinned_backend = args.iter().any(|a| a == "--asr-backend");
+    let backend = if pinned_backend {
         let v = flag_value(&args, "--asr-backend").ok_or_else(|| {
             anyhow::anyhow!(
                 "--asr-backend 后面要跟后端名（{}）",
@@ -103,6 +110,73 @@ fn main() -> Result<()> {
     } else {
         cfg.asr_backend
     };
+
+    // 预下载 Qwen3-ASR（设置窗口那条路的命令行版，也是排障入口：能看到完整的失败原因）。
+    // **只装，不选**——同 `--fetch-thai`。放在引擎对账之前：配置里选着 Qwen3
+    // 而还没装好时，下面的对账会退回 SenseVoice，这条命令不该被那个挡住。
+    if args.iter().any(|a| a == "--fetch-qwen3") {
+        let m = match flag_value(&args, "--fetch-qwen3") {
+            Some(v) if !v.starts_with("--") => qwen3::Qwen3Model::parse_cli(v)?,
+            _ => cfg.qwen3_model,
+        };
+        if qwen3::is_ready(m) {
+            println!("✅ {} 已安装（{}）", m.label(), qwen3::root().map(|r| r.display().to_string()).unwrap_or_default());
+            return Ok(());
+        }
+        println!(
+            "下载 {}（模型 {:.0} MB{}）…",
+            m.label(),
+            m.total_bytes() as f64 / 1e6,
+            if qwen3::runtime_installed() {
+                String::new()
+            } else {
+                format!(" + speech-swift {} 运行时 99 MB", qwen3::SPEECH_VERSION)
+            }
+        );
+        let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let d2 = done.clone();
+        let progress = std::thread::spawn(move || {
+            while !d2.load(std::sync::atomic::Ordering::SeqCst) {
+                if let Some((a, b)) = qwen3::progress_bytes(m) {
+                    if b > 0 {
+                        eprint!("\r  {:>5.1}%  {:.0} / {:.0} MB   ", a as f64 * 100.0 / b as f64, a as f64 / 1e6, b as f64 / 1e6);
+                    }
+                } else if matches!(qwen3::state(m), download::State::Verifying) {
+                    eprint!("\r  校验 + 断网冒烟中……                ");
+                }
+                std::thread::sleep(std::time::Duration::from_millis(500));
+            }
+        });
+        let t0 = Instant::now();
+        let r = qwen3::install_blocking(m);
+        done.store(true, std::sync::atomic::Ordering::SeqCst);
+        let _ = progress.join();
+        eprintln!();
+        r?;
+        println!("✅ {} 已安装（{:.0}s）。到菜单「设置…→ 语音识别」选用它", m.label(), t0.elapsed().as_secs_f64());
+        return Ok(());
+    }
+
+    // 配置里选着 Qwen3-ASR，但它现在用不了（没下载、被删了、或者下到一半），
+    // 而 PATH 上也没有老的 brew 版 speech：不对账的话下面的 preflight 会让
+    // **整个守护进程起不来**。宁可退回随包的 SenseVoice 并把原因写清楚——
+    // 录音是这个程序的本职，不能因为一个可选后端没装好就全挂。
+    let backend = if !pinned_backend
+        && backend == engine::AsrBackend::SpeechSwift
+        && !qwen3::is_ready(cfg.qwen3_model)
+        && std::process::Command::new("speech").arg("--help").output().is_err()
+    {
+        log::warn!(
+            "配置里选的是 {}，但它还没装好，PATH 上也没有 speech",
+            cfg.qwen3_model.label()
+        );
+        log::warn!("  已退回随包的 SenseVoice。要用它：菜单「设置…→ 语音识别」选它就会下载");
+        config::update(|c| c.asr_backend = engine::AsrBackend::Builtin);
+        engine::AsrBackend::Builtin
+    } else {
+        backend
+    };
+    let cfg = config::get();
 
     // 配置里写着泰语，但模型可能已经被删了、被换过、或者当初压根没装完。
     // 不对账的话，菜单只是不显示勾，而**每一次录音都会走泰语分支然后失败**，
@@ -129,7 +203,9 @@ fn main() -> Result<()> {
         cfg
     };
 
-    let asr = engine::build(backend, &vendor, Some(&data_root))?;
+    // 守护进程与离线子命令共用这一个引擎：**每轮按配置分派**（设置窗口里切换即时生效）；
+    // `--asr-backend` 显式指定时锁死不跟配置走。
+    let asr = engine::build_dynamic(pinned_backend.then_some(backend), &vendor, Some(&data_root))?;
     // **构造成功 ≠ 依赖齐全。** `build` 只是造对象，
     // speech_swift 甚至根本不碰 vendor——不跑 preflight 的话，
     // `speech` 没装也能把守护进程起起来，直到第一次录完音才失败，
@@ -195,6 +271,85 @@ fn main() -> Result<()> {
             t.lang.as_deref().unwrap_or("?"),
             t0.elapsed().as_secs_f32()
         );
+        return Ok(());
+    }
+
+    // **开发/验收用**：同一个进程里轮流切换识别引擎（SenseVoice / Qwen3 0.6B / 1.7B ×
+    // 逐次 / 常驻），每种跑 N 轮，打印每轮耗时与文字（TSV）。
+    //
+    // 两个用途：① 证明「设置里一切换，下一轮就生效」——这里切换走的就是
+    // `config::update`，引擎是守护进程同一个 `Dispatch`，不重启进程；
+    // ② 给高资源档的准入条件提供实测数（`docs/benchmarks-asr-zh-en.md` 的 T3.5.6 一节）。
+    // ⚠️ 会改写 config.json（结束时恢复原值）——请配 `AGENTEAR_DATA` 指向临时目录跑。
+    if args.iter().any(|a| a == "--asr-bench") {
+        let wav = flag_value(&args, "--asr-bench")
+            .ok_or_else(|| anyhow::anyhow!("--asr-bench 后面要跟 wav 路径"))?
+            .to_string();
+        let runs: usize = flag_value(&args, "--runs").and_then(|v| v.parse().ok()).unwrap_or(5);
+        let saved = config::get();
+        let combos: Vec<(&str, engine::AsrBackend, qwen3::Qwen3Model, bool)> = vec![
+            ("sensevoice", engine::AsrBackend::Builtin, qwen3::Qwen3Model::Small, false),
+            ("qwen3-0.6b-cli", engine::AsrBackend::SpeechSwift, qwen3::Qwen3Model::Small, false),
+            ("qwen3-0.6b-resident", engine::AsrBackend::SpeechSwift, qwen3::Qwen3Model::Small, true),
+            ("qwen3-1.7b-cli", engine::AsrBackend::SpeechSwift, qwen3::Qwen3Model::Large, false),
+            ("qwen3-1.7b-resident", engine::AsrBackend::SpeechSwift, qwen3::Qwen3Model::Large, true),
+        ];
+        println!("combo\trun\tsecs\tchild_maxrss_mb\tserver_rss_mb\ttext");
+        let only = flag_value(&args, "--only").map(str::to_string);
+        for (name, backend, model, resident) in combos {
+            if only.as_deref().is_some_and(|o| o != name) {
+                continue;
+            }
+            if backend == engine::AsrBackend::SpeechSwift && !qwen3::is_ready(model) {
+                eprintln!("跳过 {name}：{} 没装", model.label());
+                continue;
+            }
+            config::update(|c| {
+                c.asr_backend = backend;
+                c.qwen3_model = model;
+                c.qwen3_resident = resident;
+            });
+            if !resident {
+                qwen3::stop_server("bench 切到逐次调用");
+            }
+            for run in 1..=runs {
+                let t0 = Instant::now();
+                let t = asr.transcribe(std::path::Path::new(&wav), asr::AsrLang::Auto)?;
+                let secs = t0.elapsed().as_secs_f64();
+                // 逐次调用的峰值：子进程的 ru_maxrss（macOS 单位是字节）。
+                // 它是「所有已回收子进程里最大的那个」，所以 combo 按内存从小到大排。
+                let child = unsafe {
+                    let mut ru: libc::rusage = std::mem::zeroed();
+                    libc::getrusage(libc::RUSAGE_CHILDREN, &mut ru);
+                    ru.ru_maxrss as f64 / 1048576.0
+                };
+                let server = qwen3::server_pid()
+                    .and_then(|pid| {
+                        std::process::Command::new("/bin/ps")
+                            .args(["-o", "rss=", "-p", &pid.to_string()])
+                            .output()
+                            .ok()
+                    })
+                    .and_then(|o| String::from_utf8_lossy(&o.stdout).trim().parse::<f64>().ok())
+                    .map(|kb| format!("{:.0}", kb / 1024.0))
+                    .unwrap_or_else(|| "-".into());
+                println!("{name}\t{run}\t{secs:.3}\t{child:.0}\t{server}\t{}", t.text.replace('\t', " "));
+            }
+        }
+        // `--hold <秒>`：跑完后进程再挂一会儿，用来实测空闲回收（常驻服务到点自己退）
+        if let Some(h) = flag_value(&args, "--hold").and_then(|v| v.parse::<u64>().ok()) {
+            let t0 = Instant::now();
+            while t0.elapsed() < std::time::Duration::from_secs(h) {
+                std::thread::sleep(std::time::Duration::from_secs(5));
+                eprintln!("hold {:>4}s  server_pid={:?}", t0.elapsed().as_secs(), qwen3::server_pid());
+            }
+        }
+        qwen3::stop_server("bench 结束");
+        config::update(|c| {
+            c.asr_backend = saved.asr_backend;
+            c.qwen3_model = saved.qwen3_model;
+            c.qwen3_resident = saved.qwen3_resident;
+        });
         return Ok(());
     }
 
@@ -895,6 +1050,19 @@ fn main() -> Result<()> {
 
     // 菜单栏必须在主线程装，且要在 NSApplication::run() 之前
     let mtm = objc2::MainThreadMarker::new().expect("install 必须在主线程");
+    // 上一次（崩溃 / kill -9）留下的孤儿常驻服务先收掉，再决定要不要起新的。
+    qwen3::reap_stale_server();
+    // 选着 Qwen3 且开了常驻：启动时就在后台把服务起好、模型加载好，
+    // 别让开机后的第一句话去付那 1.6 s。
+    {
+        let c = config::get();
+        if c.asr_backend == engine::AsrBackend::SpeechSwift
+            && c.qwen3_resident
+            && qwen3::is_ready(c.qwen3_model)
+        {
+            qwen3::warm_async(c.qwen3_model);
+        }
+    }
     let _tray = tray::install(mtm);
     log::debug!("菜单栏图标已安装");
 
@@ -1890,6 +2058,7 @@ pub fn restart_self() {
     // 「上一个自己拉起的边车」占着，而那个进程已经没人管了。
     sidecar::shutdown();
     talk::shutdown_spawned();
+    qwen3::stop_server("进程重启");
 
     let target = format!("gui/{}/{}", unsafe { libc::getuid() }, LAUNCHD_LABEL);
     let managed = std::process::Command::new("/bin/launchctl")
@@ -1972,6 +2141,45 @@ fn diagnose(vendor: &std::path::Path) -> Result<()> {
             p.display(),
             size
         );
+    }
+
+    // Qwen3-ASR 同样是可选项，没装用 ⚪。
+    {
+        let c = config::get();
+        println!(
+            "\nQwen3-ASR（可选，设置窗口里按需下载；当前识别引擎：{}）:",
+            match c.asr_backend {
+                engine::AsrBackend::Builtin => "SenseVoice（随包）".to_string(),
+                engine::AsrBackend::SpeechSwift => format!(
+                    "{}，{}",
+                    c.qwen3_model.label(),
+                    if c.qwen3_resident { "常驻" } else { "逐次调用" }
+                ),
+            }
+        );
+        let rt = qwen3::runtime_installed();
+        println!(
+            "  {} speech-swift {} 运行时: {}",
+            if rt { "✅" } else { "⚪" },
+            qwen3::SPEECH_VERSION,
+            qwen3::speech_bin().map(|p| p.display().to_string()).unwrap_or_default()
+        );
+        if rt {
+            if let Some(b) = qwen3::speech_bin() {
+                if qwen3::has_quarantine(&b) {
+                    println!("    ⚠️ 带着 com.apple.quarantine，Gatekeeper 会拦住它——在设置里重新下载一次");
+                }
+            }
+        }
+        for m in qwen3::Qwen3Model::ALL {
+            println!(
+                "  {} {}（{:.0} MB）{}",
+                if qwen3::model_installed(m) { "✅" } else { "⚪" },
+                m.label(),
+                m.total_bytes() as f64 / 1e6,
+                if qwen3::model_installed(m) { "" } else { " 未下载" }
+            );
+        }
     }
 
     // 泰语是**可选**链路：缺东西不是故障，是「还没装」。

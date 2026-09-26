@@ -817,6 +817,8 @@ pub fn install_signal_handlers() {
         // 漏了的话 `Ctrl+C` 之后会留下两个常驻约 4 GB 的进程。
         // 这里只做 `kill(2)`，符合 async-signal-safe。
         crate::talk::kill_spawned_pids_from_signal();
+        // Qwen3-ASR 的常驻服务（开着常驻时约 1–2.5 GiB）同理。
+        crate::qwen3::kill_server_from_signal();
         // SIGTERM 以退出码 0 结束。开机自启的 plist 是
         // `KeepAlive = { SuccessfulExit = false }`（异常退出才拉起），
         // 而「被信号杀死」在 launchd 眼里不算成功退出：不这么改的话，

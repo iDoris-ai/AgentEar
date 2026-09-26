@@ -84,6 +84,39 @@ pub fn on_thai_installed() {
     }
 }
 
+/// 「Qwen3 下载完成后要不要自动切过去」——和 `THAI_INTENT` 同一个理由：
+/// 下载要几分钟，用户可能中途改选了 SenseVoice 或另一档，
+/// 完成回调不能无条件把识别引擎改掉。判断 + 落配置在同一把锁里。
+static QWEN3_INTENT: Mutex<Option<crate::qwen3::Qwen3Model>> = Mutex::new(None);
+
+/// Qwen3 模型装好之后调用（下载线程在安装记录落地后回调）。
+pub fn on_qwen3_installed(m: crate::qwen3::Qwen3Model) {
+    let mut intent = QWEN3_INTENT.lock().unwrap_or_else(|e| e.into_inner());
+    if *intent == Some(m) {
+        *intent = None;
+        switch_to_qwen3(m);
+    } else {
+        log::info!("{} 已安装；用户期间没选它（或改了主意），识别引擎保持不变", m.label());
+    }
+}
+
+/// 把识别引擎切到某一档 Qwen3（已确认装好）。常驻开着就顺手预热。
+fn switch_to_qwen3(m: crate::qwen3::Qwen3Model) {
+    config::update(|c| {
+        c.asr_backend = crate::engine::AsrBackend::SpeechSwift;
+        c.qwen3_model = m;
+    });
+    let resident = config::get().qwen3_resident;
+    log::info!(
+        "识别引擎改为 {}（{}，下次录音生效）",
+        m.label(),
+        if resident { "常驻" } else { "逐次调用" }
+    );
+    if resident {
+        crate::qwen3::warm_async(m);
+    }
+}
+
 // 菜单项的 tag。用一个 action 加 tag 分发，省掉十几个 ObjC 方法。
 /// 开始 / 停止录音。放在菜单第一项——**这是触发键失灵时唯一的出路**，
 /// v0.2.0 漏了它，结果录音开起来就只能靠快捷键停，或者干脆退出程序。
@@ -107,6 +140,13 @@ const TAG_OPEN_COMMANDS: isize = 8;
 const TAG_OPEN_SETTINGS: isize = 9;
 const TAG_LAUNCH_AT_LOGIN: isize = 10;
 const TAG_RECORD_CUE: isize = 11;
+/// 菜单栏：Qwen3-ASR 常驻开关。
+const TAG_QWEN3_RESIDENT: isize = 12;
+/// 设置窗口「语音识别」下拉框：`+0` SenseVoice，`+1` / `+2` = `Qwen3Model::ALL` 的下标 + 1。
+/// ⚠️ 必须 < `TAG_DEVICE_BASE`（1000）——`handle` 里 `t >= TAG_DEVICE_BASE` 会吞掉一切更大的 tag。
+const TAG_ASR_ENGINE_BASE: isize = 900;
+/// 设置窗口里每个 Qwen3 模型那一行的按钮（下载 / 取消 / 重试），`+` 模型下标。
+const TAG_QWEN3_DL_BASE: isize = 950;
 /// `+0` 是「系统默认」，`+1..` 对应 `DEVICE_SNAPSHOT` 的下标。
 const TAG_DEVICE_BASE: isize = 1000;
 
@@ -530,6 +570,25 @@ fn populate(menu: &NSMenu, mtm: MainThreadMarker, target: &MenuTarget) {
     );
     menu.addItem(&asr_item);
 
+    // —— Qwen3-ASR 常驻 ——
+    //
+    // 放菜单栏而不是设置窗口（jason 2026-09-26）：这是要**拿来对比体验**的开关，
+    // 一点即切，切完下一句就是新形态。只有识别引擎是 Qwen3 且模型已装好时可点——
+    // 否则开了也没东西可常驻；但**不隐藏**，让人知道有这个选项。
+    {
+        let usable = cfg.asr_backend == crate::engine::AsrBackend::SpeechSwift
+            && crate::qwen3::is_ready(cfg.qwen3_model);
+        let it = item(
+            mtm,
+            target,
+            i18n::t(lang, Key::Qwen3Resident),
+            TAG_QWEN3_RESIDENT,
+            cfg.qwen3_resident,
+        );
+        it.setEnabled(usable);
+        menu.addItem(&it);
+    }
+
     // —— 输入设备 ——
     let devices = crate::audio::list_input_devices();
     let default_name = crate::audio::default_input_name().unwrap_or_else(|| "?".into());
@@ -652,6 +711,10 @@ fn list_voices(cfg: &config::Config, root: &std::path::Path) -> Vec<String> {
 }
 
 fn handle(tag: isize, mtm: MainThreadMarker) {
+    // Qwen3 相关的 tag 先处理：900/950 段落在音色（800 + 下标）的理论范围里。
+    if handle_qwen3(tag) {
+        return;
+    }
     // 模式切换单独处理：它的副作用不止改配置（要掐播放、要开关会话）。
     if let Some(mode) = mode_for_tag(tag) {
         set_talk_mode(mode);
@@ -791,6 +854,7 @@ fn handle(tag: isize, mtm: MainThreadMarker) {
             // 用户可能自己开着终端跑服务，退出时把它杀了是很难排查的越权。
             crate::sidecar::shutdown();
             crate::talk::shutdown_spawned();
+            crate::qwen3::stop_server("退出 AgentEar");
             NSApplication::sharedApplication(mtm).terminate(None);
         }
         t if (TAG_TRIGGER_BASE..TAG_TRIGGER_BASE + 2).contains(&t) => {
@@ -879,6 +943,65 @@ fn handle(tag: isize, mtm: MainThreadMarker) {
     }
 }
 
+/// 处理 Qwen3 相关的 tag。返回 `false` 表示不是它的。
+fn handle_qwen3(tag: isize) -> bool {
+    use crate::qwen3;
+    if tag == TAG_QWEN3_RESIDENT {
+        let cfg = config::get();
+        let on = !cfg.qwen3_resident;
+        config::update(|c| c.qwen3_resident = on);
+        log::info!("Qwen3-ASR 常驻：{}（立即生效）", if on { "开" } else { "关" });
+        if on {
+            if cfg.asr_backend == crate::engine::AsrBackend::SpeechSwift && qwen3::is_ready(cfg.qwen3_model) {
+                qwen3::warm_async(cfg.qwen3_model);
+            }
+        } else {
+            // 放到后台：停服务最多等 2 s，别卡住菜单
+            std::thread::spawn(|| qwen3::stop_server("常驻开关已关"));
+        }
+        return true;
+    }
+    if tag == TAG_ASR_ENGINE_BASE {
+        *QWEN3_INTENT.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        config::update(|c| c.asr_backend = crate::engine::AsrBackend::Builtin);
+        log::info!("识别引擎改为 SenseVoice（随包，下次录音生效）");
+        std::thread::spawn(|| qwen3::stop_server("识别引擎换回 SenseVoice"));
+        return true;
+    }
+    if let Some(m) = qwen3_model_for_tag(tag, TAG_ASR_ENGINE_BASE + 1) {
+        let mut intent = QWEN3_INTENT.lock().unwrap_or_else(|e| e.into_inner());
+        if qwen3::is_ready(m) {
+            *intent = None;
+            drop(intent);
+            switch_to_qwen3(m);
+        } else {
+            // **不在这里改配置**（同泰语）：下载要几分钟，期间把引擎设成一个
+            // 还没装好的后端，每次录音都会失败。装好并通过冒烟后才切。
+            *intent = Some(m);
+            drop(intent);
+            log::info!("开始下载 {}，装好后自动切过去", m.label());
+            qwen3::start(m, on_qwen3_installed);
+        }
+        return true;
+    }
+    if let Some(m) = qwen3_model_for_tag(tag, TAG_QWEN3_DL_BASE) {
+        match qwen3::state(m) {
+            download::State::Downloading(_) => qwen3::cancel(m),
+            download::State::Verifying | download::State::Ready => {}
+            // 只下载，不切引擎——「先下好备着」和「现在就用它」是两件事
+            _ => qwen3::start(m, on_qwen3_installed),
+        }
+        return true;
+    }
+    false
+}
+
+/// `base + 下标` → 模型。纯函数，测试钉住（tag 反推错了就会下错 / 切错模型）。
+fn qwen3_model_for_tag(tag: isize, base: isize) -> Option<crate::qwen3::Qwen3Model> {
+    let i = tag.checked_sub(base)?;
+    usize::try_from(i).ok().and_then(|i| crate::qwen3::Qwen3Model::ALL.get(i).copied())
+}
+
 fn open_path(p: Option<PathBuf>) {
     let Some(p) = p else {
         log::error!("数据目录未初始化");
@@ -908,9 +1031,19 @@ thread_local! {
     /// 在 `install()` 里、菜单栏那份建好的同一刻写入。
     static CURRENT_TARGET: std::cell::RefCell<Option<Retained<MenuTarget>>> =
         const { std::cell::RefCell::new(None) };
+    /// 设置窗口里 Qwen3 那几个要**活刷新**的控件（下载进度每 0.5 s 变一次，
+    /// 不能只在打开窗口时画一次）。由菜单栏的 0.5 s 定时器调 `refresh_qwen3_rows`。
+    static QWEN3_ROWS: std::cell::RefCell<Option<Qwen3Rows>> =
+        const { std::cell::RefCell::new(None) };
 }
 
-const SETTINGS_WIDTH: f64 = 420.0;
+struct Qwen3Rows {
+    popup: Retained<NSPopUpButton>,
+    rows: Vec<(Retained<NSTextField>, Retained<NSButton>)>,
+}
+
+/// 560 而不是原来的 420：Qwen3 那一行要放下「下载中 34%（840 / 2468 MB）」+ 一个按钮。
+const SETTINGS_WIDTH: f64 = 560.0;
 const ROW_H: f64 = 26.0;
 const ROW_GAP: f64 = 12.0;
 const MARGIN: f64 = 20.0;
@@ -1085,7 +1218,8 @@ fn build_settings_content(
     // 行数固定：勾选×3 + 边车状态(可能为空) + 保留期 + 4 个按钮。
     // 边车状态那一行**即使是空文案也占位**——用固定行数换布局代码简单，
     // 空标签不可见，视觉上跟"少一行"没区别。
-    let rows = 3 + 1 + 1 + 4;
+    // + 语音识别（下拉框）+ 两个 Qwen3 模型各一行
+    let rows = 3 + 1 + 1 + 3 + 4;
     let content_h = MARGIN * 2.0 + rows as f64 * ROW_H + (rows - 1) as f64 * ROW_GAP;
     window.setContentSize(NSSize::new(SETTINGS_WIDTH, content_h));
 
@@ -1134,6 +1268,25 @@ fn build_settings_content(
     }
     {
         let row_y = next_row();
+        content.addSubview(&info_label(mtm, i18n::t(lang, Key::AsrEngineSection), row_y));
+        let popup = asr_engine_popup(mtm, &target, lang, row_y);
+        content.addSubview(&popup);
+        let mut rows = Vec::new();
+        for (i, _m) in crate::qwen3::Qwen3Model::ALL.iter().enumerate() {
+            let y = next_row();
+            let label = info_label(mtm, "", y);
+            label.setFrame(rect(MARGIN + 18.0, y, SETTINGS_WIDTH - 2.0 * MARGIN - 18.0 - 110.0, ROW_H));
+            let b = action_button(mtm, &target, "", TAG_QWEN3_DL_BASE + i as isize, y);
+            b.setFrame(rect(SETTINGS_WIDTH - MARGIN - 104.0, y, 104.0, ROW_H));
+            content.addSubview(&label);
+            content.addSubview(&b);
+            rows.push((label, b));
+        }
+        QWEN3_ROWS.with(|r| *r.borrow_mut() = Some(Qwen3Rows { popup, rows }));
+        refresh_qwen3_rows(lang);
+    }
+    {
+        let row_y = next_row();
         content.addSubview(&info_label(mtm, i18n::t(lang, Key::RetentionSection), row_y));
         content.addSubview(&retention_popup(mtm, &target, lang, cfg.retention_days, row_y));
     }
@@ -1167,6 +1320,94 @@ fn build_settings_content(
     ));
 
     window.setContentView(Some(&content));
+}
+
+/// 「语音识别」下拉框：SenseVoice / Qwen3 0.6B / Qwen3 1.7B。
+/// 条目标题在 `refresh_qwen3_rows` 里刷（装没装好会变）。
+fn asr_engine_popup(mtm: MainThreadMarker, target: &MenuTarget, _lang: Lang, y: f64) -> Retained<NSPopUpButton> {
+    let popup = NSPopUpButton::initWithFrame_pullsDown(
+        NSPopUpButton::alloc(mtm),
+        rect(MARGIN + 100.0, y, SETTINGS_WIDTH - 2.0 * MARGIN - 100.0, ROW_H),
+        false,
+    );
+    let menu = NSMenu::init(NSMenu::alloc(mtm));
+    for i in 0..=crate::qwen3::Qwen3Model::ALL.len() {
+        let it = unsafe {
+            NSMenuItem::initWithTitle_action_keyEquivalent(
+                NSMenuItem::alloc(mtm),
+                &NSString::from_str(""),
+                None,
+                &NSString::from_str(""),
+            )
+        };
+        it.setTag(TAG_ASR_ENGINE_BASE + i as isize);
+        menu.addItem(&it);
+    }
+    popup.setMenu(Some(&menu));
+    unsafe {
+        popup.setTarget(Some(AsRef::<AnyObject>::as_ref(target)));
+        popup.setAction(Some(sel!(onPopup:)));
+    }
+    popup
+}
+
+/// 下拉框该选中哪一项：正在为某一档下载（用户选了它）时显示那一档，
+/// 否则跟配置走。纯函数，测试钉住。
+fn engine_popup_index(
+    backend: crate::engine::AsrBackend,
+    model: crate::qwen3::Qwen3Model,
+    intent: Option<crate::qwen3::Qwen3Model>,
+) -> usize {
+    if let Some(m) = intent {
+        return m.index() + 1;
+    }
+    match backend {
+        crate::engine::AsrBackend::Builtin => 0,
+        crate::engine::AsrBackend::SpeechSwift => model.index() + 1,
+    }
+}
+
+/// 刷新设置窗口里 Qwen3 的控件。窗口没打开时什么也不做。
+fn refresh_qwen3_rows(lang: Lang) {
+    use crate::qwen3::{self, Qwen3Model};
+    QWEN3_ROWS.with(|r| {
+        let r = r.borrow();
+        let Some(rows) = r.as_ref() else { return };
+        let cfg = config::get();
+        if let Some(menu) = rows.popup.menu() {
+            if let Some(it) = menu.itemAtIndex(0) {
+                it.setTitle(&NSString::from_str(i18n::t(lang, Key::AsrEngineSenseVoice)));
+            }
+            for (i, m) in Qwen3Model::ALL.iter().enumerate() {
+                if let Some(it) = menu.itemAtIndex(i as isize + 1) {
+                    let mb = m.total_bytes() / 1_000_000;
+                    it.setTitle(&NSString::from_str(&i18n::qwen3_engine_option(lang, m.label(), mb, qwen3::is_ready(*m))));
+                }
+            }
+        }
+        let intent = *QWEN3_INTENT.lock().unwrap_or_else(|e| e.into_inner());
+        rows.popup
+            .selectItemAtIndex(engine_popup_index(cfg.asr_backend, cfg.qwen3_model, intent) as isize);
+        for (m, (label, button)) in Qwen3Model::ALL.iter().zip(rows.rows.iter()) {
+            let st = qwen3::state(*m);
+            let mb = m.total_bytes() / 1_000_000;
+            label.setStringValue(&NSString::from_str(&i18n::qwen3_status(
+                lang,
+                m.label(),
+                mb,
+                st,
+                qwen3::progress_bytes(*m),
+            )));
+            match i18n::qwen3_button(lang, st) {
+                Some(t) => {
+                    button.setTitle(&NSString::from_str(t));
+                    button.setHidden(false);
+                    button.setEnabled(st != download::State::Verifying);
+                }
+                None => button.setHidden(true),
+            }
+        }
+    });
 }
 
 pub struct Tray {
@@ -1228,6 +1469,11 @@ pub fn install(mtm: MainThreadMarker) -> Option<Tray> {
                     }
                 }
                 let mtm = MainThreadMarker::new_unchecked();
+                // 设置窗口开着时刷新 Qwen3 的下载进度（关着就跳过，省事）
+                let visible = SETTINGS_WINDOW.with(|w| w.borrow().as_ref().is_some_and(|w| w.isVisible()));
+                if visible {
+                    refresh_qwen3_rows(config::get().ui_lang);
+                }
                 if let Some(button) = item_for_timer.button(mtm) {
                     // 每次都重读语言，这样切换后标题最多 0.5s 就跟上
                     button.setTitle(&NSString::from_str(&title(config::get().ui_lang)));
@@ -1308,6 +1554,30 @@ mod tests {
         // 录音中：计时在前、标记在后，计时不被挤掉
         assert_eq!(marker(Conversation, "● 7s"), "● 7s💬");
         assert!(marker(Conversation, "● 7s").starts_with("● 7s"));
+    }
+
+    /// tag ↔ 模型的反推：点哪一档就下 / 切哪一档，两段 tag 都不越界。
+    #[test]
+    fn qwen3_tags_map_to_the_right_model() {
+        use crate::qwen3::Qwen3Model;
+        for (i, m) in Qwen3Model::ALL.iter().enumerate() {
+            assert_eq!(qwen3_model_for_tag(TAG_ASR_ENGINE_BASE + 1 + i as isize, TAG_ASR_ENGINE_BASE + 1), Some(*m));
+            assert_eq!(qwen3_model_for_tag(TAG_QWEN3_DL_BASE + i as isize, TAG_QWEN3_DL_BASE), Some(*m));
+        }
+        assert_eq!(qwen3_model_for_tag(TAG_ASR_ENGINE_BASE, TAG_ASR_ENGINE_BASE + 1), None, "SenseVoice 那项不是 Qwen3");
+        assert_eq!(qwen3_model_for_tag(TAG_QWEN3_DL_BASE + 2, TAG_QWEN3_DL_BASE), None);
+        // 都要落在设备区（1000+）之前，否则会被 `t >= TAG_DEVICE_BASE` 吞掉
+        assert!(TAG_QWEN3_DL_BASE + (Qwen3Model::ALL.len() as isize) < TAG_DEVICE_BASE);
+    }
+
+    #[test]
+    fn engine_popup_follows_intent_then_config() {
+        use crate::engine::AsrBackend::{Builtin, SpeechSwift};
+        use crate::qwen3::Qwen3Model::{Large, Small};
+        assert_eq!(engine_popup_index(Builtin, Small, None), 0);
+        assert_eq!(engine_popup_index(SpeechSwift, Small, None), 1);
+        assert_eq!(engine_popup_index(SpeechSwift, Large, None), 2);
+        assert_eq!(engine_popup_index(Builtin, Small, Some(Large)), 2, "正在为 1.7B 下载时显示 1.7B");
     }
 
     /// 不属于模式区的 tag 一律返回 None——否则别的菜单项会被误当成模式切换。
