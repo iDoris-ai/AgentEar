@@ -388,7 +388,7 @@ scripts/setup-talk.sh        # 下 MiniCPM5-2B-4bit(LLM)与 VoxCPM2-4bit(TTS),�
 
 ```bash
 scripts/serve-talk-llm.sh    # LLM 边车,默认 127.0.0.1:8794
-scripts/serve-tts.sh         # TTS 边车,默认 127.0.0.1:8765
+scripts/serve-tts.sh         # TTS 边车,默认 127.0.0.1:8796（v0.22.0 前是 8765）
 
 # 不碰麦克风就能验掉后三段:
 agentear --say "你好"                 # 只测 TTS:合成 + 播放

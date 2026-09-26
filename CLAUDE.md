@@ -2,7 +2,7 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-## 当前状态：**v0.23.0 —— Qwen3-ASR 可选后端：设置窗口里选 0.6B / 1.7B 即下载（speech-swift v0.0.28 钉死 + HF 权重钉 commit，不随包），菜单栏切常驻；默认 ASR 仍是随包 SenseVoice，Qwen3 内默认 0.6B 逐次（小内存）**；v0.21.1 修「双击进对话模式后第一轮没回答」：边车端口被别的程序占着时报清楚是谁占的、不再误拉起；第一轮先等边车拉起完（最多 30s）再答**；v0.21.0 录音开始/结束提示音（单击一声、双击两声；开始高音、结束低音；设置里可关，默认开）**；v0.20.1 开机自启的实例崩溃后由 launchd 自动拉起（`KeepAlive.SuccessfulExit=false`，菜单退出 / SIGTERM 以 0 退出、不拉起）；v0.20.0 的开机自动启动 + 原生设置窗口仍**均未经真实点击验收**；M1/M2 已发布；**M3 通话链路已跑通，V1 打断定为推键式长期终态（v0.19.0 起才在守护进程里真正生效），不做 VAD 自动打断 / 双讲**
+## 当前状态：**v0.23.0 —— Qwen3-ASR 可选后端：设置窗口里选 0.6B / 1.7B 即下载（speech-swift v0.0.28 钉死 + HF 权重钉 commit，不随包），菜单栏切常驻；默认 ASR 仍是随包 SenseVoice，Qwen3 内默认 0.6B 逐次（小内存）**；v0.22.0 —— 语音边车端口被别的程序占着时自动换空闲端口拉起（不改 config.json，运行态记录 `run/talk-sidecars.json`，崩溃重启后按 pid 接回）；默认 TTS 端口 8765→8796；对话模式因边车不可用没说出来时用 `say` 念一句（同一原因 3 分钟一次）；v0.21.1 修「双击进对话模式后第一轮没回答」：边车端口被别的程序占着时报清楚是谁占的、不再误拉起；第一轮先等边车拉起完（最多 30s）再答**；v0.21.0 录音开始/结束提示音（单击一声、双击两声；开始高音、结束低音；设置里可关，默认开）**；v0.20.1 开机自启的实例崩溃后由 launchd 自动拉起（`KeepAlive.SuccessfulExit=false`，菜单退出 / SIGTERM 以 0 退出、不拉起）；v0.20.0 的开机自动启动 + 原生设置窗口仍**均未经真实点击验收**；M1/M2 已发布；**M3 通话链路已跑通，V1 打断定为推键式长期终态（v0.19.0 起才在守护进程里真正生效），不做 VAD 自动打断 / 双讲**
 
 M1 完成；**知识库投递 + 全文检索默认开（v0.4.2）**；M2 理解层已发布（v0.4.0）但默认关；
 **v0.6.0 加了通话链路（说一句答一句、可按键打断）**，**v0.5.0 加了可切换的 ASR 后端**（`--asr-backend` / `config.json` 的 `asr_backend`，
@@ -103,7 +103,7 @@ M1 完成；**知识库投递 + 全文检索默认开（v0.4.2）**；M2 理解�
   **空转写不记轮次**；LLM 失败时转写照样记一轮（`reply: None`）。
 - **配置项全部默认关、或指向本机默认端口**（`src/config.rs`）：`talk_mode`(input_method)、
   `talk_lang`(zh)、`talk_llm_engine`("openai_compat")、`talk_llm_url`(None→8794)、
-  `talk_tts_engine`("http")、`tts_url`(None→8765)、`talk_timeout_secs`(60)、
+  `talk_tts_engine`("http")、`tts_url`(None→8796，v0.22.0 前是 8765)、`talk_timeout_secs`(60)、
   `talk_city`("清迈")、`talk_weather_note`(None)，另有 `Config::weather_fact()`。
   **留在输入法模式时，已发布用户的行为一个字节都没变**（v0.6.0 的老 `talk_enabled`
   会迁移成对话模式，所以那台机器升级后仍是对话——这是有意的，见上）。
@@ -540,7 +540,7 @@ scripts/bundle.sh                             # 打 .app bundle → dist/
 scripts/setup-talk.sh                         # 首次：下 MiniCPM5-2B-4bit（LLM）与 VoxCPM2-4bit（TTS）+ 默认音色库
 scripts/setup-talk.sh --tts-quant 8bit         # 同上但 TTS 用 8bit（3.22GB 权重 / 约 3.3GB 内存，要自己显式要）
 scripts/serve-talk-llm.sh                     # 每次：LLM 边车，默认 127.0.0.1:8794
-scripts/serve-tts.sh                          # 每次：TTS 边车，默认 127.0.0.1:8765（--backend voxcpm2）
+scripts/serve-tts.sh                          # 每次：TTS 边车，默认 127.0.0.1:8796（--backend voxcpm2；v0.22.0 前是 8765）
 scripts/talk-e2e.sh --text '今天天气怎么样' --lang zh   # 全链路：ASR → LLM → TTS → 音频文件
 
 python3 -m unittest discover -s services/tts -p 'test_*.py'   # 46 passed（TTS 边车，CI 里也跑）

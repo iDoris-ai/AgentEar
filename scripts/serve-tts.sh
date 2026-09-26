@@ -45,7 +45,7 @@ fi
 # 钉哪一条。默认 `female_zh_02`（实测挑的那条：F0 174.5 Hz、半音起伏 4.22）。
 # 只有它真在库里时才钉——否则一钉就是 400，用户听到的是「没声音」。
 VOICE="${AGENTEAR_TTS_VOICE:-female_zh_02}"
-PORT="${AGENTEAR_TTS_PORT:-8765}"
+PORT="${AGENTEAR_TTS_PORT:-8796}"
 BACKEND="${AGENTEAR_TTS_BACKEND:-voxcpm2}"
 
 [ -x "$VENV/bin/python" ] || { echo "!! 环境没备好，先跑 scripts/setup-talk.sh" >&2; exit 1; }

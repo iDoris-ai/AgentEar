@@ -346,7 +346,7 @@ pub struct Config {
     /// （用户以为早忘了，结果一按键就发出去了）。最短 5 秒。
     #[serde(deserialize_with = "lenient")]
     pub command_confirm_secs: u64,
-    /// TTS 边车地址。留空 = `http://127.0.0.1:8765`。
+    /// TTS 边车地址。留空 = `http://127.0.0.1:8796`。
     ///
     /// 端口写死在这里而不是从边车读：`sidecar.rs` 记过那个教训——
     /// **连错对端比连不上更糟**，客户端必须知道自己该连谁。

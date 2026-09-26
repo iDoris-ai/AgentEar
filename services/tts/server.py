@@ -180,7 +180,7 @@ class TTSServer(ThreadingHTTPServer):
 
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--port", type=int, default=8765)
+    parser.add_argument("--port", type=int, default=8796)
     parser.add_argument(
         "--backend",
         choices=("voxcpm2", "say"),
