@@ -14,21 +14,22 @@ SenseVoice 的 `<|zh|>` 标记过滤、speech_swift 的 `Result:` 解析、
   推理前逐条重算 WAV 的 SHA-256 并与 manifest 对账，对不上就拒跑。
 - 需要环境变量 `AGENTEAR_DATA`（建议指向一个空的临时目录，避免用户自己的
   terms.json 与 config.json 混进来）与 `AGENTEAR_VENDOR`。
-- `--qwen-model`：产品里写死 `-m 1.7B`。要测 0.6B，这里在 PATH 最前面放一个
-  `speech` 垫片，只把 `-m 1.7B` 换成指定值、其余参数原样转发——
-  所以 0.6B 与 1.7B 走的是**同一条产品路径、同一个 context**，只差模型。
-  垫片会把每次实际收到的参数追加进 `<输出 tsv>.argv`，用来核对替换真的发生了。
+- `--qwen-model`：speech_swift 用哪档，**默认 1.7B**（T3.5.1 当时的产品行为）。
+  v0.23 起模型档位来自 `config.json` 的 `qwen3_model`（产品默认 0.6B），
+  所以这里**把它写进 `$AGENTEAR_DATA/config.json`**，而不是像 T3.5.1 当时那样
+  在 PATH 前面放一个替换 `-m 1.7B` 的垫片——垫片依赖「产品写死 1.7B」，
+  那个前提已经不成立了（照旧跑会在新数据目录里**悄悄变成 0.6B**）。
+  0.6B 与 1.7B 仍走同一条产品路径、同一个 context，只差模型。
+- ⚠️ 运行时：`$AGENTEAR_DATA` 里**没装** AgentEar 自己下载的 Qwen3 时，走 PATH 上的
+  `speech`（T3.5.1 用的是 brew 的 0.0.26）；装了就走钉死的 v0.0.28。两者不是同一个版本。
 
 输出 TSV 列：key、墙钟秒数、转写文本（制表符与换行替换成空格）。
 """
 import hashlib
 import json
 import os
-import shutil
-import stat
 import subprocess
 import sys
-import tempfile
 import time
 
 
@@ -37,25 +38,20 @@ def _sha16(path):
         return hashlib.sha256(f.read()).hexdigest()[:16]
 
 
-def _make_shim(model, argv_log):
-    real = shutil.which("speech")
-    if not real:
-        raise SystemExit("PATH 里找不到 speech")
-    d = tempfile.mkdtemp(prefix="speech-shim-")
-    shim = os.path.join(d, "speech")
-    with open(shim, "w") as f:
-        f.write(f"""#!/bin/bash
-args=()
-prev=""
-for a in "$@"; do
-  if [ "$prev" = "-m" ] && [ "$a" = "1.7B" ]; then a="{model}"; fi
-  args+=("$a"); prev="$a"
-done
-printf '%s\\n' "${{args[*]}}" >> "{argv_log}"
-exec "{real}" "${{args[@]}}"
-""")
-    os.chmod(shim, os.stat(shim).st_mode | stat.S_IEXEC)
-    return d
+def _set_qwen3_model(model):
+    """把 speech_swift 的模型档位写进数据目录的 config.json（保留其余字段）。"""
+    os.makedirs(os.environ["AGENTEAR_DATA"], exist_ok=True)
+    cfg_path = os.path.join(os.environ["AGENTEAR_DATA"], "config.json")
+    cfg = {}
+    if os.path.exists(cfg_path):
+        with open(cfg_path) as f:
+            cfg = json.load(f)
+    cfg["qwen3_model"] = {"0.6b": "0.6b", "1.7b": "1.7b"}[model.lower()]
+    cfg["qwen3_resident"] = False  # T3.5.1 测的是逐次调用
+    with open(cfg_path, "w") as f:
+        json.dump(cfg, f, ensure_ascii=False, indent=2)
+    with open(cfg_path) as f:  # 读回核对：写没写进去不靠猜
+        assert json.load(f)["qwen3_model"] == cfg["qwen3_model"]
 
 
 def main():
@@ -87,13 +83,8 @@ def main():
             jobs.append((key, wav))
 
     env = dict(os.environ)
-    shim_dir = None
-    if model:
-        argv_log = out_tsv + ".argv"
-        if os.path.exists(argv_log):
-            os.remove(argv_log)
-        shim_dir = _make_shim(model, os.path.abspath(argv_log))
-        env["PATH"] = shim_dir + os.pathsep + env["PATH"]
+    if backend == "speech_swift":
+        _set_qwen3_model(model or "1.7b")
 
     cmd_base = [binary]
     if backend == "speech_swift":
@@ -112,8 +103,7 @@ def main():
             rows.append((key, wall, hyp))
             print(f"[{n}/{len(jobs)}] {key} {wall:.2f}s {hyp[:60]}", file=sys.stderr)
     finally:
-        if shim_dir:
-            shutil.rmtree(shim_dir, ignore_errors=True)
+        pass
 
     os.makedirs(os.path.dirname(os.path.abspath(out_tsv)), exist_ok=True)
     tmp = out_tsv + ".part"

@@ -13,6 +13,7 @@ use std::sync::{OnceLock, RwLock};
 use crate::asr::AsrLang;
 use crate::engine::AsrBackend;
 use crate::i18n::Lang;
+use crate::qwen3::Qwen3Model;
 use crate::talk::TalkLang;
 
 /// 单个字段解析失败时退回默认值，**而不是让整份配置解析失败**。
@@ -114,6 +115,20 @@ fn default_record_cue() -> bool {
     true
 }
 
+/// Qwen3-ASR 常驻服务的空闲回收时间。10 分钟：连着说几轮不会被回收，
+/// 放着不用时 1–2.5 GiB 内存会还回去。
+fn default_qwen3_idle_secs() -> u64 {
+    600
+}
+
+/// 最短 60 s——再短的话连续两轮之间就会被回收，常驻等于没开。
+fn lenient_qwen3_idle_secs<'de, D: Deserializer<'de>>(d: D) -> Result<u64, D::Error> {
+    let v = serde_json::Value::deserialize(d)?;
+    Ok(serde_json::from_value::<u64>(v)
+        .map(|n| n.max(60))
+        .unwrap_or_else(|_| default_qwen3_idle_secs()))
+}
+
 fn lenient_record_cue<'de, D: Deserializer<'de>>(d: D) -> Result<bool, D::Error> {
     let v = serde_json::Value::deserialize(d)?;
     Ok(serde_json::from_value(v).unwrap_or_else(|_| default_record_cue()))
@@ -183,6 +198,20 @@ pub struct Config {
     /// LLM 这一项，ASR 侧仍按原标准要求」），不是改个默认值那么简单。
     #[serde(deserialize_with = "lenient")]
     pub asr_backend: AsrBackend,
+    /// `asr_backend = speech_swift` 时用哪档 Qwen3-ASR。**默认 0.6B**
+    /// （jason 2026-09-26「默认小内存」）；设置窗口里选、选了才下载。
+    ///
+    /// 迁移：v0.21 之前的 speech_swift 用户一直是 1.7B（写死在代码里），
+    /// 他们的 config 里没有这个键——`load` 按「键没出现过」把他们留在 1.7B。
+    #[serde(deserialize_with = "lenient")]
+    pub qwen3_model: Qwen3Model,
+    /// Qwen3-ASR 用常驻服务（`speech-server`）还是逐次起进程。**默认关**（小内存）。
+    /// 常驻每轮快约 1.6 s，代价是常驻 1–2.5 GiB，空闲 `qwen3_idle_secs` 后自动退出。
+    /// 菜单栏里开关，立即生效。
+    #[serde(deserialize_with = "lenient")]
+    pub qwen3_resident: bool,
+    #[serde(deserialize_with = "lenient_qwen3_idle_secs")]
+    pub qwen3_idle_secs: u64,
     /// 转写后是否送本地 LLM 纠正技术术语。
     ///
     /// **默认关。** 它需要一个额外的边车进程（`scripts/serve-llm.sh`），
@@ -484,6 +513,9 @@ impl Default for Config {
             ui_lang: Lang::default(),
             asr_lang: AsrLang::default(),
             asr_backend: AsrBackend::default(),
+            qwen3_model: Qwen3Model::default(),
+            qwen3_resident: false,
+            qwen3_idle_secs: default_qwen3_idle_secs(),
             correct_terms: false,
             llm_url: None,
             llm_autostart: default_autostart(),
@@ -559,9 +591,25 @@ pub fn load(data_root: &Path) -> Config {
     }
     cfg.talk_enabled_legacy = false;
 
+    // 迁移：v0.21 之前 speech_swift 后端写死用 1.7B。那些用户升级上来，
+    // config 里没有 `qwen3_model`，按默认值会被悄悄换成 0.6B——识别变差
+    // 而他什么都没改。判据同上：**键没出现过**，不是「等于默认值」。
+    if qwen3_model_needs_legacy_migration(cfg.asr_backend, raw.as_deref()) {
+        cfg.qwen3_model = Qwen3Model::Large;
+        log::info!("配置迁移：老的 speech_swift 用户保持 Qwen3-ASR 1.7B");
+    }
+
     PATH.set(path).ok();
     *CURRENT.write().unwrap() = Some(cfg.clone());
     cfg
+}
+
+/// 老的 speech_swift 用户（没有 `qwen3_model` 键）要留在 1.7B。
+fn qwen3_model_needs_legacy_migration(backend: AsrBackend, raw: Option<&str>) -> bool {
+    backend == AsrBackend::SpeechSwift
+        && !raw
+            .and_then(|r| serde_json::from_str::<serde_json::Value>(r).ok())
+            .is_some_and(|v| v.get("qwen3_model").is_some())
 }
 
 pub fn get() -> Config {
@@ -626,6 +674,40 @@ fn save(cfg: &Config) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Qwen3 的两项默认值都是「小内存」那一档（jason 2026-09-26）。
+    #[test]
+    fn qwen3_defaults_are_the_small_memory_ones() {
+        let c = Config::default();
+        assert_eq!(c.qwen3_model, Qwen3Model::Small);
+        assert!(!c.qwen3_resident, "常驻默认关");
+        let c: Config = serde_json::from_str("{}").unwrap();
+        assert_eq!(c.qwen3_model, Qwen3Model::Small);
+        assert!(!c.qwen3_resident);
+        assert_eq!(c.qwen3_idle_secs, 600);
+    }
+
+    /// 迁移判据是「键没出现过」：老 speech_swift 用户留在 1.7B，
+    /// 显式选了 0.6B 的不被顶回去，builtin 用户不受影响。
+    #[test]
+    fn legacy_speech_swift_users_stay_on_the_large_model() {
+        let legacy = r#"{"asr_backend": "speech_swift"}"#;
+        assert!(qwen3_model_needs_legacy_migration(AsrBackend::SpeechSwift, Some(legacy)));
+        let explicit = r#"{"asr_backend": "speech_swift", "qwen3_model": "0.6b"}"#;
+        assert!(!qwen3_model_needs_legacy_migration(AsrBackend::SpeechSwift, Some(explicit)));
+        assert!(!qwen3_model_needs_legacy_migration(AsrBackend::Builtin, Some("{}")));
+        assert!(!qwen3_model_needs_legacy_migration(AsrBackend::Builtin, None));
+    }
+
+    #[test]
+    fn qwen3_idle_has_a_floor_and_bad_values_fall_back() {
+        let c: Config = serde_json::from_str(r#"{"qwen3_idle_secs": 5}"#).unwrap();
+        assert_eq!(c.qwen3_idle_secs, 60, "太短等于没开常驻");
+        let c: Config = serde_json::from_str(r#"{"qwen3_idle_secs": "x"}"#).unwrap();
+        assert_eq!(c.qwen3_idle_secs, 600);
+        let c: Config = serde_json::from_str(r#"{"qwen3_model": "7b"}"#).unwrap();
+        assert_eq!(c.qwen3_model, Qwen3Model::Small, "坏值退回默认，不连累别的字段");
+    }
 
     #[test]
     fn defaults_are_the_documented_ones() {

@@ -995,27 +995,39 @@
 - 加版本握手 + capability probe + CLI 输出契约测试；
   不兼容时**拒绝启动并给出可操作错误**，不要运行中静默错乱。
 
-### T3.5.6 Qwen3-ASR 可配置 + 按需自动下载  `BLOCKED`（2026-09-26 调研完成，待 jason 拍板 [ADR-0010](../decisions/0010-qwen3-asr-optional-backend.md) §6）
+### T3.5.6 Qwen3-ASR 可配置 + 按需自动下载  `PR_OPEN`（v0.23.0，2026-09-26）
 - **来源**：Q4 的决定（jason 2026-09-26）——「ASR 本身就是要做成可配置的。
   默认用一个（随包的 SenseVoice），配置了另一个（如 Qwen3-ASR 1.7B）就自动下载下来用。」
-- **入口（jason 2026-09-26 定）**：模型的**选择与下载入口放在 v0.20.0 的原生设置窗口里**
-  ——不是菜单栏子菜单，也不是只有 CLI。
-- **现状缺口**：`speech_swift` 后端（`src/engine.rs`）要求用户**自己装**
-  `speech` CLI（brew），菜单里也没有这一项——等于普通用户选不到。
-- **第一步是调研，调研前不写代码**：`speech` CLI 能不能**不依赖 brew**，
-  把二进制与模型下到 `~/.agentear/`（与泰语模型 `--fetch-thai` 同一套下载协议：
-  完成下界、校验、断点）？许可证能不能再分发（接 T3.5.3）？
-  0.6B 与 1.7B 各自的体积与峰值内存（1.7B 实测 2628 MiB → 只能进高资源档 ≤4 GiB）。
-- **约束**：默认档不变（≤2 GiB，SenseVoice 随包）；高资源档三条准入（显式启用 /
-  不随包 / 峰值 RSS 实测入库）照旧；每轮 +约 2s 冷启动是已知代价
-  （[`benchmarks-asr-zh-en.md`](../benchmarks-asr-zh-en.md)），常驻服务形态未测。
-- **✅ 调研已完成（2026-09-26）→ [ADR-0010](../decisions/0010-qwen3-asr-optional-backend.md)（提议）**：
-  speech-swift 有**不依赖 brew 的预编译 release**（Apache-2.0，ad-hoc 签名）；
-  `QWEN3_ASR_CACHE_DIR` 可以让我们**自己下载、自己校验**权重，断网可用；
-  **常驻（`speech-server`）把每轮 1.77–1.82 s 压到 0.156–0.160 s**，代价常驻 2.43 GiB；
-  **GGUF 路径已出现**（`ggml-org/Qwen3-ASR-*-GGUF` + llama.cpp，热态 0.12 s / 2.95 GiB，
-  **准确率未测**），触发 ADR-0001 的重评条件。6 个拍板点见 ADR-0010 §6，拍板前不写代码。
+- **调研**：[ADR-0010](../decisions/0010-qwen3-asr-optional-backend.md)（PR #91，调研原始数据见其 RAW）。**jason 2026-09-26 拍板 §6 六问**：
+  ① 先上 speech-swift（GGUF 另开 T3.5.7）；② 常驻与逐次**都提供**，默认逐次（小内存），
+  菜单栏手动切常驻；③ 1.7B 与 0.6B 都提供，Qwen3 内默认 0.6B；
+  ④ 权重直接从 Hugging Face 下，**不打进我们的包**；⑤ speech 版本钉死；⑥ 调研缓存已清。
+- **落地**（`src/qwen3.rs` 新模块 + engine / config / tray / i18n / main）：
+  - 设置窗口「语音识别」下拉（SenseVoice / Qwen3 0.6B / 1.7B）+ 两个模型各一行
+    （进度「312 / 713 MB」、取消、继续、重试，0.5 s 活刷新）。选了没装的那档 →
+    开始下载，**装好并过冒烟才切**（下载期间改主意就不切，同泰语的 `THAI_INTENT`）。
+  - 菜单栏「Qwen3-ASR 常驻」开关，立即生效；常驻空闲 600 s 自动退出。
+  - speech-swift v0.0.28 预编译包（sha 钉死）+ HF 权重（钉 commit、逐文件 sha）；
+    解包去 quarantine；**所有 speech 进程跑在禁出站 TCP 的沙箱里**（布局错了当场报错，
+    不会背着用户去下几百 MB）；安装冒烟也在沙箱里跑。
+  - 常驻服务：系统分配空闲端口（不用固定端口）、预热、换模型先停旧的、失败这一轮退回逐次、
+    退出 / 信号 / 重启时收掉；**上一次被 kill -9 留下的孤儿**下次启动按 pid 文件收掉（核对命令行才杀）。
+  - 顺带修：**下载中被 kill 时 curl 子进程不死**、继续写 `.part`（泰语下载同样有），
+    重跑后两个 curl 写同一个文件——现在三条退出路径都会收掉 curl。
+  - 老 speech_swift 用户（config 里没有 `qwen3_model`）迁移为 1.7B，行为不变。
+  - CLI：`--fetch-qwen3 [0.6b|1.7b]`（预下载）、`--asr-bench <wav>`（同进程切换 + 实测）、
+    `--diagnose` 报 Qwen3 状态。
+- **实测**（`benchmarks-asr-zh-en.md` §9，n=4 热态）：常驻热态 0.6B 0.09–0.35 s、1.7B 0.19–0.69 s；
+  逐次 1.8–2.5 s；内存 0.6B ≈ 816 MiB、1.7B ≈ 2.49 GiB。从零下载运行时 + 0.6B 共 137 s（本机网络）。
+- **没测**：设置窗口 / 菜单栏的真实点击；守护进程里的真按键链路；常驻形态的准确率（60×3 组没重跑）。
 
+### T3.5.7 Qwen3-ASR GGUF 路线的准确率评测  `BACKLOG`（2026-09-26 新增）
+- **来源**：ADR-0010 §4.5 / §6.1——jason 定「先上 speech-swift」，GGUF（llama.cpp +
+  `ggml-org/Qwen3-ASR-*-GGUF`）另开一个 task 评。
+- 用 T3.5.1 同一套 60×3 组语料打分；若不比 speech-swift 差，就考虑换过去
+  （运行时小一个数量级、形态与随包 ASR 一致、MIT）。这也回答 ADR-0001 那句
+  「出现 GGUF 路径应重新评估」。
+- ⚠️ `llama-server` 默认上下文会吃 30 GB 级内存（ADR-0010 RAW §5），**`-c` 必须钉死并有测试守着**。
 ---
 
 ### T3.2.1 泰语 code-switch：给 whisper 加 initial prompt  `DONE`（2026-09-19）

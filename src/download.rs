@@ -97,6 +97,10 @@ pub enum Fail {
     Busy,
     /// 本地文件系统层面的问题（目标是目录、没有写权限……）。
     Io,
+    /// 用户点了「取消」。`.part` 保留，下次点下载从断点续。
+    ///
+    /// 不算失败：界面上应显示成「没下完」而不是红字报错。
+    Cancelled,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -291,6 +295,7 @@ fn fail_code(f: Fail) -> u8 {
         Fail::Disk => 3,
         Fail::Busy => 4,
         Fail::Io => 5,
+        Fail::Cancelled => 6,
     }
 }
 
@@ -300,6 +305,7 @@ fn code_fail(c: u8) -> Fail {
         2 => Fail::Checksum,
         3 => Fail::Disk,
         4 => Fail::Busy,
+        6 => Fail::Cancelled,
         _ => Fail::Io,
     }
 }
@@ -338,7 +344,7 @@ pub fn state(spec: &ModelSpec) -> State {
 /// 返回 true，而链接指向的东西完全不受我们控制。目录同理——
 /// `~/.agentear/models/xxx.bin/` 这么个目录会让「已就绪」判成真，
 /// 然后 whisper 在加载时报一个没人看得懂的错。
-fn is_present(p: &Path) -> bool {
+pub(crate) fn is_present(p: &Path) -> bool {
     fs::symlink_metadata(p).is_ok_and(|m| m.is_file() && m.len() > 0)
 }
 
@@ -538,6 +544,85 @@ fn run(spec: &ModelSpec, on_verify: fn(&Path) -> Result<()>) -> Result<()> {
 /// 不引 HTTP 客户端依赖：一个 reqwest 会带进上百个传递依赖和一整套 TLS 栈，
 /// 只为下一个文件。curl 是 macOS 自带的，还免费附送断点续传和重定向处理。
 fn fetch(spec: &ModelSpec, part: &Path) -> Result<()> {
+    let bytes = spec.bytes;
+    fetch_url(
+        spec.url,
+        bytes,
+        part,
+        &|len| {
+            if bytes > 0 {
+                let pct = (len.saturating_mul(100) / bytes).min(99) as u8;
+                PCT.store(pct, Ordering::Relaxed);
+            }
+        },
+        None,
+    )?;
+    PCT.store(100, Ordering::Relaxed);
+    Ok(())
+}
+
+/// 正在跑的 curl 的 pid。**退出时要收掉它们**：curl 是子进程，我们被 kill /
+/// 从菜单退出时它不会跟着死，会在后台继续往 `.part` 里写——下次启动的新 curl
+/// 又从断点续写同一个文件，两个写者抢一个文件（2026-09-26 实测复现：
+/// `kill -INT` 之后 curl 还在跑，重跑后出现两个 curl 写同一个 `.part`）。
+///
+/// 用固定长度的原子槽位而不是 `Mutex<Vec>`：信号处理函数里只能 `kill(2)`，
+/// 不能锁、不能分配（`sidecar::on_signal` 的规矩）。同时在跑的下载最多是
+/// 泰语 + 两档 Qwen3，4 个槽够用；满了只打日志（退出时那一个收不掉，不影响下载本身）。
+static CURL_PIDS: [std::sync::atomic::AtomicI32; 4] = [
+    std::sync::atomic::AtomicI32::new(0),
+    std::sync::atomic::AtomicI32::new(0),
+    std::sync::atomic::AtomicI32::new(0),
+    std::sync::atomic::AtomicI32::new(0),
+];
+
+fn register_curl(pid: i32) -> Option<usize> {
+    for (i, slot) in CURL_PIDS.iter().enumerate() {
+        if slot.compare_exchange(0, pid, Ordering::SeqCst, Ordering::SeqCst).is_ok() {
+            return Some(i);
+        }
+    }
+    log::warn!("curl pid 槽位已满，这个下载在退出时不会被自动收掉");
+    None
+}
+
+/// 收掉所有正在跑的 curl。**async-signal-safe**（只读原子量 + `kill(2)`），
+/// 信号处理函数、菜单退出、重启三条路都调它。`.part` 保留，下次从断点续。
+pub fn kill_curls() {
+    for slot in CURL_PIDS.iter() {
+        let pid = slot.load(Ordering::SeqCst);
+        if pid > 0 {
+            unsafe { libc::kill(pid, libc::SIGTERM) };
+        }
+    }
+}
+
+/// 登记在 `CURL_PIDS` 里的那一格，出作用域就清掉（正常结束 / 出错 / 取消都一样）。
+struct CurlSlot(Option<usize>);
+
+impl Drop for CurlSlot {
+    fn drop(&mut self) {
+        if let Some(i) = self.0 {
+            CURL_PIDS[i].store(0, Ordering::SeqCst);
+        }
+    }
+}
+
+/// [`fetch`] 的通用版：不绑 `ModelSpec`、不碰本模块的全局进度，
+/// 进度交给 `on_progress(当前 .part 字节数)`，并支持取消。
+///
+/// 给 `qwen3.rs`（多文件、按模型分开的状态）用——**协议一个字都没变**：
+/// 同一套 curl 参数、同一个超量掐断、同一套续传失败清理。
+///
+/// `cancel` 置位后在下一次轮询（≤400ms）时掐掉 curl，**保留 `.part`**，
+/// 返回 `Fail::Cancelled`——下次再点下载就从断点续。
+pub(crate) fn fetch_url(
+    url: &str,
+    expected_bytes: u64,
+    part: &Path,
+    on_progress: &dyn Fn(u64),
+    cancel: Option<&std::sync::atomic::AtomicBool>,
+) -> Result<()> {
     let mut child = Command::new("/usr/bin/curl")
         .arg("-fL")           // 4xx/5xx 返回非零；跟随重定向（GitHub Release 一律 302 到 CDN）
         .arg("-C").arg("-")   // 断点续传
@@ -555,11 +640,12 @@ fn fetch(spec: &ModelSpec, part: &Path) -> Result<()> {
         // `-s` 关掉进度条，`-S` 保证真出错时错误信息仍然写出来。
         .arg("-sS")
         .arg("-o").arg(part)
-        .arg(spec.url)
+        .arg(url)
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::piped())
         .spawn()
         .map_err(|e| anyhow::Error::new(Fail::Network).context(format!("启动 curl 失败: {e}")))?;
+    let _slot = CurlSlot(register_curl(child.id() as i32));
 
     // 即便关了进度条，stderr 也必须有人读——错误信息本身也可能写满管道，
     // 而且我们要拿它做诊断（原来的实现把它丢了，日志里只剩一个退出码）。
@@ -595,24 +681,26 @@ fn fetch(spec: &ModelSpec, part: &Path) -> Result<()> {
         match child.try_wait() {
             Ok(Some(s)) => break s,
             Ok(None) => {
+                if cancel.is_some_and(|c| c.load(Ordering::SeqCst)) {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(anyhow::Error::new(Fail::Cancelled).context("用户取消了下载"));
+                }
                 if let Ok(m) = fs::metadata(part) {
                     // 硬上限：坏端点或被劫持的重定向可能一直往外吐数据，
                     // 而体积检查在 curl 结束后才做——那时磁盘可能已经满了。
                     // 留 1 MB 容差，超了就掐掉。
-                    if m.len() > spec.bytes.saturating_add(1 << 20) {
+                    if m.len() > expected_bytes.saturating_add(1 << 20) {
                         let _ = child.kill();
                         let _ = child.wait();
                         let _ = fs::remove_file(part);
                         return Err(anyhow::Error::new(Fail::Network).context(format!(
                             "服务端吐出的数据超过声明体积（{} > {}），已中止",
                             m.len(),
-                            spec.bytes
+                            expected_bytes
                         )));
                     }
-                    if spec.bytes > 0 {
-                        let pct = (m.len().saturating_mul(100) / spec.bytes).min(99) as u8;
-                        PCT.store(pct, Ordering::Relaxed);
-                    }
+                    on_progress(m.len());
                 }
                 std::thread::sleep(Duration::from_millis(400));
             }
@@ -643,8 +731,6 @@ fn fetch(spec: &ModelSpec, part: &Path) -> Result<()> {
         return Err(anyhow::Error::new(Fail::Network)
             .context(format!("curl 退出码 {code:?}: {}", stderr.trim())));
     }
-
-    PCT.store(100, Ordering::Relaxed);
     Ok(())
 }
 
@@ -652,7 +738,7 @@ fn fetch(spec: &ModelSpec, part: &Path) -> Result<()> {
 ///
 /// 失败只记日志：这是耐久性的加固，不是功能的前提。为它中断一次
 /// 已经成功的安装不划算。
-fn sync_dir(dir: &Path) {
+pub(crate) fn sync_dir(dir: &Path) {
     match fs::File::open(dir).and_then(|f| f.sync_all()) {
         Ok(()) => {}
         Err(e) => log::warn!("fsync {} 失败（不影响本次安装）: {e}", dir.display()),
@@ -662,13 +748,18 @@ fn sync_dir(dir: &Path) {
 /// 全量 SHA-256 校验。不匹配就删掉 `.part`——**不能留着续传**，
 /// 因为内容已经证明是错的，续传只会在错的基础上接着错。
 fn verify(part: &Path, spec: &ModelSpec) -> Result<()> {
+    verify_file(part, spec.sha256, spec.bytes)
+}
+
+/// [`verify`] 的通用版（不绑 `ModelSpec`）。语义相同：不匹配就删掉 `part`。
+pub(crate) fn verify_file(part: &Path, sha256: &str, bytes: u64) -> Result<()> {
     let size = fs::metadata(part)
         .map_err(|e| anyhow::Error::new(Fail::Io).context(format!("读 .part 失败: {e}")))?
         .len();
-    if spec.bytes > 0 && size != spec.bytes {
+    if bytes > 0 && size != bytes {
         let _ = fs::remove_file(part);
         return Err(anyhow::Error::new(Fail::Checksum)
-            .context(format!("体积不符：期望 {} 字节，实得 {size}", spec.bytes)));
+            .context(format!("体积不符：期望 {bytes} 字节，实得 {size}")));
     }
 
     let mut f = fs::File::open(part)
@@ -685,11 +776,10 @@ fn verify(part: &Path, spec: &ModelSpec) -> Result<()> {
         h.update(&buf[..n]);
     }
     let got = format!("{:x}", h.finalize());
-    if got != spec.sha256 {
+    if got != sha256 {
         let _ = fs::remove_file(part);
         return Err(anyhow::Error::new(Fail::Checksum).context(format!(
-            "sha256 不符：期望 {}，实得 {got}",
-            spec.sha256
+            "sha256 不符：期望 {sha256}，实得 {got}"
         )));
     }
     log::info!("校验通过 sha256={}", &got[..12]);
@@ -698,7 +788,7 @@ fn verify(part: &Path, spec: &ModelSpec) -> Result<()> {
 
 /// 下载前查磁盘。留 10% 余量——文件系统本身要开销，塞到一个字节不剩
 /// 也不是好事。
-fn ensure_space(dir: &Path, need: u64) -> Result<()> {
+pub(crate) fn ensure_space(dir: &Path, need: u64) -> Result<()> {
     let avail = available_bytes(dir).unwrap_or(u64::MAX);
     let want = need.saturating_add(need / 10);
     if avail < want {
@@ -725,10 +815,10 @@ fn available_bytes(dir: &Path) -> Option<u64> {
 
 /// `flock` 包装。进程退出（包括崩溃）时内核自动释放，不会留下死锁。
 #[derive(Debug)]
-struct FileLock(fs::File);
+pub(crate) struct FileLock(fs::File);
 
 impl FileLock {
-    fn acquire(path: &Path) -> Result<Self> {
+    pub(crate) fn acquire(path: &Path) -> Result<Self> {
         let f = fs::OpenOptions::new()
             .create(true)
             .write(true)
@@ -760,6 +850,7 @@ impl std::fmt::Display for Fail {
             Fail::Disk => "磁盘空间不足",
             Fail::Busy => "另一个进程正在下载",
             Fail::Io => "文件系统错误",
+            Fail::Cancelled => "已取消",
         };
         f.write_str(s)
     }
