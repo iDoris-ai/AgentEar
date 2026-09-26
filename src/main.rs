@@ -12,6 +12,7 @@ mod audio;
 mod config;
 mod commands;
 mod correct;
+mod cue;
 mod deliver;
 mod hotkey;
 mod i18n;
@@ -464,6 +465,51 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
+    // ---- 录音提示音：试听 / 导出波形 ----
+    //
+    // `--cue <名字>` 直接播一声（不看 `record_cue` 开关，方便关着时也能试听）；
+    // `--cue-wav <名字> <out.wav> [--rate 16000]` 把**守护进程播的同一段波形**
+    // 写成文件——`scripts/cue-asr-check.py` 拿它混进录音，实测 ASR 会不会被它带偏。
+    // 名字：start / start-conversation / upgrade / end / end-conversation。
+    if args.iter().any(|a| a == "--cue" || a == "--cue-wav") {
+        let wav_mode = args.iter().any(|a| a == "--cue-wav");
+        let flag = if wav_mode { "--cue-wav" } else { "--cue" };
+        let rest = args_after(&args, flag);
+        let name = rest.first().copied().unwrap_or("");
+        let c = cue::Cue::from_name(name).ok_or_else(|| {
+            let names: Vec<_> = cue::Cue::ALL.iter().map(|c| c.name()).collect();
+            anyhow::anyhow!("{flag} 要跟一个名字：{}", names.join(" / "))
+        })?;
+        if wav_mode {
+            let out = rest.get(1).copied().ok_or_else(|| anyhow::anyhow!("--cue-wav 还要一个输出路径"))?;
+            let rate: u32 = match flag_value(&args, "--rate") {
+                Some(v) => v.parse().context("--rate 要是整数")?,
+                None => 16_000,
+            };
+            std::fs::write(out, cue::wav_bytes(c, rate)).with_context(|| format!("写 {out} 失败"))?;
+            println!("{}：{}ms @ {rate} Hz → {out}", c.name(), c.duration_ms());
+        } else {
+            // `--repeat N`：同一进程里连播 N 次，量「复用」路径的延迟——
+            // 守护进程里除了第一声，走的都是这条。
+            let n: u32 = match flag_value(&args, "--repeat") {
+                Some(v) => v.parse().context("--repeat 要是整数")?,
+                None => 1,
+            };
+            // `--gap-ms`：两次之间等多久。量「闲置一阵之后再按」是不是又变慢。
+            let gap: u64 = match flag_value(&args, "--gap-ms") {
+                Some(v) => v.parse().context("--gap-ms 要是整数")?,
+                None => 300,
+            };
+            for _ in 0..n.max(1) {
+                cue::play(c);
+                // 播放在专用线程上是异步的；进程退出会把它一起带走，所以等它播完。
+                std::thread::sleep(Duration::from_millis(c.duration_ms() as u64 + gap));
+            }
+            println!("{}（{}ms）×{}", c.name(), c.duration_ms(), n.max(1));
+        }
+        return Ok(());
+    }
+
     // ---- 语音指令表：列 / 加 / 用录音加 ----
     //
     // 「录一条语音定义指令」的落点：**录的那句话先过 ASR 变成触发短语**，
@@ -804,6 +850,10 @@ fn main() -> Result<()> {
     // 「按 Ctrl+Shift+R 毫无反应」的原因。
     // 所以：状态机放工作线程，主线程只负责 run loop。
     let rx = listener.take_receiver();
+    // 提示音线程先起、波形先构造好——否则开机后第一下提示音会晚约 100ms。
+    // 开关关着也照样预热：代价是一条空闲线程 + 几十 KB，换来设置里
+    // 随时打开都立刻跟手。
+    cue::warm_up();
     std::thread::spawn(move || {
         if let Err(e) = worker(rx, store, asr) {
             log::error!("工作线程退出: {e:#}");
@@ -907,12 +957,18 @@ fn worker(
             // **手势 → 动作** 的判定在 `hotkey::intent` 里（纯函数、有真值表），
             // 这里只负责执行。放那边是因为「双击写成两次单击」这种错
             // 只有真按键能暴露，而真按键在单测里造不出来。
-            match hotkey::intent(signal, recording) {
+            let intent = hotkey::intent(signal, recording);
+            // 提示音按**动作之前**的模式判（见 `cue::for_intent`）。
+            // 结束音不在这里响，在 `finish()` 里关掉麦克风之后响。
+            let beep = cue::for_intent(intent, config::get().talk_mode);
+            match intent {
                 // 正在录音时收到双击：只切模式，**不要停**——否则「快速点两下」
                 // 会把刚开的那段录成 0.2 秒碎片（会被当噪音丢掉）。
                 hotkey::Intent::SwitchToConversation => {
                     log::info!("双击右 Command → 切到对话模式（这一段继续录）");
                     set_mode(config::TalkMode::Conversation);
+                    // 补一声，和第一下的开始音凑成「嘟、嘟」。
+                    record_cue(beep);
                 }
                 hotkey::Intent::End => {
                     log::debug!("收到触发事件：结束这一段");
@@ -950,6 +1006,9 @@ fn worker(
                     state = match begin(&store) {
                         Ok(s) => {
                             last_heartbeat = Instant::now();
+                            // **麦克风真的开了才响**：jason 要的是「告诉我话筒打开了」，
+                            // 开麦失败时响一声就是在报喜不报忧。没听到声 = 没在录。
+                            record_cue(beep);
                             s
                         }
                         Err(e) => {
@@ -969,6 +1028,16 @@ fn worker(
     // 「退出前收尾」可写：挂在 loop 之后的清理代码是死代码。
     // 通话的统计因此每轮就写进日志（见 `answer_out_loud` 的 info 行），
     // 而不是等一个永远不会到来的退出点。
+}
+
+/// 响一声录音提示音；设置里关掉了（`record_cue: false`）就不响。
+/// 每次现读配置，设置窗口里切一下立刻生效。
+fn record_cue(cue: Option<cue::Cue>) {
+    if let Some(c) = cue {
+        if config::get().record_cue {
+            cue::play(c);
+        }
+    }
 }
 
 fn begin(store: &store::Store) -> Result<State> {
@@ -1012,6 +1081,10 @@ fn finish(state: State, store: &store::Store, asr: &dyn engine::AsrEngine) -> Re
         session.write(&tail)?;
     }
     drop(recorder);
+    // 结束音在**关掉麦克风之后**响——早于这里就会被录进这一段的结尾。
+    // 过短丢弃 / 按键确认那条路也照样响：麦克风确实关了，声音如实反映这件事。
+    // 模式在结束时不会变，所以就按此刻的模式挑（与 `cue::for_intent(End)` 同一判据）。
+    record_cue(Some(cue::end_for(config::get().talk_mode)));
 
     let secs = session.duration_secs();
     if secs < 0.3 {

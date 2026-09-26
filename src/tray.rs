@@ -106,6 +106,7 @@ const TAG_START_SIDECAR: isize = 7;
 const TAG_OPEN_COMMANDS: isize = 8;
 const TAG_OPEN_SETTINGS: isize = 9;
 const TAG_LAUNCH_AT_LOGIN: isize = 10;
+const TAG_RECORD_CUE: isize = 11;
 /// `+0` 是「系统默认」，`+1..` 对应 `DEVICE_SNAPSHOT` 的下标。
 const TAG_DEVICE_BASE: isize = 1000;
 
@@ -705,6 +706,16 @@ fn handle(tag: isize, mtm: MainThreadMarker) {
             // 不用把 `on` 带进闭包。
             std::thread::spawn(crate::launch_agent::apply);
         }
+        TAG_RECORD_CUE => {
+            let on = !config::get().record_cue;
+            config::update(|c| c.record_cue = on);
+            log::info!("录音提示音：{}", if on { "开" } else { "关" });
+            // 打开时当场响一声，让人知道打开的是什么——
+            // 比读文案更直接，也顺便确认了这台机器的输出设备能出声。
+            if on {
+                crate::cue::play(crate::cue::Cue::StartInput);
+            }
+        }
         TAG_START_SIDECAR => {
             let cfg = config::get();
             let url = cfg.llm_url.clone().unwrap_or_else(|| crate::correct::DEFAULT_URL.to_string());
@@ -1071,10 +1082,10 @@ fn build_settings_content(
         None
     };
 
-    // 行数固定：勾选×2 + 边车状态(可能为空) + 保留期 + 4 个按钮。
+    // 行数固定：勾选×3 + 边车状态(可能为空) + 保留期 + 4 个按钮。
     // 边车状态那一行**即使是空文案也占位**——用固定行数换布局代码简单，
     // 空标签不可见，视觉上跟"少一行"没区别。
-    let rows = 2 + 1 + 1 + 4;
+    let rows = 3 + 1 + 1 + 4;
     let content_h = MARGIN * 2.0 + rows as f64 * ROW_H + (rows - 1) as f64 * ROW_GAP;
     window.setContentSize(NSSize::new(SETTINGS_WIDTH, content_h));
 
@@ -1093,6 +1104,14 @@ fn build_settings_content(
         i18n::t(lang, Key::LaunchAtLogin),
         TAG_LAUNCH_AT_LOGIN,
         cfg.launch_at_login,
+        next_row(),
+    ));
+    content.addSubview(&checkbox(
+        mtm,
+        &target,
+        i18n::t(lang, Key::RecordCue),
+        TAG_RECORD_CUE,
+        cfg.record_cue,
         next_row(),
     ));
     content.addSubview(&checkbox(
