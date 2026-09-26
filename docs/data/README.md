@@ -14,6 +14,7 @@ ADR-0004 的数字从这里来。**保留逐样本数据**，免得只剩一张�
 | `thai-coldstart-raw.txt` | 载入时间 / 端到端墙钟 / RSS（whisper vs SenseVoice） | 见文件尾的命令。**脚本原样输出** |
 | `thai-rtf-repeat.txt` | 同一模型重复三次的 RTF | `scripts/bench-thai.sh <模型>` 连跑三次。⚠️ **人工汇总**，不是原样输出 |
 | `asr-zh-en-2026-09/` | T3.5.1 中英 ASR 横比：子集 manifest、逐条转写（`hyp/`，3 次运行）、打分输出 `score.md`、性能 `perf-raw.tsv`、sample02 对账 `sample02-score.md` | `scripts/asr-zhen-score.py` 直接重算（**不跑推理，输出与 `score.md` 逐字一致**）；推理与性能见 `docs/benchmarks-asr-zh-en.md` §8。**脚本原样输出** |
+| `qwen3-asr-runtime-2026-09/` | T3.5.6 调研：speech-swift 预编译包 / `QWEN3_ASR_CACHE_DIR` / 断网 / speech-server 与 llama-server 常驻时延与 RSS 的原始命令与输出（`RAW.md`） | **不可一键重算**：依赖当天的上游 release 与本机缓存；命令都在文件里，照抄可复跑。**单条样本，只说明量级，不说明准确率**（准确率见 `asr-zh-en-2026-09/`） |
 | `cue-asr-2026-09/` | v0.21.0 录音提示音会不会把 ASR 带偏：`results.tsv`（每格 3 次的原始转写）、`summary.md`（判定表）。**数字混音，不是声学路径** | `scripts/cue-asr-check.py --agentear target/release/agentear --out docs/data/cue-asr-2026-09`（要 `vendor/` 与泰语模型；会重跑推理）。**脚本原样输出** |
 | `thai-cer-stats.txt` | CI 与配对比较 | `scripts/cer-stats.py docs/data/thai-cer-per-sample 4000` — 除开头 3 行说明外**逐字节一致，已验**。⚠️ 它会 **exit 4**：这六份结果产出于指纹机制之前，「跑在同一批录音上」这个前提无法事后验证 |
 
