@@ -817,6 +817,15 @@ pub fn install_signal_handlers() {
         // 漏了的话 `Ctrl+C` 之后会留下两个常驻约 4 GB 的进程。
         // 这里只做 `kill(2)`，符合 async-signal-safe。
         crate::talk::kill_spawned_pids_from_signal();
+        // SIGTERM 以退出码 0 结束。开机自启的 plist 是
+        // `KeepAlive = { SuccessfulExit = false }`（异常退出才拉起），
+        // 而「被信号杀死」在 launchd 眼里不算成功退出：不这么改的话，
+        // 用户在终端 `kill <pid>` 想停掉它，launchd 会在 10 秒后把它拉回来。
+        // `_exit` 是 async-signal-safe 的。SIGINT（终端 Ctrl+C）不受
+        // launchd 管，保持原来的默认语义。
+        if sig == libc::SIGTERM {
+            unsafe { libc::_exit(0) };
+        }
         // 恢复默认行为再把信号发给自己，保持正常的退出语义
         unsafe {
             libc::signal(sig, libc::SIG_DFL);
