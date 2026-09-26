@@ -2069,6 +2069,7 @@ pub fn restart_self() {
     sidecar::shutdown();
     talk::shutdown_spawned();
     qwen3::stop_server("进程重启");
+    download::kill_curls();
 
     let target = format!("gui/{}/{}", unsafe { libc::getuid() }, LAUNCHD_LABEL);
     let managed = std::process::Command::new("/bin/launchctl")

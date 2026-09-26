@@ -285,7 +285,9 @@ pub fn state(m: Qwen3Model) -> State {
                 return State::Downloading(pct);
             }
             3 => return State::Verifying,
-            2 => return State::Failed(job.fail),
+            // 失败 / 取消之后，模型可能已被别的途径装好（终端里的 --fetch-qwen3）——
+            // 那时继续显示「失败」就是在骗人。
+            2 if !is_ready(m) => return State::Failed(job.fail),
             _ => {}
         }
     }
@@ -497,6 +499,19 @@ fn install(m: Qwen3Model, cancel: &AtomicBool) -> Result<()> {
     }
 
     let _lock = lock_wait(&root.join(format!("{}.lock", m.dir_name())), cancel)?;
+    // 拿到锁之后**重新判断**：等锁期间另一个进程（终端里的 --fetch-qwen3 和 .app 同时开着）
+    // 可能已经装完了，上面那份「缺哪些文件」已经过时——不重算会白下几百 MB。
+    if model_installed(m) {
+        log::info!("{} 已被另一个进程装好，跳过", m.label());
+        return Ok(());
+    }
+    let missing: Vec<&FileSpec> = missing
+        .into_iter()
+        .filter(|f| {
+            let p = mdir.join(f.name);
+            !(download::is_present(&p) && fs::symlink_metadata(&p).is_ok_and(|x| x.len() == f.bytes))
+        })
+        .collect();
     let file_staging = staging.join(m.dir_name());
     fs::create_dir_all(&file_staging)
         .map_err(|e| io_err(format!("建 {} 失败: {e}", file_staging.display())))?;
@@ -862,6 +877,9 @@ fn ensure_server_locked(slot: &mut Option<Server>, m: Qwen3Model) -> Result<u16>
     if let Some(s) = slot.as_mut() {
         let alive = matches!(s.child.try_wait(), Ok(None));
         if alive && s.model == m {
+            // 请求开始时就刷新：空闲回收按「最后一次使用」算，一个正好在超时边上
+            // 开始的请求不该在半路被回收。
+            s.last_used = Instant::now();
             return Ok(s.port);
         }
         if alive {

@@ -561,6 +561,53 @@ fn fetch(spec: &ModelSpec, part: &Path) -> Result<()> {
     Ok(())
 }
 
+/// 正在跑的 curl 的 pid。**退出时要收掉它们**：curl 是子进程，我们被 kill /
+/// 从菜单退出时它不会跟着死，会在后台继续往 `.part` 里写——下次启动的新 curl
+/// 又从断点续写同一个文件，两个写者抢一个文件（2026-09-26 实测复现：
+/// `kill -INT` 之后 curl 还在跑，重跑后出现两个 curl 写同一个 `.part`）。
+///
+/// 用固定长度的原子槽位而不是 `Mutex<Vec>`：信号处理函数里只能 `kill(2)`，
+/// 不能锁、不能分配（`sidecar::on_signal` 的规矩）。同时在跑的下载最多是
+/// 泰语 + 两档 Qwen3，4 个槽够用；满了只打日志（退出时那一个收不掉，不影响下载本身）。
+static CURL_PIDS: [std::sync::atomic::AtomicI32; 4] = [
+    std::sync::atomic::AtomicI32::new(0),
+    std::sync::atomic::AtomicI32::new(0),
+    std::sync::atomic::AtomicI32::new(0),
+    std::sync::atomic::AtomicI32::new(0),
+];
+
+fn register_curl(pid: i32) -> Option<usize> {
+    for (i, slot) in CURL_PIDS.iter().enumerate() {
+        if slot.compare_exchange(0, pid, Ordering::SeqCst, Ordering::SeqCst).is_ok() {
+            return Some(i);
+        }
+    }
+    log::warn!("curl pid 槽位已满，这个下载在退出时不会被自动收掉");
+    None
+}
+
+/// 收掉所有正在跑的 curl。**async-signal-safe**（只读原子量 + `kill(2)`），
+/// 信号处理函数、菜单退出、重启三条路都调它。`.part` 保留，下次从断点续。
+pub fn kill_curls() {
+    for slot in CURL_PIDS.iter() {
+        let pid = slot.load(Ordering::SeqCst);
+        if pid > 0 {
+            unsafe { libc::kill(pid, libc::SIGTERM) };
+        }
+    }
+}
+
+/// 登记在 `CURL_PIDS` 里的那一格，出作用域就清掉（正常结束 / 出错 / 取消都一样）。
+struct CurlSlot(Option<usize>);
+
+impl Drop for CurlSlot {
+    fn drop(&mut self) {
+        if let Some(i) = self.0 {
+            CURL_PIDS[i].store(0, Ordering::SeqCst);
+        }
+    }
+}
+
 /// [`fetch`] 的通用版：不绑 `ModelSpec`、不碰本模块的全局进度，
 /// 进度交给 `on_progress(当前 .part 字节数)`，并支持取消。
 ///
@@ -598,6 +645,7 @@ pub(crate) fn fetch_url(
         .stderr(std::process::Stdio::piped())
         .spawn()
         .map_err(|e| anyhow::Error::new(Fail::Network).context(format!("启动 curl 失败: {e}")))?;
+    let _slot = CurlSlot(register_curl(child.id() as i32));
 
     // 即便关了进度条，stderr 也必须有人读——错误信息本身也可能写满管道，
     // 而且我们要拿它做诊断（原来的实现把它丢了，日志里只剩一个退出码）。

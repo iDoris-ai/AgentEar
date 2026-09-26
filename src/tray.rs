@@ -855,6 +855,7 @@ fn handle(tag: isize, mtm: MainThreadMarker) {
             crate::sidecar::shutdown();
             crate::talk::shutdown_spawned();
             crate::qwen3::stop_server("退出 AgentEar");
+            crate::download::kill_curls();
             NSApplication::sharedApplication(mtm).terminate(None);
         }
         t if (TAG_TRIGGER_BASE..TAG_TRIGGER_BASE + 2).contains(&t) => {
@@ -1385,7 +1386,12 @@ fn refresh_qwen3_rows(lang: Lang) {
                 }
             }
         }
-        let intent = *QWEN3_INTENT.lock().unwrap_or_else(|e| e.into_inner());
+        // 意图只在「真的正在为它下载 / 校验」时才决定下拉框的选中项：下载失败或取消后，
+        // 实际在用的仍是配置里那个引擎，下拉框停在没装好的那一档就是误导。
+        let intent = QWEN3_INTENT
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .filter(|m| matches!(qwen3::state(*m), download::State::Downloading(_) | download::State::Verifying));
         rows.popup
             .selectItemAtIndex(engine_popup_index(cfg.asr_backend, cfg.qwen3_model, intent) as isize);
         for (m, (label, button)) in Qwen3Model::ALL.iter().zip(rows.rows.iter()) {
