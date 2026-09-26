@@ -802,28 +802,164 @@ impl Engines {
     }
 }
 
-/// 探活：这个地址上有没有东西在听，而且是 HTTP。
+/// 通话边车端点的三种状态。**判据照抄 `sidecar.rs::Health`**（2026-09-26 补）。
 ///
-/// **只回答「通不通」**，不判断对面是不是对的服务——那要看 `/health` 的
-/// 内容（`services/tts` 会报 `backend`/`model`）。这里给 `--diagnose` 用的，
-/// 它要回答的是用户那句「按了没反应」背后最常见的原因：边车没起。
-pub fn probe_endpoint(url: &str) -> Result<()> {
+/// 早先只分「活 / 没活」（`curl -f` 成功与否），于是 jason 实测撞上的情形——
+/// **TTS 默认端口 8765 被另一个 app 占着、对 `/health` 回 HTTP 401**——被当成
+/// 「边车没起」→ 去拉起 → `serve-tts.sh` 发现端口被占立刻退出 →
+/// 日志只剩「启动后立刻退出」「90s 内没就绪」，**真正的原因（端口被别人占了）
+/// 一个字都没有**，而对话模式那一轮就这么没有声音。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EndpointHealth {
+    /// `/health` 回了 2xx。
+    Up,
+    /// 连接被拒——那个地址上**确实没人在听**。只有这一档才允许拉起。
+    Down,
+    /// 有东西在听，但不是能用的边车：HTTP 4xx/5xx、超时、空回复、协议错……
+    ///
+    /// ⚠️ 这一档**故意宽**：它的后果是「不拉起」，而误判成 `Down` 的后果是
+    /// 往一个已被占用的端口再起一个服务，真正的问题被「启动失败」盖住。
+    WrongService,
+}
+
+/// 纯函数：curl 退出码 + HTTP 状态码 → 三种状态。
+///
+/// | curl 退出码 | HTTP 状态 | 判成 |
+/// |---|---|---|
+/// | 0 | 2xx | `Up` |
+/// | 0 | 其余（401、404、500……） | `WrongService` |
+/// | 7（连接被拒） | — | `Down` |
+/// | 其余（28 超时、52 空回复、56 收包失败……） / 跑不起 curl | — | `WrongService` |
+pub fn classify_probe(curl_exit: Option<i32>, http_status: Option<u16>) -> EndpointHealth {
+    match curl_exit {
+        Some(0) => match http_status {
+            Some(s) if (200..300).contains(&s) => EndpointHealth::Up,
+            _ => EndpointHealth::WrongService,
+        },
+        Some(7) => EndpointHealth::Down,
+        _ => EndpointHealth::WrongService,
+    }
+}
+
+/// 探活一次，返回状态 + 一句给人看的细节（HTTP 状态码 / curl 的报错）。
+///
+/// **不用 `curl -f`**：`-f` 会把 4xx/5xx 变成「失败」，与「连不上」混为一谈——
+/// 这正是上面那条 bug 的来路。
+pub fn probe_health(url: &str) -> (EndpointHealth, String) {
     let health = format!("{}/health", url.trim_end_matches('/'));
     let out = Command::new("/usr/bin/curl")
-        .arg("-fsS")
-        .arg("--max-time")
-        .arg("3")
+        .args(["-sS", "-o", "/dev/null", "-w", "%{http_code}", "--max-time", "3"])
         .arg(&health)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .output()
-        .with_context(|| format!("跑 curl 失败（{health}）"))?;
-    if !out.status.success() {
-        let err = String::from_utf8_lossy(&out.stderr);
-        bail!("连不上（{}）", err.trim());
+        .output();
+    match out {
+        Err(e) => (EndpointHealth::WrongService, format!("跑 curl 失败（{health}）：{e}")),
+        Ok(o) => {
+            let status = String::from_utf8_lossy(&o.stdout).trim().parse::<u16>().ok();
+            let h = classify_probe(o.status.code(), status);
+            let detail = match h {
+                EndpointHealth::Up => format!("HTTP {}", status.unwrap_or(0)),
+                EndpointHealth::Down => "连接被拒（没有程序在听这个端口）".to_string(),
+                EndpointHealth::WrongService => match status {
+                    Some(s) if s != 0 => format!("有程序在听，但 /health 回了 HTTP {s}"),
+                    _ => format!(
+                        "有程序在听，但没有正常应答（{}）",
+                        String::from_utf8_lossy(&o.stderr).trim()
+                    ),
+                },
+            };
+            (h, detail)
+        }
     }
-    Ok(())
+}
+
+/// 只回答「能不能用」的旧接口，**`Ok` 只在 `Up` 时给**。`--diagnose` 以外的
+/// 调用方大多只关心这一句；要区分「没起」和「端口被占」请用 [`probe_health`]。
+pub fn probe_endpoint(url: &str) -> Result<()> {
+    match probe_health(url) {
+        (EndpointHealth::Up, _) => Ok(()),
+        (_, detail) => bail!("{detail}"),
+    }
+}
+
+/// 从 `http://127.0.0.1:8765` 这样的地址里取端口。没写端口时按协议给默认值。
+pub fn port_of(url: &str) -> Option<u16> {
+    let (scheme, rest) = url.split_once("://")?;
+    let authority = rest.split('/').next().unwrap_or("");
+    // 去掉 user:pass@
+    let host_port = authority.rsplit('@').next().unwrap_or(authority);
+    // IPv6 字面量 [::1]:8765
+    let port_part = if let Some(end) = host_port.find(']') {
+        host_port[end + 1..].strip_prefix(':')
+    } else {
+        host_port.rsplit_once(':').map(|(_, p)| p)
+    };
+    match port_part {
+        Some(p) => p.parse().ok(),
+        None => match scheme {
+            "http" => Some(80),
+            "https" => Some(443),
+            _ => None,
+        },
+    }
+}
+
+/// 谁在听这个端口：`lsof` 拿进程名与 pid。拿不到就 `None`（日志照样打，只是少这一段）。
+pub fn port_occupant(port: u16) -> Option<String> {
+    let out = Command::new("/usr/sbin/lsof")
+        .args(["-nP", &format!("-iTCP:{port}"), "-sTCP:LISTEN", "-Fpc"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+    parse_lsof_occupant(&String::from_utf8_lossy(&out.stdout))
+}
+
+/// `lsof -Fpc` 的输出是一行一个字段：`p<pid>` / `c<命令名>`。取第一个进程。
+fn parse_lsof_occupant(out: &str) -> Option<String> {
+    let mut pid = None;
+    let mut cmd = None;
+    for line in out.lines() {
+        if let Some(v) = line.strip_prefix('p') {
+            if pid.is_some() {
+                break; // 第二个进程开始了
+            }
+            pid = Some(v.to_string());
+        } else if let Some(v) = line.strip_prefix('c') {
+            cmd.get_or_insert_with(|| v.to_string());
+        }
+    }
+    match (cmd, pid) {
+        (Some(c), Some(p)) => Some(format!("{c}（pid {p}）")),
+        (Some(c), None) => Some(c),
+        (None, Some(p)) => Some(format!("pid {p}")),
+        (None, None) => None,
+    }
+}
+
+/// 端口被占时，**告诉用户该改哪里**——只说「被占了」等于没说。
+pub fn port_taken_hint(name: &str) -> &'static str {
+    match name {
+        "LLM" => "改 config.json 的 talk_llm_url，并在 talk_llm_start_command 里加 \
+                  AGENTEAR_TALK_LLM_PORT=<新端口>；或者关掉占着端口的那个程序",
+        _ => "改 config.json 的 tts_url，并在 talk_tts_start_command 里加 \
+              AGENTEAR_TTS_PORT=<新端口>；或者关掉占着端口的那个程序",
+    }
+}
+
+/// 一句完整的「端口被占」说明（给日志和 `--diagnose` 共用，两处措辞不许分叉）。
+pub fn describe_port_taken(name: &str, url: &str, detail: &str) -> String {
+    let who = port_of(url)
+        .and_then(port_occupant)
+        .map(|w| format!("，占着它的是 {w}"))
+        .unwrap_or_default();
+    format!(
+        "{name} 边车的地址 {url} 被别的程序占了（{detail}{who}）——不会去拉起。{}",
+        port_taken_hint(name)
+    )
 }
 
 /// 一个通话边车的规格：叫什么、连哪、连不上时按什么命令拉。
@@ -849,11 +985,17 @@ pub enum SidecarAction {
     CantStartNoCommand,
     /// 拉不了：用户把自动拉起关了。
     CantStartDisabled,
+    /// **不许拉**：那个端口上有别的程序（见 [`EndpointHealth::WrongService`]）。
+    /// 与 autostart / 命令无关——往一个被占的端口再起服务只会立刻失败，
+    /// 还把真正的原因盖住。
+    PortTaken,
 }
 
-pub fn sidecar_action(up: bool, autostart: bool, command: &[String]) -> SidecarAction {
-    if up {
-        return SidecarAction::AlreadyUp;
+pub fn sidecar_action(health: EndpointHealth, autostart: bool, command: &[String]) -> SidecarAction {
+    match health {
+        EndpointHealth::Up => return SidecarAction::AlreadyUp,
+        EndpointHealth::WrongService => return SidecarAction::PortTaken,
+        EndpointHealth::Down => {}
     }
     if !autostart {
         return SidecarAction::CantStartDisabled;
@@ -950,11 +1092,15 @@ const READY_TIMEOUT: Duration = Duration::from_secs(90);
 pub fn ensure_sidecars(cfg: &crate::config::Config) -> Vec<(&'static str, bool)> {
     let mut out = Vec::new();
     for spec in sidecar_specs(cfg) {
-        let up = probe_endpoint(&spec.url).is_ok();
-        match sidecar_action(up, cfg.talk_autostart, &spec.command) {
+        let (health, detail) = probe_health(&spec.url);
+        match sidecar_action(health, cfg.talk_autostart, &spec.command) {
             SidecarAction::AlreadyUp => {
                 log::info!("{} 边车已在跑：{}", spec.name, spec.url);
                 out.push((spec.name, true));
+            }
+            SidecarAction::PortTaken => {
+                log::error!("{}", describe_port_taken(spec.name, &spec.url, &detail));
+                out.push((spec.name, false));
             }
             SidecarAction::CantStartDisabled => {
                 log::warn!(
@@ -1007,24 +1153,188 @@ pub fn ensure_sidecars(cfg: &crate::config::Config) -> Vec<(&'static str, bool)>
 ///
 /// 90 秒的就绪等待放在主线程上，菜单栏会整整一分半不响应，
 /// 而用户此刻正在按录音键。
+///
+/// **已经有一次拉起在进行时不再起第二次**（2026-09-26 补）：连着双击两次
+/// 会让两条线程都探到「没起」、各拉一个，第二个撞端口立刻退出，日志一片红。
 pub fn ensure_sidecars_async(cfg: &crate::config::Config) {
+    if !STARTUP.try_begin() {
+        log::info!("边车正在拉起中，这次不重复拉");
+        return;
+    }
     let cfg = cfg.clone();
-    std::thread::spawn(move || {
-        let results = ensure_sidecars(&cfg);
-        let down: Vec<&str> = results
-            .iter()
-            .filter(|(_, up)| !up)
-            .map(|(name, _)| *name)
-            .collect();
-        if down.is_empty() {
-            log::info!("对话模式的边车都就绪了");
-        } else {
+    // 用 Builder 而不是 `thread::spawn`：后者起线程失败会 panic，而闸已经占上了——
+    // 那样后面每一轮对话都会白等满 TURN_STARTUP_WAIT。
+    let spawned = std::thread::Builder::new()
+        .name("talk-sidecars".into())
+        .spawn(move || {
+            // 放在 guard 里收尾：ensure 中途 panic 也要把闸放开，
+            // 否则后面每一轮对话都会白等满 TURN_STARTUP_WAIT。
+            let _done = StartupDone;
+            let results = ensure_sidecars(&cfg);
+            let down: Vec<&str> = results
+                .iter()
+                .filter(|(_, up)| !up)
+                .map(|(name, _)| *name)
+                .collect();
+            if down.is_empty() {
+                log::info!("对话模式的边车都就绪了");
+            } else {
+                log::warn!(
+                    "对话模式还缺 {} 边车——这一轮会只有文字没有声音（跑 --diagnose 看详情）",
+                    down.join(" / ")
+                );
+            }
+        });
+    if let Err(e) = spawned {
+        STARTUP.end();
+        log::error!("起边车检查线程失败：{e}——这次不拉边车");
+    }
+}
+
+/// 「边车正在被我们拉起」这件事的闸。**抽成结构体是为了能在测试里用局部实例**——
+/// 全局那一个会被并行跑的测试互相干扰。
+pub struct StartupGate {
+    in_flight: std::sync::Mutex<bool>,
+    cv: std::sync::Condvar,
+}
+
+/// 等拉起的结果。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StartupWait {
+    /// 没有拉起在进行，不用等。
+    NotStarting,
+    /// 等到它结束了（**结束 ≠ 成功**：拉起失败也算结束，下一步照常试、照常报错）。
+    Finished(Duration),
+    /// 等满上限还没结束。
+    TimedOut,
+}
+
+impl StartupGate {
+    pub const fn new() -> Self {
+        Self {
+            in_flight: std::sync::Mutex::new(false),
+            cv: std::sync::Condvar::new(),
+        }
+    }
+
+    /// 占闸。已经有一次在进行就返回 `false`。
+    pub fn try_begin(&self) -> bool {
+        let mut g = self.in_flight.lock().unwrap_or_else(|e| e.into_inner());
+        if *g {
+            return false;
+        }
+        *g = true;
+        true
+    }
+
+    /// 放闸并叫醒所有在等的回答线程。
+    pub fn end(&self) {
+        *self.in_flight.lock().unwrap_or_else(|e| e.into_inner()) = false;
+        self.cv.notify_all();
+    }
+
+    /// 如果有拉起在进行，最多等 `max`。
+    pub fn wait(&self, max: Duration) -> StartupWait {
+        let start = Instant::now();
+        let mut g = self.in_flight.lock().unwrap_or_else(|e| e.into_inner());
+        if !*g {
+            return StartupWait::NotStarting;
+        }
+        while *g {
+            let left = match max.checked_sub(start.elapsed()) {
+                Some(d) if !d.is_zero() => d,
+                _ => return StartupWait::TimedOut,
+            };
+            g = self
+                .cv
+                .wait_timeout(g, left)
+                .unwrap_or_else(|e| e.into_inner())
+                .0;
+        }
+        StartupWait::Finished(start.elapsed())
+    }
+}
+
+static STARTUP: StartupGate = StartupGate::new();
+
+struct StartupDone;
+impl Drop for StartupDone {
+    fn drop(&mut self) {
+        STARTUP.end();
+    }
+}
+
+/// 切进对话模式后第一轮最多等边车多久。
+///
+/// **不沿用 `READY_TIMEOUT`（90s）**：那是「边车最多给多久去加载」，
+/// 而这里是「用户说完话后愿意干等多久」。实测（2026-09-26，本机）LLM 冷启动
+/// 就绪 3.1s、TTS 8bit 约 10s，两个串行约 13s；30s 给了两倍多的余量。
+/// 超过它还没好，这一轮的用户早就不在等了——边车在后台照样继续起，
+/// **下一轮**能用，这一轮如实报错。
+pub const TURN_STARTUP_WAIT: Duration = Duration::from_secs(30);
+
+/// 每开一段录音就加一。回答线程用它判断「我等边车的这段时间里，
+/// 用户是不是已经开始说下一句了」。
+static RECORDING_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// 守护进程在「开始一段录音」时调用。
+pub fn note_recording_started() {
+    RECORDING_SEQ.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+}
+
+pub fn recording_seq() -> u64 {
+    RECORDING_SEQ.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+/// 等完边车之后这一轮还答不答。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TurnGo {
+    Proceed,
+    /// 等的期间用户已经开始下一段录音：这一轮的回答作废。
+    /// 不作废的话，迟到的回答会在用户**正在说话时**开始播放、还会被录进去。
+    Superseded,
+}
+
+/// 纯函数：等待结果 + 等之前/之后的录音序号 → 答不答。
+///
+/// 没等（`NotStarting`）时不看序号——那是今天之前的老路径，
+/// 行为一个字节都不改（LLM 本身慢导致的迟到回答不归这里管）。
+pub fn turn_after_wait(waited: StartupWait, seq_before: u64, seq_now: u64) -> TurnGo {
+    match waited {
+        StartupWait::NotStarting => TurnGo::Proceed,
+        _ if seq_now != seq_before => TurnGo::Superseded,
+        _ => TurnGo::Proceed,
+    }
+}
+
+/// **对话模式那一轮回答之前调用**（在回答线程里，不在 worker 线程里——
+/// 这里可能阻塞最多 [`TURN_STARTUP_WAIT`]）。返回 `false` = 这一轮不答了。
+///
+/// 修的是 jason 2026-09-26 实测的「双击进对话模式后第一轮没回答」：
+/// 双击那一刻才在后台拉边车，而这一轮说完、转写完（约 3 秒）就去请求 TTS，
+/// 那时 TTS 还在加载——**第一轮必然失败**。
+pub fn await_sidecars_for_turn(seq_before: u64) -> bool {
+    let waited = STARTUP.wait(TURN_STARTUP_WAIT);
+    match waited {
+        StartupWait::NotStarting => {}
+        StartupWait::Finished(d) => {
+            log::info!("这一轮先等边车拉起：等了 {:.1}s", d.as_secs_f32());
+        }
+        StartupWait::TimedOut => {
             log::warn!(
-                "对话模式还缺 {} 边车——这一轮会只有文字没有声音（跑 --diagnose 看详情）",
-                down.join(" / ")
+                "等边车拉起等满 {:?} 还没结束——这一轮照样去试（多半会失败，见下一条日志），\
+                 边车在后台继续起，下一轮应当能用",
+                TURN_STARTUP_WAIT
             );
         }
-    });
+    }
+    match turn_after_wait(waited, seq_before, recording_seq()) {
+        TurnGo::Proceed => true,
+        TurnGo::Superseded => {
+            log::info!("等边车的这段时间里已经开始了下一段录音——这一轮的回答作废，不去抢麦");
+            false
+        }
+    }
 }
 
 fn spawn_sidecar(name: &'static str, command: &[String]) -> Result<()> {
@@ -1855,14 +2165,182 @@ mod tests {
     /// 没声音，日志里却什么都没有。
     #[test]
     fn sidecar_action_covers_the_whole_matrix() {
+        use EndpointHealth::*;
         let cmd = vec!["/bin/true".to_string()];
-        assert_eq!(sidecar_action(true, false, &[]), SidecarAction::AlreadyUp);
-        assert_eq!(sidecar_action(true, true, &cmd), SidecarAction::AlreadyUp);
-        assert_eq!(sidecar_action(false, false, &cmd), SidecarAction::CantStartDisabled);
-        assert_eq!(sidecar_action(false, true, &[]), SidecarAction::CantStartNoCommand);
-        assert_eq!(sidecar_action(false, true, &cmd), SidecarAction::Start);
+        assert_eq!(sidecar_action(Up, false, &[]), SidecarAction::AlreadyUp);
+        assert_eq!(sidecar_action(Up, true, &cmd), SidecarAction::AlreadyUp);
+        assert_eq!(sidecar_action(Down, false, &cmd), SidecarAction::CantStartDisabled);
+        assert_eq!(sidecar_action(Down, true, &[]), SidecarAction::CantStartNoCommand);
+        assert_eq!(sidecar_action(Down, true, &cmd), SidecarAction::Start);
         // 已经在跑时，另外两个参数不该影响判断（别去动一个健康的服务）
-        assert_eq!(sidecar_action(true, true, &[]), SidecarAction::AlreadyUp);
+        assert_eq!(sidecar_action(Up, true, &[]), SidecarAction::AlreadyUp);
+        // **端口被别人占着：四种 autostart × 命令组合一律不拉**（2026-09-26 的 bug：
+        // 占用者回 401 被当成「没起」，拉起后撞端口立刻退出，原因被盖住）
+        for (auto, c) in [(true, &cmd[..]), (true, &[][..]), (false, &cmd[..]), (false, &[][..])] {
+            assert_eq!(sidecar_action(WrongService, auto, c), SidecarAction::PortTaken);
+        }
+    }
+
+    /// curl 退出码 × HTTP 状态 → 三种状态的真值表。**第一行就是 jason 撞上的那个**。
+    #[test]
+    fn classify_probe_truth_table() {
+        use EndpointHealth::*;
+        let rows: &[(Option<i32>, Option<u16>, EndpointHealth)] = &[
+            (Some(0), Some(401), WrongService), // Chat On Steroids 占着 8765，回 401
+            (Some(0), Some(200), Up),
+            (Some(0), Some(204), Up),
+            (Some(0), Some(404), WrongService),
+            (Some(0), Some(500), WrongService),
+            (Some(0), Some(302), WrongService),
+            (Some(0), None, WrongService), // 拿不到状态码：保守
+            (Some(0), Some(0), WrongService),
+            (Some(7), None, Down), // 连接被拒：只有这一档允许拉起
+            (Some(7), Some(0), Down),
+            (Some(28), None, WrongService), // 超时
+            (Some(52), None, WrongService), // 空回复
+            (Some(56), None, WrongService), // 收包失败
+            (None, None, WrongService),     // curl 被信号杀了
+        ];
+        for (code, status, want) in rows {
+            assert_eq!(classify_probe(*code, *status), *want, "curl={code:?} http={status:?}");
+        }
+    }
+
+    /// 真起一个回 401 的端口，**走真 curl**，确认判成 WrongService 而不是 Down。
+    #[test]
+    fn a_401_listener_is_wrong_service_not_down() {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let h = std::thread::spawn(move || {
+            if let Ok((mut s, _)) = listener.accept() {
+                let mut buf = [0u8; 1024];
+                let _ = s.read(&mut buf);
+                let body = r#"{"error":"unauthorised"}"#;
+                let _ = write!(
+                    s,
+                    "HTTP/1.1 401 Unauthorized\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+            }
+        });
+        let url = format!("http://127.0.0.1:{port}");
+        let (health, detail) = probe_health(&url);
+        h.join().unwrap();
+        assert_eq!(health, EndpointHealth::WrongService, "{detail}");
+        assert!(detail.contains("401"), "细节里要带上状态码：{detail}");
+        assert!(probe_endpoint(&url).is_err(), "旧接口对被占端口也必须报不可用");
+    }
+
+    /// 没人听的端口 = Down（先绑一个端口拿到号，再放掉）。
+    #[test]
+    fn a_closed_port_is_down() {
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        let (health, detail) = probe_health(&format!("http://127.0.0.1:{port}"));
+        assert_eq!(health, EndpointHealth::Down, "{detail}");
+    }
+
+    #[test]
+    fn port_of_reads_explicit_and_default_ports() {
+        assert_eq!(port_of("http://127.0.0.1:8765"), Some(8765));
+        assert_eq!(port_of("http://127.0.0.1:8766/"), Some(8766));
+        assert_eq!(port_of("http://localhost:8794/v1"), Some(8794));
+        assert_eq!(port_of("http://[::1]:8765"), Some(8765));
+        assert_eq!(port_of("http://user:pw@host:9000/x"), Some(9000));
+        assert_eq!(port_of("http://example.com"), Some(80));
+        assert_eq!(port_of("https://example.com/a"), Some(443));
+        assert_eq!(port_of("127.0.0.1:8765"), None, "没有协议头不猜");
+        assert_eq!(port_of("http://h:notaport"), None);
+    }
+
+    #[test]
+    fn lsof_occupant_is_parsed_from_field_output() {
+        assert_eq!(
+            parse_lsof_occupant("p59906\ncChat On Steroids\n").as_deref(),
+            Some("Chat On Steroids（pid 59906）")
+        );
+        // 两个进程只取第一个
+        assert_eq!(
+            parse_lsof_occupant("p1\ncA\np2\ncB\n").as_deref(),
+            Some("A（pid 1）")
+        );
+        assert_eq!(parse_lsof_occupant(""), None);
+    }
+
+    /// 「被占了」必须同时说出**该改哪里**。
+    #[test]
+    fn port_taken_message_says_what_to_change() {
+        let m = describe_port_taken("TTS", "http://127.0.0.1:1", "HTTP 401");
+        assert!(m.contains("tts_url") && m.contains("AGENTEAR_TTS_PORT"), "{m}");
+        assert!(m.contains("不会去拉起"), "{m}");
+        let m = describe_port_taken("LLM", "http://127.0.0.1:1", "HTTP 401");
+        assert!(m.contains("talk_llm_url") && m.contains("AGENTEAR_TALK_LLM_PORT"), "{m}");
+    }
+
+    // ---- 首轮与边车拉起赛跑（2026-09-26）----
+
+    #[test]
+    fn startup_gate_refuses_a_second_concurrent_start() {
+        let g = StartupGate::new();
+        assert!(g.try_begin());
+        assert!(!g.try_begin(), "拉起进行中不许再起第二次");
+        g.end();
+        assert!(g.try_begin(), "放闸之后可以再起");
+    }
+
+    #[test]
+    fn waiting_without_a_startup_returns_immediately() {
+        let g = StartupGate::new();
+        let t = Instant::now();
+        assert_eq!(g.wait(Duration::from_secs(5)), StartupWait::NotStarting);
+        assert!(t.elapsed() < Duration::from_millis(100));
+    }
+
+    /// **这条就是 bug 本身**：回答线程在拉起进行中进来，必须等到拉起结束才走。
+    #[test]
+    fn a_turn_waits_until_the_startup_finishes() {
+        let g = std::sync::Arc::new(StartupGate::new());
+        assert!(g.try_begin());
+        let g2 = g.clone();
+        let ender = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(300));
+            g2.end();
+        });
+        match g.wait(Duration::from_secs(5)) {
+            StartupWait::Finished(d) => {
+                assert!(d >= Duration::from_millis(250), "不能没等就走：{d:?}")
+            }
+            other => panic!("应当等到结束，实际 {other:?}"),
+        }
+        ender.join().unwrap();
+    }
+
+    #[test]
+    fn a_turn_gives_up_waiting_at_the_cap() {
+        let g = StartupGate::new();
+        assert!(g.try_begin());
+        let t = Instant::now();
+        assert_eq!(g.wait(Duration::from_millis(200)), StartupWait::TimedOut);
+        assert!(t.elapsed() >= Duration::from_millis(190));
+        assert!(t.elapsed() < Duration::from_secs(2), "上限要真的生效");
+    }
+
+    #[test]
+    fn a_late_answer_is_dropped_if_the_user_already_started_talking_again() {
+        use StartupWait::*;
+        use TurnGo::*;
+        let d = Duration::from_secs(1);
+        assert_eq!(turn_after_wait(NotStarting, 1, 1), Proceed);
+        // 没等过就不看序号：今天之前的老路径不改
+        assert_eq!(turn_after_wait(NotStarting, 1, 2), Proceed);
+        assert_eq!(turn_after_wait(Finished(d), 1, 1), Proceed);
+        assert_eq!(turn_after_wait(Finished(d), 1, 2), Superseded);
+        assert_eq!(turn_after_wait(TimedOut, 3, 3), Proceed);
+        assert_eq!(turn_after_wait(TimedOut, 3, 4), Superseded);
     }
 
     /// **按引擎派生，不是写死两个。** 用 mock LLM / say TTS 时那一路不需要边车，
