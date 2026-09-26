@@ -968,7 +968,7 @@
 - 加版本握手 + capability probe + CLI 输出契约测试；
   不兼容时**拒绝启动并给出可操作错误**，不要运行中静默错乱。
 
-### T3.5.6 Qwen3-ASR 可配置 + 按需自动下载  `READY`（2026-09-26 新增）
+### T3.5.6 Qwen3-ASR 可配置 + 按需自动下载  `BLOCKED`（2026-09-26 调研完成，待 jason 拍板 [ADR-0010](../decisions/0010-qwen3-asr-optional-backend.md) §6）
 - **来源**：Q4 的决定（jason 2026-09-26）——「ASR 本身就是要做成可配置的。
   默认用一个（随包的 SenseVoice），配置了另一个（如 Qwen3-ASR 1.7B）就自动下载下来用。」
 - **入口（jason 2026-09-26 定）**：模型的**选择与下载入口放在 v0.20.0 的原生设置窗口里**
@@ -982,6 +982,12 @@
 - **约束**：默认档不变（≤2 GiB，SenseVoice 随包）；高资源档三条准入（显式启用 /
   不随包 / 峰值 RSS 实测入库）照旧；每轮 +约 2s 冷启动是已知代价
   （[`benchmarks-asr-zh-en.md`](../benchmarks-asr-zh-en.md)），常驻服务形态未测。
+- **✅ 调研已完成（2026-09-26）→ [ADR-0010](../decisions/0010-qwen3-asr-optional-backend.md)（提议）**：
+  speech-swift 有**不依赖 brew 的预编译 release**（Apache-2.0，ad-hoc 签名）；
+  `QWEN3_ASR_CACHE_DIR` 可以让我们**自己下载、自己校验**权重，断网可用；
+  **常驻（`speech-server`）把每轮 1.77–1.82 s 压到 0.156–0.160 s**，代价常驻 2.43 GiB；
+  **GGUF 路径已出现**（`ggml-org/Qwen3-ASR-*-GGUF` + llama.cpp，热态 0.12 s / 2.95 GiB，
+  **准确率未测**），触发 ADR-0001 的重评条件。6 个拍板点见 ADR-0010 §6，拍板前不写代码。
 
 ---
 
