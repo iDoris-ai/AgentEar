@@ -108,6 +108,8 @@ pub enum Key {
     SettingsTitle,
     /// 开机自动启动开关（写 LaunchAgent）。
     LaunchAtLogin,
+    /// 录音开始/结束提示音开关（`cue.rs`）。
+    RecordCue,
 }
 
 /// 三种语言的文案。参数顺序固定 `(en, zh, th)`。
@@ -251,6 +253,12 @@ pub fn t(lang: Lang, key: Key) -> &'static str {
             "开机自动启动",
             "เปิดอัตโนมัติเมื่อเข้าระบบ",
         ),
+        K::RecordCue => pick(
+            lang,
+            "Recording Sounds (beep on start / stop)",
+            "录音提示音（开始 / 结束时嘟一声）",
+            "เสียงแจ้งเตือนการอัด (เริ่ม / หยุด)",
+        ),
     }
 }
 
@@ -335,7 +343,7 @@ fn fail_reason(lang: Lang, f: crate::download::Fail) -> &'static str {
 mod tests {
     use super::*;
 
-    const ALL_KEYS: [Key; 29] = [
+    const ALL_KEYS: [Key; 30] = [
         Key::StartRecording,
         Key::Transcribing,
         Key::TitleTranscribing,
@@ -365,6 +373,7 @@ mod tests {
         Key::OpenSettings,
         Key::SettingsTitle,
         Key::LaunchAtLogin,
+        Key::RecordCue,
     ];
 
     #[test]

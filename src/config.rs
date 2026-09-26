@@ -108,6 +108,17 @@ fn default_autostart() -> bool {
     true
 }
 
+/// 录音开始/结束提示音。**默认开**——jason 2026-09-26：按了键得知道它
+/// 真的在录（见 `cue.rs`）。旧配置里没有这个字段 = 开。
+fn default_record_cue() -> bool {
+    true
+}
+
+fn lenient_record_cue<'de, D: Deserializer<'de>>(d: D) -> Result<bool, D::Error> {
+    let v = serde_json::Value::deserialize(d)?;
+    Ok(serde_json::from_value(v).unwrap_or_else(|_| default_record_cue()))
+}
+
 /// 默认的拉起命令：**空**。
 ///
 /// ⚠️ 曾经默认成 `env!("CARGO_MANIFEST_DIR")/scripts/serve-llm.sh`，
@@ -141,6 +152,9 @@ pub struct Config {
     /// `launch_agent.rs::bundle_executable_path`。
     #[serde(deserialize_with = "lenient_launch_at_login")]
     pub launch_at_login: bool,
+    /// 录音开始/结束提示音（`cue.rs`）。设置窗口里的「录音提示音」。
+    #[serde(deserialize_with = "lenient_record_cue")]
+    pub record_cue: bool,
     /// 输入设备名。`None` = 跟随系统默认。
     ///
     /// 存名字而不是索引：设备顺序会随插拔变化，索引存下来就指错了。
@@ -463,6 +477,7 @@ impl Default for Config {
         Self {
             auto_paste: default_auto_paste(),
             launch_at_login: default_launch_at_login(),
+            record_cue: default_record_cue(),
             input_device: None,
             trigger: Trigger::RightCommand,
             retention_days: default_retention_days(),
@@ -819,6 +834,20 @@ mod tests {
         let c: Config = serde_json::from_str("{}").unwrap();
         assert!(c.auto_paste);
         assert_eq!(c.retention_days, 30);
+    }
+
+    /// 提示音默认开；旧配置缺字段 = 开；值写坏了也回到开，不连累其它字段。
+    #[test]
+    fn record_cue_defaults_on_and_is_lenient() {
+        assert!(Config::default().record_cue);
+        let c: Config = serde_json::from_str(r#"{"auto_paste": false}"#).unwrap();
+        assert!(c.record_cue);
+        assert!(!c.auto_paste);
+        let c: Config = serde_json::from_str(r#"{"record_cue": "yes", "auto_paste": false}"#).unwrap();
+        assert!(c.record_cue);
+        assert!(!c.auto_paste);
+        let c: Config = serde_json::from_str(r#"{"record_cue": false}"#).unwrap();
+        assert!(!c.record_cue);
     }
 
     #[test]

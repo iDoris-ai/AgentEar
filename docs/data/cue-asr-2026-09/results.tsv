@@ -1,0 +1,73 @@
+lang	variant	run	transcript
+zh	baseline	1	今天下午3点开会，记得带上电脑和充电器。
+zh	baseline	2	今天下午3点开会，记得带上电脑和充电器。
+zh	baseline	3	今天下午3点开会，记得带上电脑和充电器。
+zh	start@0	1	今天下午3点开会，记得带上电脑和充电器。
+zh	start@0	2	今天下午3点开会，记得带上电脑和充电器。
+zh	start@0	3	今天下午3点开会，记得带上电脑和充电器。
+zh	double(start@0+upgrade@350)	1	今天下午3点开会，记得带上电脑和充电器。
+zh	double(start@0+upgrade@350)	2	今天下午3点开会，记得带上电脑和充电器。
+zh	double(start@0+upgrade@350)	3	今天下午3点开会，记得带上电脑和充电器。
+zh	start-conversation@0	1	今天下午3点开会，记得带上电脑和充电器。
+zh	start-conversation@0	2	今天下午3点开会，记得带上电脑和充电器。
+zh	start-conversation@0	3	今天下午3点开会，记得带上电脑和充电器。
+zh	end@tail	1	今天下午3点开会，记得带上电脑和充电器。
+zh	end@tail	2	今天下午3点开会，记得带上电脑和充电器。
+zh	end@tail	3	今天下午3点开会，记得带上电脑和充电器。
+zh	silence-only(no cue, control)	1	
+zh	silence-only(no cue, control)	2	
+zh	silence-only(no cue, control)	3	
+zh	start-only(no speech)	1	
+zh	start-only(no speech)	2	
+zh	start-only(no speech)	3	
+zh	double-only(no speech)	1	
+zh	double-only(no speech)	2	
+zh	double-only(no speech)	3	
+en	baseline	1	Please remind me to call Alice tomorrow morning.
+en	baseline	2	Please remind me to call Alice tomorrow morning.
+en	baseline	3	Please remind me to call Alice tomorrow morning.
+en	start@0	1	Please remind me to call Alice tomorrow morning.
+en	start@0	2	Please remind me to call Alice tomorrow morning.
+en	start@0	3	Please remind me to call Alice tomorrow morning.
+en	double(start@0+upgrade@350)	1	Please remind me to call Alice tomorrow morning.
+en	double(start@0+upgrade@350)	2	Please remind me to call Alice tomorrow morning.
+en	double(start@0+upgrade@350)	3	Please remind me to call Alice tomorrow morning.
+en	start-conversation@0	1	Please remind me to call Alice tomorrow morning.
+en	start-conversation@0	2	Please remind me to call Alice tomorrow morning.
+en	start-conversation@0	3	Please remind me to call Alice tomorrow morning.
+en	end@tail	1	Please remind me to call Alice tomorrow morning.
+en	end@tail	2	Please remind me to call Alice tomorrow morning.
+en	end@tail	3	Please remind me to call Alice tomorrow morning.
+en	silence-only(no cue, control)	1	
+en	silence-only(no cue, control)	2	
+en	silence-only(no cue, control)	3	
+en	start-only(no speech)	1	
+en	start-only(no speech)	2	
+en	start-only(no speech)	3	
+en	double-only(no speech)	1	
+en	double-only(no speech)	2	
+en	double-only(no speech)	3	
+th	baseline	1	พรุ่งนี้เช้าช่วยเตือนให้โทรหาแม่ด้วย
+th	baseline	2	พรุ่งนี้เช้าช่วยเตือนให้โทรหาแม่ด้วย
+th	baseline	3	พรุ่งนี้เช้าช่วยเตือนให้โทรหาแม่ด้วย
+th	start@0	1	พรุ่งนี้เช้าช่วยเตือนให้โทรหาแม่ด้วย
+th	start@0	2	พรุ่งนี้เช้าช่วยเตือนให้โทรหาแม่ด้วย
+th	start@0	3	พรุ่งนี้เช้าช่วยเตือนให้โทรหาแม่ด้วย
+th	double(start@0+upgrade@350)	1	พรุ่งนี้เช้าช่วยเตือนให้โทรหาแม่ด้วย
+th	double(start@0+upgrade@350)	2	พรุ่งนี้เช้าช่วยเตือนให้โทรหาแม่ด้วย
+th	double(start@0+upgrade@350)	3	พรุ่งนี้เช้าช่วยเตือนให้โทรหาแม่ด้วย
+th	start-conversation@0	1	พรุ่งนี้เช้าช่วยเตือนให้โทรหาแม่ด้วย
+th	start-conversation@0	2	พรุ่งนี้เช้าช่วยเตือนให้โทรหาแม่ด้วย
+th	start-conversation@0	3	พรุ่งนี้เช้าช่วยเตือนให้โทรหาแม่ด้วย
+th	end@tail	1	พรุ่งนี้เช้าช่วยเตือนให้โทรหาแม่ด้วย
+th	end@tail	2	พรุ่งนี้เช้าช่วยเตือนให้โทรหาแม่ด้วย
+th	end@tail	3	พรุ่งนี้เช้าช่วยเตือนให้โทรหาแม่ด้วย
+th	silence-only(no cue, control)	1	The
+th	silence-only(no cue, control)	2	The
+th	silence-only(no cue, control)	3	The
+th	start-only(no speech)	1	ค่ะ
+th	start-only(no speech)	2	ค่ะ
+th	start-only(no speech)	3	ค่ะ
+th	double-only(no speech)	1	and the
+th	double-only(no speech)	2	and the
+th	double-only(no speech)	3	and the
