@@ -1021,11 +1021,15 @@ pub fn replace_port(url: &str, port: u16) -> Option<String> {
 /// 纯函数：给拉起命令注入「用这个端口」。
 ///
 /// - 命令本身以 `env` 开头：**删掉它参数段里的同名赋值**，把新值放在
-///   **紧挨着要跑的程序之前**（`env` 的选项如 `-i` / `-u NAME` 原样保留）；
+///   **紧挨着要跑的程序之前**（`env` 的选项如 `-i` / `-u NAME` / `-P` 原样保留）；
 /// - 否则在最前面套一层 `/usr/bin/env VAR=port`。
 ///
 /// 程序名之后的参数一律不动——那是脚本自己的参数，长得像赋值也不是环境变量。
-pub fn with_port_env(command: &[String], var: &str, port: u16) -> Vec<String> {
+///
+/// **`env -S`（整串拆分）返回 `None`**：那一串里可能也写着同名赋值，
+/// 我们没法可靠地改写它；调用方据此放弃换端口并记日志，而不是拼出一条
+/// 「看上去换了、其实还在原端口」的命令。
+pub fn with_port_env(command: &[String], var: &str, port: u16) -> Option<Vec<String>> {
     let assign = format!("{var}={port}");
     let prefix = format!("{var}=");
     let is_env = command
@@ -1035,13 +1039,22 @@ pub fn with_port_env(command: &[String], var: &str, port: u16) -> Vec<String> {
     if !is_env {
         let mut out = vec!["/usr/bin/env".to_string(), assign];
         out.extend(command.iter().cloned());
-        return out;
+        return Some(out);
     }
     let mut out = vec![command[0].clone()];
     let mut i = 1;
+    let mut saw_double_dash = false;
     while i < command.len() {
         let arg = &command[i];
-        if matches!(arg.as_str(), "-u" | "-P" | "-S" | "-C") {
+        if arg.starts_with("--split-string") || (arg.starts_with("-S") && !arg.starts_with("--")) {
+            return None;
+        }
+        if arg == "--" {
+            saw_double_dash = true;
+            i += 1;
+            break; // 之后就是程序名
+        }
+        if matches!(arg.as_str(), "-u" | "-P" | "-C") {
             // 带一个值的选项：连值一起原样保留
             out.push(arg.clone());
             if let Some(v) = command.get(i + 1) {
@@ -1060,9 +1073,13 @@ pub fn with_port_env(command: &[String], var: &str, port: u16) -> Vec<String> {
             break; // 到程序名了
         }
     }
+    // 赋值必须在 `--` 之前：`--` 之后的第一个词会被当成程序名。
     out.push(assign);
+    if saw_double_dash {
+        out.push("--".to_string());
+    }
     out.extend(command[i..].iter().cloned());
-    out
+    Some(out)
 }
 
 /// 找一个本机空闲端口：让系统分一个（bind `127.0.0.1:0`）。
@@ -1081,50 +1098,63 @@ pub fn free_local_port() -> Option<u16> {
 ///
 /// 带上「配置里的地址」是为了**配置一改就失效**：用户后来把 `tts_url` 改掉了，
 /// 旧的覆盖不该继续把请求导到别处。
-static OVERRIDES: std::sync::Mutex<Vec<(&'static str, String, String)>> =
-    std::sync::Mutex::new(Vec::new());
+static OVERRIDES: std::sync::Mutex<Vec<Override>> = std::sync::Mutex::new(Vec::new());
 
-/// 纯函数：在覆盖表里查实际地址。
-pub fn resolve_override(
-    table: &[(&'static str, String, String)],
-    name: &str,
-    configured: &str,
-) -> Option<String> {
+/// 一条运行期覆盖。**带上进程的 pid**：作废这条覆盖时要知道收掉的是哪个进程
+/// （2026-09-26 评审：「按 pid 统一登记与摘除」）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Override {
+    pub name: &'static str,
+    /// 配置里的地址（被占的那个）。配置改了，这条就不再生效。
+    pub configured: String,
+    /// 实际在用的地址。
+    pub effective: String,
+    pub pid: i32,
+}
+
+/// 纯函数：在覆盖表里查实际地址与 pid。
+pub fn resolve_override(table: &[Override], name: &str, configured: &str) -> Option<(String, i32)> {
     table
         .iter()
-        .find(|(n, c, _)| *n == name && c == configured)
-        .map(|(_, _, e)| e.clone())
+        .find(|o| o.name == name && o.configured == configured)
+        .map(|o| (o.effective.clone(), o.pid))
 }
 
 /// 本进程内存里的避让覆盖（只有守护进程自己换过端口才有）。
-fn override_url(name: &str, configured: &str) -> Option<String> {
+fn override_entry(name: &str, configured: &str) -> Option<(String, i32)> {
     let t = OVERRIDES.lock().unwrap_or_else(|e| e.into_inner());
     resolve_override(&t, name, configured)
 }
 
 /// 这个边车现在实际该连哪里：
-/// ① 本进程换过端口 → 用它；② 否则运行态记录里有**正在应答**的避让地址
+/// ① 本进程换过端口 → 用它；② 否则运行态记录里有**正在应答且 pid 对得上**的避让地址
 /// （守护进程换的，`--ask` / `--say` / `--talk-turn` 这些 CLI 入口靠这条跟上）→ 用它；
 /// ③ 否则用配置的地址。
 ///
 /// ②要探一次活（本机 curl，毫秒级），只在有记录时才探。
 pub fn effective_url(name: &str, configured: &str) -> String {
-    override_url(name, configured)
+    override_entry(name, configured)
+        .map(|(u, _)| u)
         .or_else(|| relocated_live(name, configured))
         .unwrap_or_else(|| configured.to_string())
 }
 
-fn set_override(name: &'static str, configured: &str, effective: &str) {
+fn set_override(name: &'static str, configured: &str, effective: &str, pid: i32) {
     let mut t = OVERRIDES.lock().unwrap_or_else(|e| e.into_inner());
-    t.retain(|(n, _, _)| *n != name);
-    t.push((name, configured.to_string(), effective.to_string()));
+    t.retain(|o| o.name != name);
+    t.push(Override {
+        name,
+        configured: configured.to_string(),
+        effective: effective.to_string(),
+        pid,
+    });
 }
 
 fn clear_override(name: &str) {
     OVERRIDES
         .lock()
         .unwrap_or_else(|e| e.into_inner())
-        .retain(|(n, _, _)| *n != name);
+        .retain(|o| o.name != name);
 }
 
 /// 运行态记录：我们**在避让端口上**拉起的边车。
@@ -1147,6 +1177,16 @@ pub struct RunEntry {
 }
 
 fn run_file() -> Option<PathBuf> {
+    // 测试绝不能碰真实数据目录（会删掉正在用的运行态记录）：用进程私有的临时目录。
+    #[cfg(test)]
+    {
+        return Some(
+            std::env::temp_dir()
+                .join(format!("agentear-test-run-{}", std::process::id()))
+                .join("talk-sidecars.json"),
+        );
+    }
+    #[allow(unreachable_code)]
     crate::data_root().ok().map(|d| d.join("run").join("talk-sidecars.json"))
 }
 
@@ -1214,47 +1254,144 @@ fn parse_lsof_pid(out: &str) -> Option<i32> {
 /// 三条都要满足：① 配置没改过；② 那个地址 `/health` 是 `Up`；
 /// ③ 在听那个端口的**正是记录里的 pid**——pid 会被系统复用，
 /// 只凭「端口上有个健康的服务」就接，可能接走别人的进程、退出时还把它杀了。
+#[cfg(test)]
 pub fn can_adopt(entry: &RunEntry, configured: &str, health: EndpointHealth, listener: Option<i32>) -> bool {
-    entry.configured == configured && health == EndpointHealth::Up && listener == Some(entry.pid)
+    adopt_decision(entry, configured, health, listener) == AdoptDecision::Adopt
+}
+
+/// 一条运行态记录该怎么处理。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AdoptDecision {
+    /// 三条都满足：接回来用。
+    Adopt,
+    /// 还是我们那个进程（听端口的正是记录里的 pid），但不能再用了
+    /// （配置改了，或者它不应答了）：**先 SIGTERM 它、再删记录**——
+    /// 只删记录的话，那个 2–4 GB 的进程就永远没人管了（评审 Low 项）。
+    KillThenForget,
+    /// 已经不是我们的进程了（死了，或 pid 对不上）：只删记录，**绝不发信号**。
+    Forget,
+}
+
+/// 纯函数：记录 + 配置地址 + 探活结果 + 端口上的监听者 → 怎么处理。
+pub fn adopt_decision(
+    entry: &RunEntry,
+    configured: &str,
+    health: EndpointHealth,
+    listener: Option<i32>,
+) -> AdoptDecision {
+    let ours = listener == Some(entry.pid);
+    if !ours {
+        return AdoptDecision::Forget;
+    }
+    if entry.configured == configured && health == EndpointHealth::Up {
+        AdoptDecision::Adopt
+    } else {
+        AdoptDecision::KillThenForget
+    }
+}
+
+/// **调用点**：给一条记录做判断。探活与查监听者作为参数传进来，
+/// 测试才能用假的替掉——评审实测过，只测纯函数 `can_adopt` 时，
+/// 把调用点的 pid 查询改成恒等于记录的 pid，全量测试一个都不红。
+pub fn judge_run_entry(
+    entry: &RunEntry,
+    configured: &str,
+    probe: &dyn Fn(&str) -> EndpointHealth,
+    listener_of: &dyn Fn(u16) -> Option<i32>,
+) -> AdoptDecision {
+    let health = probe(&entry.url);
+    let listener = port_of(&entry.url).and_then(listener_of);
+    adopt_decision(entry, configured, health, listener)
+}
+
+fn real_probe(url: &str) -> EndpointHealth {
+    probe_health(url).0
 }
 
 /// 运行态记录里这个边车的避让地址——**只在它确实还是我们那个进程时**返回
-/// （同 [`can_adopt`] 的三条：配置没改、在应答、听端口的正是记录的 pid）。
+/// （同 [`adopt_decision`] 的三条：配置没改、在应答、听端口的正是记录的 pid）。
 /// 只看「在应答」不够：守护进程被信号杀掉后记录会留下，那个端口之后
 /// 可能被别的健康服务占了，CLI 入口就会把请求送到别人那里。
+///
+/// **只读**：CLI 入口不删记录、不发信号，那是守护进程的事。
 pub fn relocated_live(name: &str, configured: &str) -> Option<String> {
     let entry = load_run_entries()
         .into_iter()
         .find(|e| e.name == name && e.configured == configured)?;
-    let health = probe_health(&entry.url).0;
-    let listener = port_of(&entry.url).and_then(port_listener_pid);
-    can_adopt(&entry, configured, health, listener).then_some(entry.url)
+    (judge_run_entry(&entry, configured, &real_probe, &port_listener_pid) == AdoptDecision::Adopt)
+        .then_some(entry.url)
 }
 
-/// 我们「接回来」的边车（不是这个进程 spawn 的，没有 `Child` 句柄，只有 pid）。
-static ADOPTED: std::sync::Mutex<Vec<(&'static str, i32)>> = std::sync::Mutex::new(Vec::new());
+/// 我们「接回来」的边车：`(名字, pid, 端口)`。它们**不是**这个进程的子进程
+/// （没有 `Child` 句柄），死了之后 pid 会被系统立刻复用——所以：
+/// - **不放进信号槽位**（`SPAWNED_PIDS`）：信号处理函数不能做任何校验，
+///   把一个可能已被复用的 pid 交给它等于随机误杀。代价：Ctrl+C / kill 退出时
+///   接回的边车留下，但运行态记录还在，下次启动会按 pid 重新接回
+///   （或确认不是它了、只删记录）——**泄漏可自愈，误杀不可逆**。
+/// - 退出时发信号前**重核**「在听那个端口的仍是这个 pid」（[`adopted_kill_ok`]）。
+static ADOPTED: std::sync::Mutex<Vec<(&'static str, i32, u16)>> = std::sync::Mutex::new(Vec::new());
+
+/// 纯函数：退出时能不能给一个接回来的 pid 发信号。
+pub fn adopted_kill_ok(pid: i32, listener_now: Option<i32>) -> bool {
+    pid > 0 && listener_now == Some(pid)
+}
 
 /// 试着把上次避让拉起的那个接回来。接上了返回它的地址。
 fn adopt_from_run_file(name: &'static str, configured: &str) -> Option<String> {
     let entry = load_run_entries().into_iter().find(|e| e.name == name)?;
-    let (health, _) = probe_health(&entry.url);
-    let listener = port_of(&entry.url).and_then(port_listener_pid);
-    if !can_adopt(&entry, configured, health, listener) {
-        remove_run_entry(name);
-        return None;
+    match judge_run_entry(&entry, configured, &real_probe, &port_listener_pid) {
+        AdoptDecision::Adopt => {}
+        AdoptDecision::KillThenForget => {
+            log::warn!(
+                "{name} 边车：上次换端口拉起的那个（{}，pid {}）不能再用了\
+                 （配置已改成 {configured}，或它不应答）——收掉它",
+                entry.url,
+                entry.pid
+            );
+            unsafe { libc::kill(entry.pid, libc::SIGTERM) };
+            remove_run_entry(name);
+            return None;
+        }
+        AdoptDecision::Forget => {
+            remove_run_entry(name);
+            return None;
+        }
     }
+    let port = port_of(&entry.url)?;
     log::info!(
         "{name} 边车：接回上次换端口拉起的那个（{}，pid {}）——配置的地址 {configured} 仍被占着时就用它",
         entry.url,
         entry.pid
     );
-    register_pid_raw(entry.pid);
     ADOPTED
         .lock()
         .unwrap_or_else(|e| e.into_inner())
-        .push((name, entry.pid));
-    set_override(name, configured, &entry.url);
+        .push((name, entry.pid, port));
+    set_override(name, configured, &entry.url, entry.pid);
     Some(entry.url)
+}
+
+/// 作废一个边车的避让覆盖，**连同它的进程**（按 pid）：
+/// 我们的子进程 → 杀掉并回收；接回来的 → 重核监听者后才发信号。
+/// 然后删覆盖与运行态记录。
+fn discard_relocated(name: &'static str, configured: &str) {
+    if let Some((url, pid)) = override_entry(name, configured) {
+        if !kill_child(pid) {
+            let adopted = {
+                let mut a = ADOPTED.lock().unwrap_or_else(|e| e.into_inner());
+                let found = a.iter().position(|(_, p, _)| *p == pid).map(|i| a.remove(i));
+                found
+            };
+            if let Some((_, pid, port)) = adopted {
+                if adopted_kill_ok(pid, port_listener_pid(port)) {
+                    unsafe { libc::kill(pid, libc::SIGTERM) };
+                }
+            }
+        }
+        log::info!("{name} 边车：作废避让端口 {url}（pid {pid}）");
+    }
+    clear_override(name);
+    remove_run_entry(name);
 }
 
 /// 一个通话边车的规格：叫什么、连哪、连不上时按什么命令拉。
@@ -1343,6 +1480,10 @@ pub fn sidecar_specs(cfg: &crate::config::Config) -> Vec<Sidecar> {
 
 /// 我们自己拉起来的边车。**只收自己起的**——用户手工跑的进程一律不动，
 /// 退出时杀掉别人的服务是很难排查的越权（`sidecar.rs` 定的规矩）。
+///
+/// ⚠️ **一切按 pid 操作，不按名字**（2026-09-26 评审）：同名的旧进程死了还留在表里时，
+/// 按名字 `find` 会先命中死的那个、`retain` 会把刚拉起的活进程一起丢掉。
+/// 观测到死亡（`try_wait` 返回 `Some`）或主动收掉时，**同一刻**从这里和信号槽位里摘除。
 static SPAWNED: std::sync::Mutex<Vec<(&'static str, std::process::Child)>> =
     std::sync::Mutex::new(Vec::new());
 
@@ -1351,10 +1492,18 @@ static SPAWNED: std::sync::Mutex<Vec<(&'static str, std::process::Child)>> =
 /// 信号处理函数必须 async-signal-safe：不能锁 `Mutex`、不能分配内存。
 /// 所以这里存原子值，handler 里只做 `kill(2)`（`sidecar.rs` 定的同一条规矩）。
 ///
-/// 通信边车最多两个（LLM + TTS），固定长度就够——**不引 Vec 是因为
-/// handler 里不能分配**。
-static SPAWNED_PIDS: [std::sync::atomic::AtomicI32; 2] =
-    [std::sync::atomic::AtomicI32::new(0), std::sync::atomic::AtomicI32::new(0)];
+/// **只放我们自己的子进程**：子进程在被 `wait` 回收之前，pid 不会被系统复用
+/// （僵尸进程占着它），所以「登记 → 回收时摘除」这个顺序保证了信号不会打到别人。
+/// 接回来的进程**不放进来**，理由见 [`ADOPTED`]。
+///
+/// 4 个槽：同时活着的最多 2 个（LLM + TTS），多 2 个给「换端口重试」的过渡。
+/// **不引 Vec 是因为 handler 里不能分配**。
+static SPAWNED_PIDS: [std::sync::atomic::AtomicI32; 4] = [
+    std::sync::atomic::AtomicI32::new(0),
+    std::sync::atomic::AtomicI32::new(0),
+    std::sync::atomic::AtomicI32::new(0),
+    std::sync::atomic::AtomicI32::new(0),
+];
 
 /// **给信号处理函数调用**：把我们拉起的边车都 SIGTERM 掉。
 ///
@@ -1369,11 +1518,7 @@ pub fn kill_spawned_pids_from_signal() {
     }
 }
 
-fn register_pid(child: &std::process::Child) {
-    register_pid_raw(child.id() as i32);
-}
-
-fn register_pid_raw(pid: i32) {
+fn register_pid(pid: i32) {
     use std::sync::atomic::Ordering;
     for slot in SPAWNED_PIDS.iter() {
         if slot
@@ -1383,13 +1528,80 @@ fn register_pid_raw(pid: i32) {
             return;
         }
     }
-    // 两个槽都满了：说明清单里超过两个边车了（现在不可能，见 sidecar_specs）
-    log::warn!("边车 pid 槽位已满，这个进程退出时不会被自动收掉");
+    log::warn!("边车 pid 槽位已满，pid {pid} 在 Ctrl+C / kill 退出时不会被自动收掉（菜单退出仍会收）");
+}
+
+/// 从信号槽位里摘掉这个 pid。**只摘等于它的那一格**（CAS），不碰别的格。
+fn unregister_pid(pid: i32) {
+    use std::sync::atomic::Ordering;
+    for slot in SPAWNED_PIDS.iter() {
+        let _ = slot.compare_exchange(pid, 0, Ordering::SeqCst, Ordering::SeqCst);
+    }
 }
 
 fn clear_pids() {
     for slot in SPAWNED_PIDS.iter() {
         slot.store(0, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+/// 信号槽位里现在有哪些 pid（测试用）。
+#[cfg(test)]
+fn registered_pids() -> Vec<i32> {
+    SPAWNED_PIDS
+        .iter()
+        .map(|s| s.load(std::sync::atomic::Ordering::SeqCst))
+        .filter(|p| *p > 0)
+        .collect()
+}
+
+/// 按 pid 从登记表里拿走一个子进程（同时摘掉信号槽位）。
+fn take_child(pid: i32) -> Option<std::process::Child> {
+    let mut guard = SPAWNED.lock().unwrap_or_else(|e| e.into_inner());
+    let i = guard.iter().position(|(_, c)| c.id() as i32 == pid)?;
+    let (_, child) = guard.remove(i);
+    // 先摘槽位、再回收：回收之后 pid 才可能被复用，此时它已经不在槽位里了。
+    unregister_pid(pid);
+    Some(child)
+}
+
+/// 杀掉并回收我们的一个子进程。它不在登记表里就返回 `false`（什么都不做）。
+fn kill_child(pid: i32) -> bool {
+    match take_child(pid) {
+        Some(mut child) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            true
+        }
+        None => false,
+    }
+}
+
+/// 这个子进程退出了没有。退出了就**当场**摘除登记并回收，返回 `true`。
+fn child_exited(pid: i32) -> Option<std::process::ExitStatus> {
+    let status = {
+        let mut guard = SPAWNED.lock().unwrap_or_else(|e| e.into_inner());
+        let (_, child) = guard.iter_mut().find(|(_, c)| c.id() as i32 == pid)?;
+        match child.try_wait() {
+            Ok(Some(st)) => st,
+            _ => return None,
+        }
+    };
+    let _ = take_child(pid);
+    Some(status)
+}
+
+/// 扫一遍登记表：已经退出的子进程全部摘除（槽位跟着清）。
+fn reap_dead_children() {
+    let dead: Vec<i32> = {
+        let mut guard = SPAWNED.lock().unwrap_or_else(|e| e.into_inner());
+        guard
+            .iter_mut()
+            .filter_map(|(_, c)| matches!(c.try_wait(), Ok(Some(_))).then_some(c.id() as i32))
+            .collect()
+    };
+    for pid in dead {
+        let _ = take_child(pid);
     }
 }
 
@@ -1403,19 +1615,22 @@ const READY_TIMEOUT: Duration = Duration::from_secs(90);
 /// 所以调用方要用 [`ensure_sidecars_async`]——菜单和启动路径都不能卡住。
 pub fn ensure_sidecars(cfg: &crate::config::Config) -> Vec<(&'static str, bool)> {
     let mut out = Vec::new();
+    // 先把已经死掉的子进程从登记表和信号槽位里摘掉（它们的 pid 回收后可能被复用）。
+    reap_dead_children();
     for spec in sidecar_specs(cfg) {
         // ① 这个进程里已经换过端口：换出来的那个还活着就接着用，死了就作废。
         // ⚠️ 这里只看**内存**里的覆盖，不看运行态记录：记录里的那个要走下面的
         // 「接回」（校验 pid、登记收尾），直接拿来用会漏掉退出时的收尾。
-        if let Some(current) = override_url(spec.name, &spec.url) {
+        if let Some((current, _pid)) = override_entry(spec.name, &spec.url) {
             if probe_health(&current).0 == EndpointHealth::Up {
                 log::info!("{} 边车已在跑（换过端口）：{current}", spec.name);
                 out.push((spec.name, true));
                 continue;
             }
-            log::warn!("{} 边车换出来的端口 {current} 不再应答——作废，重新判断", spec.name);
-            clear_override(spec.name);
-            remove_run_entry(spec.name);
+            log::warn!("{} 边车换出来的端口 {current} 不再应答——作废（连同进程），重新判断", spec.name);
+            // **按 pid 收掉并摘除所有登记**，不只是删覆盖——评审的阻塞项：
+            // 只删覆盖、pid 还挂在登记表里，退出时就可能打到复用了这个 pid 的别人。
+            discard_relocated(spec.name, &spec.url);
         }
         // ② 上次（崩溃前）换端口拉起的那个还活着：接回来，别再起一份。
         if adopt_from_run_file(spec.name, &spec.url).is_some() {
@@ -1458,8 +1673,11 @@ pub fn ensure_sidecars(cfg: &crate::config::Config) -> Vec<(&'static str, bool)>
                     spec.command.join(" ")
                 );
                 match spawn_sidecar(spec.name, &spec.command) {
-                    Ok(_) => {
-                        let ready = wait_ready(spec.name, &spec.url) == ReadyOutcome::Ready;
+                    // 等满了还没好（TimedOut）时，子进程**留在登记表里**：它在配置的地址上，
+                    // 之后真起来了下一次探活就是 `AlreadyUp`，退出时也照常被收掉。
+                    // （换端口那条路不一样，见 `relocate_and_start_with`。）
+                    Ok(pid) => {
+                        let ready = wait_ready(spec.name, pid, &spec.url, READY_TIMEOUT) == ReadyOutcome::Ready;
                         if ready {
                             log::info!("{} 边车已就绪", spec.name);
                         } else {
@@ -1673,6 +1891,15 @@ pub fn await_sidecars_for_turn(seq_before: u64) -> bool {
 /// 端口被占时：换一个空闲端口拉起。最多试两次（第二次是给 TOCTOU 的：
 /// 选好的端口在边车 bind 之前被别人抢了，边车会发现端口被占、立刻退出）。
 fn relocate_and_start(spec: &Sidecar, detail: &str) -> bool {
+    relocate_and_start_with(spec, detail, READY_TIMEOUT)
+}
+
+/// [`relocate_and_start`] 的可测版本（就绪上限可调）。
+///
+/// **每条失败路径都要把拉起的子进程收干净**（评审阻塞项 ③）：换出来的端口是随机的，
+/// 没有覆盖记录、没有运行态记录的话，谁都找不到它——下次会再换一个端口起一份，
+/// 崩溃后它就成了永远没人管的 2–4 GB 孤儿。
+fn relocate_and_start_with(spec: &Sidecar, detail: &str, timeout: Duration) -> bool {
     let old_port = port_of(&spec.url).map(|p| p.to_string()).unwrap_or_else(|| "?".into());
     let who = port_of(&spec.url)
         .and_then(port_occupant)
@@ -1691,7 +1918,14 @@ fn relocate_and_start(spec: &Sidecar, detail: &str) -> bool {
             );
             return false;
         };
-        let command = with_port_env(&spec.command, port_env_var(spec.name), port);
+        let Some(command) = with_port_env(&spec.command, port_env_var(spec.name), port) else {
+            log::error!(
+                "{} 边车：拉起命令用了 `env -S`（整串拆分），没法可靠地替换端口变量，不换端口——{}",
+                spec.name,
+                port_taken_hint(spec.name)
+            );
+            return false;
+        };
         let msg = format!(
             "{} 边车：端口 {old_port} 被 {who} 占了（{detail}）→ 改用端口 {port} 拉起{}",
             spec.name,
@@ -1710,10 +1944,10 @@ fn relocate_and_start(spec: &Sidecar, detail: &str) -> bool {
                 return false;
             }
         };
-        match wait_ready(spec.name, &new_url) {
+        match wait_ready(spec.name, pid, &new_url, timeout) {
             ReadyOutcome::Ready => {
                 log::info!("{} 边车已在新端口就绪：{new_url}", spec.name);
-                set_override(spec.name, &spec.url, &new_url);
+                set_override(spec.name, &spec.url, &new_url, pid);
                 upsert_run_entry(RunEntry {
                     name: spec.name.to_string(),
                     configured: spec.url.clone(),
@@ -1722,11 +1956,22 @@ fn relocate_and_start(spec: &Sidecar, detail: &str) -> bool {
                 });
                 return true;
             }
+            // 进程已退出：`wait_ready` 当场摘除了它的登记，不用再收。
             ReadyOutcome::Exited if attempt == 1 => {
                 log::warn!("{} 边车在端口 {port} 上起来就退出了（多半是端口刚被抢走），再换一个试", spec.name);
             }
-            _ => {
+            ReadyOutcome::Exited => {
                 log::error!("{} 边车换到端口 {port} 也没起来，用 --diagnose 看详情", spec.name);
+                return false;
+            }
+            ReadyOutcome::TimedOut => {
+                // 还活着但一直没就绪：**杀掉并回收**，不留一个没人知道端口的进程。
+                kill_child(pid);
+                log::error!(
+                    "{} 边车在端口 {port} 上 {:?} 内没就绪——已收掉（不留孤儿），用 --diagnose 看详情",
+                    spec.name,
+                    timeout
+                );
                 return false;
             }
         }
@@ -1821,8 +2066,8 @@ fn spawn_sidecar(name: &'static str, command: &[String]) -> Result<i32> {
         .stderr(Stdio::null())
         .spawn()
         .with_context(|| format!("启动 {prog} 失败"))?;
-    register_pid(&child);
     let pid = child.id() as i32;
+    register_pid(pid);
     SPAWNED
         .lock()
         .unwrap_or_else(|e| e.into_inner())
@@ -1839,23 +2084,20 @@ enum ReadyOutcome {
     TimedOut,
 }
 
-/// 等某个边车就绪。**按名字盯住我们自己起的那个进程**：
-/// 它要是启动后就退出（命令写错、venv 缺包），不该再傻等满 90 秒。
-fn wait_ready(name: &'static str, url: &str) -> ReadyOutcome {
+/// 等某个边车就绪。**按 pid 盯住我们自己起的那个进程**（不按名字——
+/// 同名的旧记录会先被命中，见 [`SPAWNED`]）：它要是启动后就退出
+/// （命令写错、venv 缺包、端口被抢），不该再傻等满 90 秒。
+fn wait_ready(name: &'static str, pid: i32, url: &str, timeout: Duration) -> ReadyOutcome {
     let start = Instant::now();
-    while start.elapsed() < READY_TIMEOUT {
-        std::thread::sleep(Duration::from_millis(1500));
+    while start.elapsed() < timeout {
+        std::thread::sleep(Duration::from_millis(500).min(timeout));
         if probe_endpoint(url).is_ok() {
             log::info!("{name} 边车等了 {:.1}s", start.elapsed().as_secs_f32());
             return ReadyOutcome::Ready;
         }
-        let mut guard = SPAWNED.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some((_, child)) = guard.iter_mut().find(|(n, _)| *n == name) {
-            if let Ok(Some(code)) = child.try_wait() {
-                log::error!("{name} 边车启动后立刻退出了（{code:?}），检查拉起命令能不能单独跑通");
-                guard.retain(|(n, _)| *n != name);
-                return ReadyOutcome::Exited;
-            }
+        if let Some(code) = child_exited(pid) {
+            log::error!("{name} 边车（pid {pid}）启动后立刻退出了（{code:?}），检查拉起命令能不能单独跑通");
+            return ReadyOutcome::Exited;
         }
     }
     ReadyOutcome::TimedOut
@@ -1880,14 +2122,22 @@ pub fn shutdown_spawned() {
     };
     for (name, mut child) in kids {
         log::info!("退出：关掉我们拉起的 {name} 边车");
+        let pid = child.id() as i32;
         let _ = child.kill();
         let _ = child.wait();
+        unregister_pid(pid);
     }
-    let adopted: Vec<(&'static str, i32)> =
+    let adopted: Vec<(&'static str, i32, u16)> =
         std::mem::take(&mut *ADOPTED.lock().unwrap_or_else(|e| e.into_inner()));
-    for (name, pid) in adopted {
-        log::info!("退出：关掉接回来的 {name} 边车（pid {pid}）");
-        unsafe { libc::kill(pid, libc::SIGTERM) };
+    for (name, pid, port) in adopted {
+        // 接回来的不是我们的子进程：它可能早就死了、pid 已经被别人复用。
+        // **发信号前重核**「在听那个端口的仍是这个 pid」。
+        if adopted_kill_ok(pid, port_listener_pid(port)) {
+            log::info!("退出：关掉接回来的 {name} 边车（pid {pid}）");
+            unsafe { libc::kill(pid, libc::SIGTERM) };
+        } else {
+            log::info!("退出：接回来的 {name} 边车（pid {pid}）已经不在端口 {port} 上了，不发信号");
+        }
     }
     // 我们拉起的都收了：运行态记录跟着作废，下次启动从配置的地址重新判断。
     let had_overrides = !OVERRIDES.lock().unwrap_or_else(|e| e.into_inner()).is_empty();
@@ -2709,33 +2959,51 @@ mod tests {
         let cmd = v(&["/usr/bin/env", "AGENTEAR_TTS_QUANT=8bit", "AGENTEAR_TTS_PORT=8766", "/x/serve-tts.sh"]);
         assert_eq!(
             with_port_env(&cmd, "AGENTEAR_TTS_PORT", 50000),
-            v(&["/usr/bin/env", "AGENTEAR_TTS_QUANT=8bit", "AGENTEAR_TTS_PORT=50000", "/x/serve-tts.sh"])
+            Some(v(&["/usr/bin/env", "AGENTEAR_TTS_QUANT=8bit", "AGENTEAR_TTS_PORT=50000", "/x/serve-tts.sh"]))
         );
         // env 的选项原样保留，新赋值紧挨着程序名（放在 `-i` 前面会被当成程序名）
         let cmd = v(&["env", "-i", "-u", "HOME", "AGENTEAR_TTS_PORT=8766", "/x/s.sh"]);
         assert_eq!(
             with_port_env(&cmd, "AGENTEAR_TTS_PORT", 9),
-            v(&["env", "-i", "-u", "HOME", "AGENTEAR_TTS_PORT=9", "/x/s.sh"])
+            Some(v(&["env", "-i", "-u", "HOME", "AGENTEAR_TTS_PORT=9", "/x/s.sh"]))
         );
         // 不以 env 开头：外面套一层
         assert_eq!(
             with_port_env(&v(&["/x/serve-talk-llm.sh"]), "AGENTEAR_TALK_LLM_PORT", 7),
-            v(&["/usr/bin/env", "AGENTEAR_TALK_LLM_PORT=7", "/x/serve-talk-llm.sh"])
+            Some(v(&["/usr/bin/env", "AGENTEAR_TALK_LLM_PORT=7", "/x/serve-talk-llm.sh"]))
         );
         // 程序参数里长得像赋值的东西（在程序名之后）不许动
         let cmd = v(&["env", "A=1", "/x/s.sh", "AGENTEAR_TTS_PORT=1"]);
         assert_eq!(
             with_port_env(&cmd, "AGENTEAR_TTS_PORT", 2),
-            v(&["env", "A=1", "AGENTEAR_TTS_PORT=2", "/x/s.sh", "AGENTEAR_TTS_PORT=1"])
+            Some(v(&["env", "A=1", "AGENTEAR_TTS_PORT=2", "/x/s.sh", "AGENTEAR_TTS_PORT=1"]))
         );
         // 结果里我们那条之后不能再有同名的环境赋值
         let out = with_port_env(
             &v(&["/usr/bin/env", "AGENTEAR_TTS_PORT=8766", "AGENTEAR_TTS_PORT=9", "/x/s.sh"]),
             "AGENTEAR_TTS_PORT",
             3,
-        );
+        )
+        .unwrap();
         assert_eq!(out.iter().filter(|a| a.starts_with("AGENTEAR_TTS_PORT=")).count(), 1);
         assert_eq!(out, v(&["/usr/bin/env", "AGENTEAR_TTS_PORT=3", "/x/s.sh"]));
+        // `--` 之后是程序名：赋值必须放在 `--` 之前
+        assert_eq!(
+            with_port_env(&v(&["env", "A=1", "--", "/x/s.sh"]), "AGENTEAR_TTS_PORT", 4),
+            Some(v(&["env", "A=1", "AGENTEAR_TTS_PORT=4", "--", "/x/s.sh"]))
+        );
+    }
+
+    /// `env -S`（整串拆分）改写不可靠 → 明确拒绝（评审 Low 项），调用方据此不换端口。
+    #[test]
+    fn with_port_env_refuses_split_string() {
+        for cmd in [
+            v(&["env", "-S", "AGENTEAR_TTS_PORT=8766 /x/s.sh"]),
+            v(&["/usr/bin/env", "-SAGENTEAR_TTS_PORT=1 /x/s.sh"]),
+            v(&["env", "--split-string=A=1 /x/s.sh"]),
+        ] {
+            assert_eq!(with_port_env(&cmd, "AGENTEAR_TTS_PORT", 5), None, "{cmd:?}");
+        }
     }
 
     #[test]
@@ -2748,8 +3016,16 @@ mod tests {
     /// 覆盖只对「同一个配置地址」生效：用户改了 config，旧覆盖必须失效。
     #[test]
     fn overrides_follow_the_configured_url() {
-        let t = vec![("TTS", "http://127.0.0.1:8796".to_string(), "http://127.0.0.1:50001".to_string())];
-        assert_eq!(resolve_override(&t, "TTS", "http://127.0.0.1:8796").as_deref(), Some("http://127.0.0.1:50001"));
+        let t = vec![Override {
+            name: "TTS",
+            configured: "http://127.0.0.1:8796".to_string(),
+            effective: "http://127.0.0.1:50001".to_string(),
+            pid: 77,
+        }];
+        assert_eq!(
+            resolve_override(&t, "TTS", "http://127.0.0.1:8796"),
+            Some(("http://127.0.0.1:50001".to_string(), 77))
+        );
         assert_eq!(resolve_override(&t, "TTS", "http://127.0.0.1:8766"), None, "配置改了就不再覆盖");
         assert_eq!(resolve_override(&t, "LLM", "http://127.0.0.1:8796"), None, "不串到别的边车");
     }
@@ -2771,6 +3047,319 @@ mod tests {
         assert!(!can_adopt(&e, c, Down, Some(4242)));
         assert!(!can_adopt(&e, c, WrongService, Some(4242)));
         assert!(!can_adopt(&e, "http://127.0.0.1:8766", Up, Some(4242)), "配置改了：不接");
+    }
+
+    fn entry(configured: &str, pid: i32) -> RunEntry {
+        RunEntry {
+            name: "TTS".into(),
+            configured: configured.into(),
+            url: "http://127.0.0.1:50001".into(),
+            pid,
+        }
+    }
+
+    /// 还是我们那个进程但不能再用（配置改了 / 不应答）→ **先收掉再删记录**；
+    /// 不是我们的进程 → 只删记录，绝不发信号。
+    #[test]
+    fn adopt_decision_truth_table() {
+        use AdoptDecision::*;
+        use EndpointHealth::*;
+        let c = "http://127.0.0.1:8796";
+        let e = entry(c, 4242);
+        assert_eq!(adopt_decision(&e, c, Up, Some(4242)), Adopt);
+        assert_eq!(adopt_decision(&e, "http://127.0.0.1:8766", Up, Some(4242)), KillThenForget, "配置改了：收掉");
+        assert_eq!(adopt_decision(&e, c, WrongService, Some(4242)), KillThenForget, "卡死了：收掉");
+        assert_eq!(adopt_decision(&e, c, Up, Some(999)), Forget, "端口上是别人：绝不发信号");
+        assert_eq!(adopt_decision(&e, "http://127.0.0.1:8766", Up, Some(999)), Forget);
+        assert_eq!(adopt_decision(&e, c, Down, None), Forget, "死了：只删记录");
+    }
+
+    /// **调用点**：判断必须用真的查到的监听者，而不是记录里写的 pid。
+    /// 评审实测过：把调用点的查询改成恒等于记录 pid，只测纯函数时一个都不红。
+    #[test]
+    fn judge_run_entry_uses_the_real_listener() {
+        use AdoptDecision::*;
+        let c = "http://127.0.0.1:8796";
+        let e = entry(c, 4242);
+        let up = |_: &str| EndpointHealth::Up;
+        let someone_else = |_: u16| Some(999);
+        let us = |port: u16| (port == 50001).then_some(4242);
+        let nobody = |_: u16| None;
+        assert_eq!(judge_run_entry(&e, c, &up, &someone_else), Forget, "端口被别的进程接手了：不接、不杀");
+        assert_eq!(judge_run_entry(&e, c, &up, &nobody), Forget);
+        assert_eq!(judge_run_entry(&e, c, &up, &us), Adopt, "查的得是记录里 url 的端口");
+        assert_eq!(judge_run_entry(&e, "http://127.0.0.1:8766", &up, &us), KillThenForget);
+    }
+
+    #[test]
+    fn adopted_kill_needs_the_listener_to_still_be_that_pid() {
+        assert!(adopted_kill_ok(4242, Some(4242)));
+        assert!(!adopted_kill_ok(4242, Some(999)), "pid 被复用：不发信号");
+        assert!(!adopted_kill_ok(4242, None));
+        assert!(!adopted_kill_ok(0, Some(0)));
+    }
+
+    // ---- 进程登记表按 pid 管理（2026-09-26 评审阻塞项）----
+    //
+    // 这几条碰全局登记表（SPAWNED / SPAWNED_PIDS / ADOPTED / OVERRIDES），用同一把锁串行跑。
+
+    static REGISTRY_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn registry_guard() -> std::sync::MutexGuard<'static, ()> {
+        REGISTRY_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn in_spawned(pid: i32) -> bool {
+        SPAWNED
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .any(|(_, c)| c.id() as i32 == pid)
+    }
+
+    fn alive(pid: i32) -> bool {
+        // 我们自己的子进程：还在登记表里就用 try_wait 看；已经被回收的，kill(0) 会失败。
+        unsafe { libc::kill(pid, 0) == 0 }
+    }
+
+    /// 阻塞项 ④：同名的旧进程死了还在表里时，按名字匹配会命中死的那个、
+    /// 把刚拉起的活进程一起丢掉。按 pid 就不会。
+    #[test]
+    fn wait_ready_matches_by_pid_not_by_name() {
+        let _g = registry_guard();
+        let dead = spawn_sidecar("TEST-W", &v(&["/usr/bin/true"])).unwrap();
+        std::thread::sleep(Duration::from_millis(200)); // 让它先退出（不回收）
+        let live = spawn_sidecar("TEST-W", &v(&["/bin/sleep", "30"])).unwrap();
+        let out = wait_ready("TEST-W", live, "http://127.0.0.1:1", Duration::from_millis(1200));
+        assert_eq!(out, ReadyOutcome::TimedOut, "活着的新进程不该被当成「已退出」");
+        assert!(in_spawned(live), "活进程的句柄必须还在登记表里");
+        assert!(registered_pids().contains(&live));
+        assert!(kill_child(live));
+        assert!(!in_spawned(live) && !registered_pids().contains(&live));
+        reap_dead_children();
+        assert!(!in_spawned(dead) && !registered_pids().contains(&dead));
+    }
+
+    /// 观测到退出的那一刻，**同时**从登记表与信号槽位里摘除（阻塞项 ①②）。
+    #[test]
+    fn an_exited_child_is_unregistered_when_observed() {
+        let _g = registry_guard();
+        let pid = spawn_sidecar("TEST-E", &v(&["/usr/bin/true"])).unwrap();
+        assert!(registered_pids().contains(&pid));
+        let out = wait_ready("TEST-E", pid, "http://127.0.0.1:1", Duration::from_secs(5));
+        assert_eq!(out, ReadyOutcome::Exited);
+        assert!(!in_spawned(pid), "退出的进程要从登记表里摘掉");
+        assert!(!registered_pids().contains(&pid), "退出的 pid 要从信号槽位里摘掉——否则回收后被复用会误杀");
+    }
+
+    #[test]
+    fn reap_dead_children_frees_slots() {
+        let _g = registry_guard();
+        let pid = spawn_sidecar("TEST-R", &v(&["/usr/bin/true"])).unwrap();
+        std::thread::sleep(Duration::from_millis(300));
+        reap_dead_children();
+        assert!(!in_spawned(pid) && !registered_pids().contains(&pid));
+    }
+
+    /// 阻塞项 ③：换端口拉起的进程等满了没就绪 → 必须杀掉并摘除，不留孤儿。
+    #[test]
+    fn relocate_timeout_kills_and_unregisters_the_child() {
+        let _g = registry_guard();
+        let spec = Sidecar {
+            name: "TEST-T",
+            url: "http://127.0.0.1:1".into(),
+            command: v(&["/bin/sleep", "30"]),
+            explicit: false,
+        };
+        let before: Vec<i32> = registered_pids();
+        assert!(!relocate_and_start_with(&spec, "测试", Duration::from_millis(1200)));
+        let leftovers: Vec<i32> = SPAWNED
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .filter(|(n, _)| *n == "TEST-T")
+            .map(|(_, c)| c.id() as i32)
+            .collect();
+        assert!(leftovers.is_empty(), "超时后子进程还挂在登记表里：{leftovers:?}");
+        assert_eq!(registered_pids(), before, "超时后信号槽位里多了东西");
+        assert!(override_entry("TEST-T", &spec.url).is_none());
+    }
+
+    /// 作废一条覆盖 = 连同它的进程一起收掉并摘除所有登记（阻塞项 ①）。
+    #[test]
+    fn discard_relocated_kills_our_child_and_clears_registrations() {
+        let _g = registry_guard();
+        let pid = spawn_sidecar("TEST-D", &v(&["/bin/sleep", "30"])).unwrap();
+        set_override("TEST-D", "http://127.0.0.1:1", "http://127.0.0.1:2", pid);
+        discard_relocated("TEST-D", "http://127.0.0.1:1");
+        assert!(override_entry("TEST-D", "http://127.0.0.1:1").is_none());
+        assert!(!in_spawned(pid) && !registered_pids().contains(&pid));
+        assert!(!alive(pid), "作废时要把进程也收掉");
+    }
+
+    /// 退出时：接回来的 pid 如果已经不在它的端口上了（死了、被复用），**不发信号**。
+    #[test]
+    fn shutdown_does_not_signal_an_adopted_pid_that_moved_on() {
+        let _g = registry_guard();
+        // 一个跟端口无关的「别人的进程」，冒充 pid 被复用后的样子
+        let mut bystander = Command::new("/bin/sleep").arg("30").spawn().unwrap();
+        let pid = bystander.id() as i32;
+        let port = free_local_port().unwrap(); // 没人在听
+        ADOPTED.lock().unwrap_or_else(|e| e.into_inner()).push(("TEST-S", pid, port));
+        shutdown_spawned();
+        std::thread::sleep(Duration::from_millis(200));
+        let still_running = matches!(bystander.try_wait(), Ok(None));
+        let _ = bystander.kill();
+        let _ = bystander.wait();
+        assert!(still_running, "退出时误杀了一个已经不在那个端口上的 pid");
+    }
+
+    /// 测试收尾守卫：**断言失败（panic）时也要把假边车和临时目录收掉**，
+    /// 否则变异验证每红一次就漏一个常驻的 http.server。
+    struct FakeSidecar {
+        child: std::process::Child,
+        dir: PathBuf,
+    }
+    impl Drop for FakeSidecar {
+        fn drop(&mut self) {
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+            let _ = std::fs::remove_dir_all(&self.dir);
+            if let Some(run_dir) = run_file().and_then(|p| p.parent().map(|d| d.to_path_buf())) {
+                let _ = std::fs::remove_dir_all(run_dir);
+            }
+        }
+    }
+
+    /// 起一个**真的在听端口**的进程（`/health` 回 200），冒充换端口拉起的边车。
+    fn fake_sidecar() -> (std::process::Child, u16, PathBuf) {
+        let dir = temp_dir("agentear-fake-sidecar").unwrap();
+        std::fs::write(dir.join("health"), "ok").unwrap();
+        let port = free_local_port().unwrap();
+        let child = Command::new("/usr/bin/python3")
+            .args(["-m", "http.server", &port.to_string(), "--bind", "127.0.0.1", "--directory"])
+            .arg(&dir)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        for _ in 0..50 {
+            if port_listener_pid(port) == Some(child.id() as i32) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        (child, port, dir)
+    }
+
+    /// **`adopt_from_run_file` 这个真实调用点**的三种结局，都用真进程、真端口、真 lsof。
+    #[test]
+    fn adopt_from_run_file_call_site() {
+        let _g = registry_guard();
+        let (child, port, dir) = fake_sidecar();
+        let pid = child.id() as i32;
+        let mut guard = FakeSidecar { child, dir };
+        let sidecar = &mut guard.child;
+        let url = format!("http://127.0.0.1:{port}");
+        let configured = "http://127.0.0.1:1";
+        let put = |pid: i32| {
+            save_run_entries(&[RunEntry {
+                name: "TEST-A".into(),
+                configured: configured.into(),
+                url: url.clone(),
+                pid,
+            }])
+        };
+        let has_entry = || load_run_entries().iter().any(|e| e.name == "TEST-A");
+
+        // ① 记录的 pid 不是在听端口的那个（pid 被复用）→ 不接、不发信号、只删记录
+        put(pid + 100_000);
+        assert_eq!(adopt_from_run_file("TEST-A", configured), None);
+        assert!(!has_entry());
+        assert!(matches!(sidecar.try_wait(), Ok(None)), "pid 对不上时绝不能发信号");
+
+        // ② 三条都满足 → 接回：登记到 ADOPTED + 覆盖，但**不进信号槽位**
+        put(pid);
+        assert_eq!(adopt_from_run_file("TEST-A", configured).as_deref(), Some(url.as_str()));
+        assert!(ADOPTED.lock().unwrap().iter().any(|(n, p, _)| *n == "TEST-A" && *p == pid));
+        assert!(!registered_pids().contains(&pid), "接回的 pid 不许进信号槽位");
+        ADOPTED.lock().unwrap().retain(|(n, _, _)| *n != "TEST-A");
+        clear_override("TEST-A");
+
+        // ③ 配置改了、但还是我们那个进程 → 先收掉再删记录（评审 Low 项）
+        put(pid);
+        assert_eq!(adopt_from_run_file("TEST-A", "http://127.0.0.1:2"), None);
+        assert!(!has_entry());
+        let mut gone = false;
+        for _ in 0..30 {
+            if matches!(sidecar.try_wait(), Ok(Some(_))) {
+                gone = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        save_run_entries(&[]);
+        drop(guard);
+        assert!(gone, "配置改了时，还在跑的旧边车要被收掉，不然永远没人管");
+    }
+
+    /// **真边车冒烟**（默认忽略：要本机装好 TTS 边车）。不起守护进程——
+    /// 守护进程会装按键监听，实测时会截到正在用键盘的人（2026-09-26 踩过）。
+    ///
+    /// ```text
+    /// AGENTEAR_SMOKE_TTS_CMD='/usr/bin/env AGENTEAR_TTS_QUANT=4bit scripts/serve-tts.sh' \
+    ///   cargo test -- --ignored smoke_relocate_real_tts --nocapture
+    /// ```
+    #[test]
+    #[ignore]
+    fn smoke_relocate_real_tts() {
+        let _g = registry_guard();
+        let cmd: Vec<String> = std::env::var("AGENTEAR_SMOKE_TTS_CMD")
+            .expect("设 AGENTEAR_SMOKE_TTS_CMD")
+            .split_whitespace()
+            .map(String::from)
+            .collect();
+        // 占住一个端口，冒充「别的程序」
+        let blocker = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let busy = blocker.local_addr().unwrap().port();
+        let blocker_thread = std::thread::spawn(move || {
+            for s in blocker.incoming().flatten() {
+                let mut s = s;
+                let _ = s.write_all(b"HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\n\r\n");
+            }
+        });
+        let mut cfg = crate::config::Config::default();
+        cfg.talk_llm_engine = "mock".into();
+        cfg.tts_url = Some(format!("http://127.0.0.1:{busy}"));
+        cfg.talk_tts_start_command = cmd;
+        cfg.talk_autostart = true;
+        let results = ensure_sidecars(&cfg);
+        assert_eq!(results, vec![("TTS", true)], "换端口拉起失败");
+        let configured = cfg.tts_url.clone().unwrap();
+        let (url, pid) = override_entry("TTS", &configured).expect("应当有覆盖");
+        assert_ne!(url, configured);
+        assert!(registered_pids().contains(&pid) && in_spawned(pid));
+        assert_eq!(load_run_entries().iter().filter(|e| e.pid == pid).count(), 1);
+        let wav = Engines::from_config(&cfg).tts.synthesize("端口换好了。", TalkLang::Zh).unwrap();
+        assert!(wav.len() > 1000, "避让端口上的 TTS 应当能合成");
+        eprintln!("smoke: 被占 {busy} → 换到 {url}（pid {pid}），合成 {} 字节", wav.len());
+        // 第二次 ensure：直接复用，不再起一份
+        assert_eq!(ensure_sidecars(&cfg), vec![("TTS", true)]);
+        assert_eq!(SPAWNED.lock().unwrap().iter().filter(|(n, _)| *n == "TTS").count(), 1, "不许重复拉起");
+        shutdown_spawned();
+        assert!(!alive(pid), "退出时要收掉");
+        assert!(registered_pids().is_empty() && override_entry("TTS", &configured).is_none());
+        assert!(load_run_entries().is_empty(), "退出后运行态记录要清掉");
+        drop(blocker_thread); // 线程随进程结束
+    }
+
+    /// 接回来的 pid **不进信号槽位**：信号处理函数没法校验，复用了就是误杀。
+    #[test]
+    fn adopted_pids_never_enter_the_signal_slots() {
+        let src = include_str!("talk.rs");
+        let body = &src[src.find("fn adopt_from_run_file").unwrap()..];
+        let body = &body[..body.find("\n}\n").unwrap()];
+        assert!(!body.contains("register_pid"), "adopt_from_run_file 不许把接回的 pid 放进信号槽位");
     }
 
     #[test]
