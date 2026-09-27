@@ -1188,6 +1188,7 @@
   菜单「恢复独立模式」入口——P2。
 
 ### T6.1.2 P2 单轮端到端（AgentEar 侧）  `DONE`（AgentEar 侧；2026-09-27）
+> ✅ **2026-09-27 对 Agent24 main `604e198`（A3 全部合并）复验**：v0.25.1 发布包 5 次 E2E，4 次 29/0、1 次 24/3（根因未确认，疑本地模型冷启动，见 `docs/data/e2e-agent24-2026-09/final-main-604e198.md`）。**剩 C10 真机手测**（真按键、设置窗口点「连接」、Keychain 首次弹窗、Agent24 桌面「语音」面板 #534）。
 > ✅ **AgentEar 侧 DONE**：v0.25.0（#97）+ v0.25.1（#98 与本 PR）。**E2E 对 Agent24 #529+#532 分支 29/29**（`docs/data/e2e-agent24-2026-09/`）。
 > ⏳ **待 Agent24 合并 A3 系列后对 Agent24 main 复验**（`AGENT24_REF=origin/main BUILD_A24=1 scripts/e2e-agent24.sh`）。真按键 / 设置窗口点「连接」/ Keychain 首次弹窗 / 桌面面板显示仍需 jason 手测（C10）。
 > （以下为原记录，v0.25.0 时的分支 `feat/a24-p2-a3-client`）
@@ -1224,7 +1225,7 @@
 - **还差（DoD）**：与**真 agent24d**（agent24-13 的 A3-1..A3-4 合并后）联调；隐私负测（外部 provider 计数桩 = 0）在
   Agent24 侧 C8 做；真按键 / 设置窗口点击 / Keychain 弹窗需 jason 手测（C10）。
 
-### T6.1.2a #97 评审跟进  `PR_OPEN`（2026-09-27，v0.25.1，分支 `fix/a24-p2-review-nits`）
+### T6.1.2a #97 评审跟进  `DONE`（2026-09-27，#98 合并，随 v0.25.1 发布）
 - `strip_nulls` 递归数组元素；`A24_BUSY` panic 兜底（drop guard）。验收：`cargo test -- strip_nulls_recurses busy_flag` 3 条绿，调用点变异红。
 
 ### T6.1.3 P3 提案闭环  `BLOCKED`（等 T6.1.2）
