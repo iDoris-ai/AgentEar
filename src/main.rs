@@ -296,60 +296,66 @@ fn main() -> Result<()> {
         ];
         println!("combo\trun\tsecs\tchild_maxrss_mb\tserver_rss_mb\ttext");
         let only = flag_value(&args, "--only").map(str::to_string);
-        for (name, backend, model, resident) in combos {
-            if only.as_deref().is_some_and(|o| o != name) {
-                continue;
+        // 跑的过程出错也要先把 config.json 恢复了再报错（PR #93 评审 Nit：
+        // 原来 `?` 直接返回，配置会停在最后一个 combo 上）。
+        let bench = (|| -> Result<()> {
+            for (name, backend, model, resident) in combos {
+                if only.as_deref().is_some_and(|o| o != name) {
+                    continue;
+                }
+                if backend == engine::AsrBackend::SpeechSwift && !qwen3::is_ready(model) {
+                    eprintln!("跳过 {name}：{} 没装", model.label());
+                    continue;
+                }
+                config::update(|c| {
+                    c.asr_backend = backend;
+                    c.qwen3_model = model;
+                    c.qwen3_resident = resident;
+                });
+                if !resident {
+                    qwen3::stop_server("bench 切到逐次调用");
+                }
+                for run in 1..=runs {
+                    let t0 = Instant::now();
+                    let t = asr.transcribe(std::path::Path::new(&wav), asr::AsrLang::Auto)?;
+                    let secs = t0.elapsed().as_secs_f64();
+                    // 逐次调用的峰值：子进程的 ru_maxrss（macOS 单位是字节）。
+                    // 它是「所有已回收子进程里最大的那个」，所以 combo 按内存从小到大排。
+                    let child = unsafe {
+                        let mut ru: libc::rusage = std::mem::zeroed();
+                        libc::getrusage(libc::RUSAGE_CHILDREN, &mut ru);
+                        ru.ru_maxrss as f64 / 1048576.0
+                    };
+                    let server = qwen3::server_pid()
+                        .and_then(|pid| {
+                            std::process::Command::new("/bin/ps")
+                                .args(["-o", "rss=", "-p", &pid.to_string()])
+                                .output()
+                                .ok()
+                        })
+                        .and_then(|o| String::from_utf8_lossy(&o.stdout).trim().parse::<f64>().ok())
+                        .map(|kb| format!("{:.0}", kb / 1024.0))
+                        .unwrap_or_else(|| "-".into());
+                    println!("{name}\t{run}\t{secs:.3}\t{child:.0}\t{server}\t{}", t.text.replace('\t', " "));
+                }
             }
-            if backend == engine::AsrBackend::SpeechSwift && !qwen3::is_ready(model) {
-                eprintln!("跳过 {name}：{} 没装", model.label());
-                continue;
-            }
-            config::update(|c| {
-                c.asr_backend = backend;
-                c.qwen3_model = model;
-                c.qwen3_resident = resident;
-            });
-            if !resident {
-                qwen3::stop_server("bench 切到逐次调用");
-            }
-            for run in 1..=runs {
+            // `--hold <秒>`：跑完后进程再挂一会儿，用来实测空闲回收（常驻服务到点自己退）
+            if let Some(h) = flag_value(&args, "--hold").and_then(|v| v.parse::<u64>().ok()) {
                 let t0 = Instant::now();
-                let t = asr.transcribe(std::path::Path::new(&wav), asr::AsrLang::Auto)?;
-                let secs = t0.elapsed().as_secs_f64();
-                // 逐次调用的峰值：子进程的 ru_maxrss（macOS 单位是字节）。
-                // 它是「所有已回收子进程里最大的那个」，所以 combo 按内存从小到大排。
-                let child = unsafe {
-                    let mut ru: libc::rusage = std::mem::zeroed();
-                    libc::getrusage(libc::RUSAGE_CHILDREN, &mut ru);
-                    ru.ru_maxrss as f64 / 1048576.0
-                };
-                let server = qwen3::server_pid()
-                    .and_then(|pid| {
-                        std::process::Command::new("/bin/ps")
-                            .args(["-o", "rss=", "-p", &pid.to_string()])
-                            .output()
-                            .ok()
-                    })
-                    .and_then(|o| String::from_utf8_lossy(&o.stdout).trim().parse::<f64>().ok())
-                    .map(|kb| format!("{:.0}", kb / 1024.0))
-                    .unwrap_or_else(|| "-".into());
-                println!("{name}\t{run}\t{secs:.3}\t{child:.0}\t{server}\t{}", t.text.replace('\t', " "));
+                while t0.elapsed() < std::time::Duration::from_secs(h) {
+                    std::thread::sleep(std::time::Duration::from_secs(5));
+                    eprintln!("hold {:>4}s  server_pid={:?}", t0.elapsed().as_secs(), qwen3::server_pid());
+                }
             }
-        }
-        // `--hold <秒>`：跑完后进程再挂一会儿，用来实测空闲回收（常驻服务到点自己退）
-        if let Some(h) = flag_value(&args, "--hold").and_then(|v| v.parse::<u64>().ok()) {
-            let t0 = Instant::now();
-            while t0.elapsed() < std::time::Duration::from_secs(h) {
-                std::thread::sleep(std::time::Duration::from_secs(5));
-                eprintln!("hold {:>4}s  server_pid={:?}", t0.elapsed().as_secs(), qwen3::server_pid());
-            }
-        }
+            Ok(())
+        })();
         qwen3::stop_server("bench 结束");
         config::update(|c| {
             c.asr_backend = saved.asr_backend;
             c.qwen3_model = saved.qwen3_model;
             c.qwen3_resident = saved.qwen3_resident;
         });
+        bench?;
         return Ok(());
     }
 

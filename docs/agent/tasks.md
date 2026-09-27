@@ -995,7 +995,7 @@
 - 加版本握手 + capability probe + CLI 输出契约测试；
   不兼容时**拒绝启动并给出可操作错误**，不要运行中静默错乱。
 
-### T3.5.6 Qwen3-ASR 可配置 + 按需自动下载  `PR_OPEN`（v0.23.0，2026-09-26）
+### T3.5.6 Qwen3-ASR 可配置 + 按需自动下载  `DONE`（v0.23.0 已发布，PR #93 `4251e68`，2026-09-27）
 - **来源**：Q4 的决定（jason 2026-09-26）——「ASR 本身就是要做成可配置的。
   默认用一个（随包的 SenseVoice），配置了另一个（如 Qwen3-ASR 1.7B）就自动下载下来用。」
 - **调研**：[ADR-0010](../decisions/0010-qwen3-asr-optional-backend.md)（PR #91，调研原始数据见其 RAW）。**jason 2026-09-26 拍板 §6 六问**：
@@ -1020,6 +1020,19 @@
 - **实测**（`benchmarks-asr-zh-en.md` §9，n=4 热态）：常驻热态 0.6B 0.09–0.35 s、1.7B 0.19–0.69 s；
   逐次 1.8–2.5 s；内存 0.6B ≈ 816 MiB、1.7B ≈ 2.49 GiB。从零下载运行时 + 0.6B 共 137 s（本机网络）。
 - **没测**：设置窗口 / 菜单栏的真实点击；守护进程里的真按键链路；常驻形态的准确率（60×3 组没重跑）。
+
+### T3.5.8 PR #93 评审遗留  `PR_OPEN`（v0.23.1，2026-09-27）
+- **来源**：PR #93 的 clestons 评审（APPROVE，附 N1 / S1 / Nit）。
+- **N1**：`speech-server.pid` 被守护进程与命令行子命令共用 → 常驻开着时跑 `--transcribe` 等会杀掉守护进程的常驻服务、并改写/删除 pid 文件。
+  修法：每个拥有者一份 `speech-server-<拥有者 pid>.pid`（内容 `<拥有者> <服务>`）；
+  `reap_verdict`：拥有者活着且不是自己 → 不碰；删文件只删自己名下且服务 pid 对得上的那份。
+  拥有者「活着」= 进程存在 **且** 命令行含 agentear（拥有者 pid 被复用时方向是漏收，不是误杀）。
+  测试：`reap_does_not_kill_a_live_owners_server_but_reaps_orphans`（真进程 + 真 ps，走 `reap_stale_in` 调用路径）+ 判据真值表；
+  调用点三处变异均变红。
+- **S1**：`qwen3.rs` 模块文档改为「只挡静默联网下载（TCP）」，写明 UDP / 文件系统未禁、不是隐私边界。
+- **Nit**：`--asr-bench` 出错先恢复配置再返回错误（实测：修前停在 `builtin 0.6b false`，修后恢复原值）；
+  `ensure_server_locked` 超时路径改为先撤登记再杀；音色菜单 tag 区间封顶在 `800..900`（最多列 100 条音色）。
+- **未改（记录）**：`download.rs` 的 `CurlSlot` 在 `try_wait` 之后才释放槽位，与上面同属「先回收后撤登记」的微秒级残余，评审判 Nit，本 PR 不动。
 
 ### T3.5.7 Qwen3-ASR GGUF 路线的准确率评测  `BACKLOG`（2026-09-26 新增）
 - **来源**：ADR-0010 §4.5 / §6.1——jason 定「先上 speech-swift」，GGUF（llama.cpp +
