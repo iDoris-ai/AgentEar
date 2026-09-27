@@ -133,6 +133,10 @@ const TAG_MODE_BASE: isize = 500;
 const TAG_STYLE_BASE: isize = 600;
 const TAG_TONE_BASE: isize = 700;
 const TAG_VOICE_BASE: isize = 800;
+/// 音色 tag 的区间宽度：`800..900`。**音色最多列 100 条**——再多就会撞进
+/// `TAG_ASR_ENGINE_BASE`（900）/ `TAG_QWEN3_DL_BASE`（950），点音色变成切识别引擎。
+/// （PR #93 评审 Nit：原来 `checked_sub(TAG_VOICE_BASE)` 没有上界。）
+const VOICE_TAG_SPAN: usize = (TAG_ASR_ENGINE_BASE - TAG_VOICE_BASE) as usize;
 const TAG_CORRECT_TERMS: isize = 5;
 const TAG_OPEN_TERMS: isize = 6;
 const TAG_START_SIDECAR: isize = 7;
@@ -462,6 +466,7 @@ fn populate(menu: &NSMenu, mtm: MainThreadMarker, target: &MenuTarget) {
             &voice_item,
             voices
                 .iter()
+                .take(VOICE_TAG_SPAN)
                 .enumerate()
                 .map(|(i, name)| {
                     item(
@@ -735,9 +740,9 @@ fn handle(tag: isize, mtm: MainThreadMarker) {
             return;
         }
     }
-    if let Some(i) = tag.checked_sub(TAG_VOICE_BASE) {
+    if let Some(i) = voice_index_for_tag(tag) {
         let cfg = config::get();
-        if let Some(name) = list_voices(&cfg, &store_root()).get(i as usize) {
+        if let Some(name) = list_voices(&cfg, &store_root()).get(i) {
             let name = name.clone();
             config::update(|c| c.tts_voice = Some(name.clone()));
             log::info!("音色：{name}");
@@ -995,6 +1000,13 @@ fn handle_qwen3(tag: isize) -> bool {
         return true;
     }
     false
+}
+
+/// tag → 音色下标。只认 `800..900`，别的区间（900 引擎 / 950 下载 / 1000 设备）一律不是音色。
+fn voice_index_for_tag(tag: isize) -> Option<usize> {
+    (TAG_VOICE_BASE..TAG_VOICE_BASE + VOICE_TAG_SPAN as isize)
+        .contains(&tag)
+        .then(|| (tag - TAG_VOICE_BASE) as usize)
 }
 
 /// `base + 下标` → 模型。纯函数，测试钉住（tag 反推错了就会下错 / 切错模型）。
@@ -1574,6 +1586,17 @@ mod tests {
         assert_eq!(qwen3_model_for_tag(TAG_QWEN3_DL_BASE + 2, TAG_QWEN3_DL_BASE), None);
         // 都要落在设备区（1000+）之前，否则会被 `t >= TAG_DEVICE_BASE` 吞掉
         assert!(TAG_QWEN3_DL_BASE + (Qwen3Model::ALL.len() as isize) < TAG_DEVICE_BASE);
+    }
+
+    /// 音色区间有上界：900/950/1000 不能被当成第 100/150/200 条音色。
+    #[test]
+    fn voice_tags_do_not_swallow_other_ranges() {
+        assert_eq!(voice_index_for_tag(TAG_VOICE_BASE), Some(0));
+        assert_eq!(voice_index_for_tag(TAG_ASR_ENGINE_BASE - 1), Some(VOICE_TAG_SPAN - 1));
+        assert_eq!(voice_index_for_tag(TAG_ASR_ENGINE_BASE), None);
+        assert_eq!(voice_index_for_tag(TAG_QWEN3_DL_BASE), None);
+        assert_eq!(voice_index_for_tag(TAG_DEVICE_BASE), None);
+        assert_eq!(voice_index_for_tag(TAG_TONE_BASE), None);
     }
 
     #[test]

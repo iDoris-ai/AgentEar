@@ -20,7 +20,13 @@
 //! 会被当成仓库名、重试 5 次约 2 分钟才报错。我们的承诺是「模型由我们下、
 //! 校验过的那份才用」，所以 speech 的每一次启动都跑在
 //! `sandbox-exec` 的「禁止出站 TCP」里：布局错了就**当场报错**，
-//! 不会在用户不知情的情况下去 Hugging Face 拉几百 MB，也不会把录音相关的任何东西送出去。
+//! 不会在用户不知情的情况下去 Hugging Face 拉几百 MB。
+//!
+//! ⚠️ **它挡的只是「静默联网下载（TCP）」，不是隐私边界**：profile 是
+//! `(allow default)` + 禁出站 TCP，**文件系统全开、出站 UDP 也开着**
+//! （PR #93 评审实测：沙箱里 `dig @1.1.1.1` 能通，TCP 到 huggingface.co 是 `curl: (7)`；
+//! 为什么不连 UDP 一起禁，见下面 `speech_command` 处的说明）。
+//! 所以别把它写成「不会把录音相关的任何东西送出去」——那是它做不到的承诺。
 //! `sandbox-exec` 不存在（未来系统删掉它）时退化为直接运行，并打一行告警。
 //!
 //! ## 默认值（jason 2026-09-26：「默认小内存」）
@@ -816,31 +822,139 @@ fn health_ok(port: u16) -> bool {
 /// 守护进程被 `kill -9`（v0.20.1 起 launchd 会把它拉回来）或崩溃时，
 /// 信号处理函数没机会跑，常驻服务就成了一个没人管的 1–2.5 GiB 孤儿。
 /// 下次启动时 [`reap_stale_server`] 按这个文件收掉它。
-fn pid_file() -> Option<PathBuf> {
-    root().map(|r| r.join("speech-server.pid"))
+///
+/// ## 为什么按「拥有者」分文件（v0.23.1，PR #93 评审 N1）
+///
+/// v0.23.0 只有一个 `speech-server.pid`，守护进程和命令行子命令
+/// （`--transcribe` / `--talk-turn` / `--asr-bench`）共用：常驻开着时跑一条命令行，
+/// 它会把**守护进程正在用的**常驻服务当成孤儿杀掉、再把文件改写成自己的；
+/// 命令行退出时又不看内容就删文件，守护进程的孤儿兜底也跟着没了。
+/// 现在每个拉起服务的 AgentEar 进程写自己的 `speech-server-<拥有者 pid>.pid`，
+/// 内容是 `<拥有者 pid> <服务 pid>`；**拥有者还活着、且不是自己，就不碰**。
+fn pid_file_for(dir: &Path, owner: i32) -> PathBuf {
+    dir.join(format!("speech-server-{owner}.pid"))
+}
+
+/// v0.23.0 的旧文件名（没有拥有者信息）。升级后第一次启动时按老规矩收一次。
+const LEGACY_PID_FILE: &str = "speech-server.pid";
+
+/// 解析 pid 文件：`<拥有者> <服务>`，或 v0.23.0 的旧格式 `<服务>`（拥有者未知）。
+fn parse_pid_file(text: &str) -> Option<(Option<i32>, i32)> {
+    let mut it = text.split_whitespace();
+    let first = it.next()?.parse::<i32>().ok()?;
+    match it.next() {
+        None => Some((None, first)),
+        Some(second) => Some((Some(first), second.parse::<i32>().ok()?)),
+    }
+}
+
+/// 对一条 pid 记录该怎么办。纯函数，测试钉住（真值表见 `reap_verdict_truth_table`）。
+#[derive(Debug, PartialEq, Eq)]
+enum ReapVerdict {
+    /// 别人的（拥有者还活着）或自己正在用的：文件和进程都不碰。
+    Keep,
+    /// 孤儿：命令行确认是我们的 speech-server 才杀，然后删文件。
+    KillAndRemove,
+    /// 记录本身坏了：只删文件。
+    RemoveOnly,
+}
+
+fn reap_verdict(
+    owner: Option<i32>,
+    server: i32,
+    me: i32,
+    current_server: Option<i32>,
+    owner_alive: bool,
+) -> ReapVerdict {
+    if server <= 0 {
+        return ReapVerdict::RemoveOnly;
+    }
+    if Some(server) == current_server {
+        return ReapVerdict::Keep;
+    }
+    match owner {
+        // 另一个还活着的 AgentEar（守护进程 ↔ 命令行）的服务：不是孤儿
+        Some(o) if o != me && owner_alive => ReapVerdict::Keep,
+        // 拥有者死了 / 是自己但已经不是当前那个 / 旧格式不知道拥有者
+        _ => ReapVerdict::KillAndRemove,
+    }
+}
+
+/// 拥有者还在不在：进程存在，**且命令行里带 agentear**。
+/// 只看「进程存在」不够——拥有者的 pid 也会被系统复用；复用的话我们判「还活着」，
+/// 后果是这次漏收一个孤儿（下次拥有者 pid 空出来再收），方向是安全的。
+fn owner_alive(pid: i32) -> bool {
+    if pid <= 0 {
+        return false;
+    }
+    let exists = unsafe { libc::kill(pid, 0) } == 0
+        || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM);
+    // 进程在、但读不到命令行（`ps` 起不来）：**当它还活着**——
+    // 判错成「死了」就会去收一个可能正在被用的服务，那是误杀方向；判成活着只是这次漏收。
+    exists && cmdline_of(pid).map_or(true, |c| c.to_lowercase().contains("agentear"))
+}
+
+/// 读进程命令行。`None` = **读不到**（`ps` 起不来），与「读到了、是空的」（进程已不在）分开。
+fn cmdline_of(pid: i32) -> Option<String> {
+    Command::new("/bin/ps")
+        .args(["-o", "command=", "-p", &pid.to_string()])
+        .output()
+        .ok()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
 }
 
 /// 收掉上一次留下的孤儿 speech-server。
 ///
-/// **只杀确认是我们的那个**：pid 会被系统复用，所以先读这个 pid 的命令行，
-/// 必须是我们运行时目录里的 `speech-server` 才动手——宁可漏收，不能误杀别人的进程。
+/// **只收孤儿**：拥有者（拉起它的那个 AgentEar 进程）还活着就不碰，
+/// 所以守护进程和命令行子命令不会再互相杀对方的常驻服务。
+/// **真动手之前再核命令行**：pid 会被系统复用，必须是我们运行时目录里的
+/// `speech-server` 才发信号——宁可漏收，不能误杀别人的进程。
 pub fn reap_stale_server() {
-    let Some(pf) = pid_file() else { return };
-    let Ok(text) = fs::read_to_string(&pf) else { return };
-    let _ = fs::remove_file(&pf);
-    let Ok(pid) = text.trim().parse::<i32>() else { return };
-    if pid <= 0 || Some(pid) == server_pid() {
-        return;
+    let (Some(dir), Some(bin)) = (root(), server_bin()) else { return };
+    reap_stale_in(&dir, &bin, std::process::id() as i32, server_pid());
+}
+
+fn reap_stale_in(dir: &Path, bin: &Path, me: i32, current_server: Option<i32>) {
+    let Ok(entries) = fs::read_dir(dir) else { return };
+    for e in entries.flatten() {
+        let name = e.file_name().to_string_lossy().to_string();
+        let is_pid_file = name == LEGACY_PID_FILE
+            || (name.starts_with("speech-server-") && name.ends_with(".pid"));
+        if !is_pid_file {
+            continue;
+        }
+        let path = e.path();
+        let Ok(text) = fs::read_to_string(&path) else { continue };
+        let Some((owner, server)) = parse_pid_file(&text) else {
+            let _ = fs::remove_file(&path);
+            continue;
+        };
+        let alive = owner.is_some_and(owner_alive);
+        match reap_verdict(owner, server, me, current_server, alive) {
+            ReapVerdict::Keep => {}
+            ReapVerdict::RemoveOnly => {
+                let _ = fs::remove_file(&path);
+            }
+            ReapVerdict::KillAndRemove => {
+                // 读不到命令行就不杀（宁可漏收）
+                if cmdline_of(server).is_some_and(|c| is_our_server_cmdline(&c, bin)) {
+                    log::warn!("发现上一次留下的 Qwen3-ASR 常驻服务（pid {server}），收掉");
+                    unsafe { libc::kill(server, libc::SIGTERM) };
+                }
+                let _ = fs::remove_file(&path);
+            }
+        }
     }
-    let Some(bin) = server_bin() else { return };
-    let cmdline = Command::new("/bin/ps")
-        .args(["-o", "command=", "-p", &pid.to_string()])
-        .output()
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-        .unwrap_or_default();
-    if is_our_server_cmdline(&cmdline, &bin) {
-        log::warn!("发现上一次留下的 Qwen3-ASR 常驻服务（pid {pid}），收掉");
-        unsafe { libc::kill(pid, libc::SIGTERM) };
+}
+
+/// 删自己那份 pid 文件——**只删内容里的服务 pid 就是 `server` 的那份**。
+fn remove_own_pid_file(server: i32) {
+    let Some(dir) = root() else { return };
+    let pf = pid_file_for(&dir, std::process::id() as i32);
+    if let Ok(text) = fs::read_to_string(&pf) {
+        if parse_pid_file(&text).is_some_and(|(_, s)| s == server) {
+            let _ = fs::remove_file(pf);
+        }
     }
 }
 
@@ -853,9 +967,7 @@ fn is_our_server_cmdline(cmdline: &str, our_bin: &Path) -> bool {
 fn kill_server(s: &mut Server, why: &str) {
     log::info!("停掉 Qwen3-ASR 常驻服务（{}，端口 {}）：{why}", s.model.label(), s.port);
     SERVER_PID.store(0, Ordering::SeqCst);
-    if let Some(pf) = pid_file() {
-        let _ = fs::remove_file(pf);
-    }
+    remove_own_pid_file(s.child.id() as i32);
     unsafe { libc::kill(s.child.id() as i32, libc::SIGTERM) };
     // 给它 2 s 自己退，不退就硬杀——别让一个卡住的进程攥着 2 GB 内存
     let start = Instant::now();
@@ -911,22 +1023,27 @@ fn ensure_server_locked(slot: &mut Option<Server>, m: Qwen3Model) -> Result<u16>
     let mut child = cmd.spawn().context("拉起 speech-server 失败")?;
     SERVER_PID.store(child.id() as i32, Ordering::SeqCst);
     // 注意：套了 sandbox-exec 时它会 exec 成 speech-server，pid 不变——记的就是服务本身
-    if let Some(pf) = pid_file() {
-        let _ = fs::write(pf, child.id().to_string());
+    if let Some(dir) = root() {
+        let me = std::process::id() as i32;
+        let _ = fs::write(pid_file_for(&dir, me), format!("{me} {}", child.id()));
     }
     let start = Instant::now();
     loop {
         if let Ok(Some(st)) = child.try_wait() {
+            // try_wait 已经把它回收了——这一条没法「先清后收」，窗口只有这几行
             SERVER_PID.store(0, Ordering::SeqCst);
+            remove_own_pid_file(child.id() as i32);
             bail!("speech-server 启动后立刻退出了（{st}），日志：{}", log_path.display());
         }
         if health_ok(port) {
             break;
         }
         if start.elapsed() > SERVER_READY_TIMEOUT {
+            // 与 kill_server 同一个顺序：先撤登记（SERVER_PID + pid 文件），再杀、再回收
+            SERVER_PID.store(0, Ordering::SeqCst);
+            remove_own_pid_file(child.id() as i32);
             let _ = child.kill();
             let _ = child.wait();
-            SERVER_PID.store(0, Ordering::SeqCst);
             bail!("speech-server 在 {SERVER_READY_TIMEOUT:?} 内没就绪，日志：{}", log_path.display());
         }
         std::thread::sleep(Duration::from_millis(200));
@@ -1155,6 +1272,107 @@ mod tests {
             !is_our_server_cmdline(&format!("{}-evil --port 1", ours.display()), ours),
             "前缀相同的别的程序不算"
         );
+    }
+
+    #[test]
+    fn pid_file_parses_new_and_legacy_formats() {
+        assert_eq!(parse_pid_file("123 456\n"), Some((Some(123), 456)));
+        assert_eq!(parse_pid_file("456"), Some((None, 456)), "v0.23.0 的旧格式：拥有者未知");
+        assert_eq!(parse_pid_file(""), None);
+        assert_eq!(parse_pid_file("abc 1"), None);
+        assert_eq!(parse_pid_file("1 abc"), None);
+    }
+
+    /// N1 的判据：拥有者还活着、且不是自己 → 绝不碰。
+    #[test]
+    fn reap_verdict_truth_table() {
+        use ReapVerdict::*;
+        let me = 100;
+        assert_eq!(reap_verdict(Some(200), 900, me, None, true), Keep, "另一个活着的 AgentEar 的服务不是孤儿");
+        assert_eq!(reap_verdict(Some(200), 900, me, None, false), KillAndRemove, "拥有者死了 → 孤儿");
+        assert_eq!(reap_verdict(Some(me), 900, me, Some(900), true), Keep, "自己正在用的");
+        assert_eq!(reap_verdict(Some(me), 900, me, Some(901), true), KillAndRemove, "自己的旧服务（已换新的）");
+        assert_eq!(reap_verdict(Some(me), 900, me, None, true), KillAndRemove, "自己名下但当前没有服务：上一个同 pid 进程留下的");
+        assert_eq!(reap_verdict(None, 900, me, None, false), KillAndRemove, "旧格式按老规矩收（仍要过命令行核对）");
+        assert_eq!(reap_verdict(Some(200), 0, me, None, true), RemoveOnly);
+        assert_eq!(reap_verdict(Some(200), 900, me, Some(900), true), Keep);
+    }
+
+    /// 起一个「命令行里带某个路径」的真进程：`/bin/sh <path>`，脚本里循环 sleep。
+    fn spawn_script(path: &Path) -> std::process::Child {
+        fs::write(path, "while :; do sleep 1; done\n").unwrap();
+        Command::new("/bin/sh")
+            .arg(path)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap()
+    }
+
+    fn is_running(child: &mut std::process::Child) -> bool {
+        // 给 SIGTERM 一点时间生效
+        for _ in 0..20 {
+            if !matches!(child.try_wait(), Ok(None)) {
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        true
+    }
+
+    /// PR #93 评审 N1 的真实场景：命令行视角（自己没有常驻服务）去 reap，
+    /// **不能杀掉另一个还活着的 AgentEar（守护进程）拥有的常驻服务**；
+    /// 拥有者死了以后才收。用真进程 + 真 `ps` 走 `reap_stale_in` 这条调用路径。
+    #[test]
+    fn reap_does_not_kill_a_live_owners_server_but_reaps_orphans() {
+        let dir = std::env::temp_dir().join(format!("agentear-reap-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let bin = dir.join("speech-server");
+        let mut server = spawn_script(&bin);
+        let mut owner = spawn_script(&dir.join("agentear-owner"));
+        let (sp, op) = (server.id() as i32, owner.id() as i32);
+        // 断言失败（panic）时也要收掉这些脚本进程，否则会一直 sleep 下去
+        struct Reap(Vec<i32>, PathBuf);
+        impl Drop for Reap {
+            fn drop(&mut self) {
+                for p in &self.0 {
+                    unsafe { libc::kill(*p, libc::SIGKILL) };
+                }
+                let _ = fs::remove_dir_all(&self.1);
+            }
+        }
+        let mut guard = Reap(vec![sp, op], dir.clone());
+        let pf = pid_file_for(&dir, op);
+        fs::write(&pf, format!("{op} {sp}")).unwrap();
+        let me = std::process::id() as i32;
+
+        // ① 拥有者活着：命令行视角 reap（current=None）不能动它
+        reap_stale_in(&dir, &bin, me, None);
+        assert!(is_running(&mut server), "守护进程的常驻服务被命令行杀掉了（N1）");
+        assert!(pf.exists(), "别人的 pid 文件不能删");
+
+        // ② 拥有者死了：这才是孤儿，收掉并删文件
+        let _ = owner.kill();
+        let _ = owner.wait();
+        reap_stale_in(&dir, &bin, me, None);
+        assert!(!is_running(&mut server), "拥有者死了之后孤儿要被收掉");
+        assert!(!pf.exists());
+
+        // ③ 旧格式文件 + 命令行不是我们的 speech-server：不杀（pid 复用保护仍在）
+        let mut other = spawn_script(&dir.join("unrelated"));
+        guard.0.push(other.id() as i32);
+        let legacy = dir.join(LEGACY_PID_FILE);
+        fs::write(&legacy, other.id().to_string()).unwrap();
+        reap_stale_in(&dir, &bin, me, None);
+        assert!(is_running(&mut other), "命令行对不上的进程不能杀");
+        assert!(!legacy.exists());
+        let _ = other.kill();
+        let _ = other.wait();
+        let _ = server.kill();
+        let _ = server.wait();
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
