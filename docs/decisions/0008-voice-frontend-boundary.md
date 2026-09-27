@@ -188,3 +188,14 @@ AgentEar 由用户安装和启动，持有 TCC 权限和全局热键；可以独
 §3 的两条硬约束**在附着模式下照样成立**：proposal 只提出、不执行；显示的内容和执行的内容必须同源。
 附着模式下，§1 表里的「确认 UI」彻底交给宿主，AgentEar 关掉本地的语音二次确认，
 把用户的答复作为 `confirm_reply` 事件交出去（与 agent24-13 约定，2026-09-27）。
+
+## 嵌入状态（2026-09-27 回填）
+
+- **形态**：A3 附着式模块（AgentEar 自启，向已运行的 Agent24 注册），热键 / 麦克风 / 播放 / TCC / 配置归 AgentEar，
+  回执留档归 Agent24（本 ADR §5 六问的答复）。
+- **协议**：Agent24 `docs/design/A3-ATTACHED-MODULE.md` **v2，冻结于 Agent24 #524**（@68c2412）；
+  Agent24 侧实现 #526（A3-2a）/ #527 / #529（A3-2b）/ #532（A3-3）。事件 / 提案 / 命令 schema 在本仓库
+  `contracts/`（基准 `522f9eb`）。
+- **实测**：AgentEar v0.25.x 对 Agent24 #532@`b111ac4` 分支端到端 **29/29 通过**
+  （`docs/data/e2e-agent24-2026-09/`）。⚠️ 这是对**未合并分支**的预跑，Agent24 合并后需对其 main 复验。
+- **本 ADR §3 冻结的 `agentear.proposal/1` 与两条硬约束不变**；附着时 `builtin` 提案宿主只展示、不执行。

@@ -94,3 +94,14 @@ P1 可由两边并行开发，但只能用 fake host/module 和暂定 fixtures�
 5. `agentear.event/1` 与 command schema 的 JSON Schema 所属仓库和版本发布方式。建议 AgentEar 维护生产事件/proposal schema，Agent24 维护 callback/SDK schema；双方 CI 用同一份 fixtures 做兼容测试。
 
 关闭后，将确认的状态、传输和兼容版本回填 AgentEar ADR-0008 与 Agent24 ADR-032。若实现偏离本约定，先更新 schema 和双方 ADR，再合并实现。
+
+### §7 各项状态（2026-09-27 回填；只追加状态，不改上方约定正文）
+
+1. **A3 附着协议与宿主命令入口** → ✅ 已冻结：Agent24 #524（`docs/design/A3-ATTACHED-MODULE.md` v2 @68c2412）；
+   已实现：#526（A3-2a 存储/REST/CLI）、#527、#529（A3-2b 监听/生命周期）、#532（A3-3 反向命令，走同一连接 `_a24/command/invoke`）。
+   AgentEar 侧：v0.25.0（#97）。端到端对 #532@`b111ac4` 29/29。
+2. **断开后自动独立 vs 停听** → ✅ 已决（B5，jason 2026-09-27）：独立推理是本机边车 → 自动回独立模式；否则停听并提示；设置可改。
+3. **session 与 Agent24 run/memory** → ⏳ 第一版**单轮**，未接多轮记忆（`memory` 能力未授予）；不宣称多轮已接通。
+4. **proposal 三种 action 的宿主支持** → ⏳ 属 P3。现阶段宿主只展示 proposal，**`builtin` 标「已在 AgentEar 本地执行」、永不执行**；P3 执行门也排除 builtin。
+5. **schema 所属与发布** → ✅ AgentEar 维护 `agentear.event/1`、`agentear.proposal/1`、`agentear.command/1`（本仓库 `contracts/`，基准 `522f9eb`）；
+   Agent24 以 vendored 副本 + 记录 commit 的方式引用；error.code = wire ErrorKind 18 个 + AgentEar 自有 4 个。

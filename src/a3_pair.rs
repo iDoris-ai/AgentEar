@@ -17,11 +17,12 @@ use serde_json::Value;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-/// 引入 `os attach` 的 Agent24 版本。
+/// 开始随正式版一起发出 A3 附着的 Agent24 版本（计划 v0.5.0）。
 ///
-/// TODO(T6.1.2)：**待 Agent24 A3-2 合并后填入真实版本**（A3 §3.6 `<A3_MIN_VERSION>`）。
-/// 现在填 0.0.0 = 不挡任何版本；真正的兼容由 CLI 本身报错兜底（老 CLI 没有 `os attach` 子命令）。
-pub const A3_MIN_VERSION: (u64, u64, u64) = (0, 0, 0);
+/// ⚠️ **只用于附加提示，不作门槛**：Agent24 在 ME4 期间没发版，main 上 `agent24 --version`
+/// 一直报 0.3.0，而 A3 已经在里面了——按版本号挡会把能用的 CLI 拒掉。
+/// 能不能用只看能力探测（[`probe_attach`]）。
+pub const A3_RELEASE_VERSION: (u64, u64, u64) = (0, 5, 0);
 
 /// Keychain 里存 token 的 service / account。
 pub const KEYCHAIN_SERVICE: &str = "ai.idoris.agentear.agent24";
@@ -78,21 +79,71 @@ pub fn parse_semver(s: &str) -> Option<(u64, u64, u64)> {
     None
 }
 
-pub fn version_ok(v: (u64, u64, u64)) -> bool {
-    v >= A3_MIN_VERSION
+/// 能力探测的结论。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AttachSupport {
+    /// `agent24 os attach list --json` 退出码 0 且输出是 `{"modules":[...]}`。
+    Supported,
+    /// 子命令不存在（clap 报 unrecognized subcommand）或输出不是预期形状：这个 CLI 不支持附着模块。
+    Unsupported(String),
 }
 
-fn check_version(cli: &Path) -> Result<()> {
-    let out = Command::new(cli).arg("--version").output().with_context(|| format!("跑不了 {}", cli.display()))?;
-    let text = String::from_utf8_lossy(&out.stdout);
-    let v = parse_semver(&text).with_context(|| format!("看不懂 `agent24 --version` 的输出：{}", text.trim()))?;
-    if !version_ok(v) {
-        bail!(
-            "Agent24 版本太旧（{}.{}.{}，要 ≥ {}.{}.{}）：请先升级 Agent24",
-            v.0, v.1, v.2, A3_MIN_VERSION.0, A3_MIN_VERSION.1, A3_MIN_VERSION.2
-        );
+/// 按 `os attach list --json` 的结果判断 CLI 是否支持 A3（纯函数，便于用真值表测）。
+pub fn judge_attach_probe(success: bool, stdout: &str, stderr: &str) -> AttachSupport {
+    if !success {
+        let why = stderr.lines().find(|l| !l.trim().is_empty()).unwrap_or("").trim().to_string();
+        return AttachSupport::Unsupported(if why.is_empty() { "`os attach list` 失败".into() } else { why });
     }
-    Ok(())
+    match serde_json::from_str::<Value>(stdout.trim()) {
+        Ok(v) if v.get("modules").is_some_and(Value::is_array) => AttachSupport::Supported,
+        _ => AttachSupport::Unsupported(format!(
+            "`os attach list --json` 的输出不是 {{\"modules\":[...]}}：{}",
+            stdout.trim().chars().take(120).collect::<String>()
+        )),
+    }
+}
+
+/// 跑一次 `agent24 os attach list --json`（只读，不改任何注册）。
+///
+/// ⚠️ **有副作用、别反复调**：没有常驻 daemon 时，CLI 会临时拉起一个 ephemeral daemon 应答后
+/// 再收掉（agent24-13 在 Agent24 main 上实测）。所以只在「点连接」和「manifest digest 变了要
+/// 自动轮换」这两处各探一次（都经 [`pair`]），**不在任何重连/定时循环里调用**。
+pub fn probe_attach(cli: &Path) -> Result<AttachSupport> {
+    let out = Command::new(cli)
+        .args(["os", "attach", "list", "--json"])
+        .stdin(std::process::Stdio::null())
+        .output()
+        .with_context(|| format!("跑不了 {}", cli.display()))?;
+    Ok(judge_attach_probe(
+        out.status.success(),
+        &String::from_utf8_lossy(&out.stdout),
+        &String::from_utf8_lossy(&out.stderr),
+    ))
+}
+
+/// 版本号只做附加提示（见 [`A3_RELEASE_VERSION`]）。
+pub fn version_note(version_output: &str) -> Option<String> {
+    let v = parse_semver(version_output)?;
+    Some(if v >= A3_RELEASE_VERSION {
+        format!("Agent24 {}.{}.{}：正式版已支持附着模块", v.0, v.1, v.2)
+    } else {
+        format!("Agent24 {}.{}.{}（开发版；是否支持以能力探测为准）", v.0, v.1, v.2)
+    })
+}
+
+/// 配对前的兼容检查：**能力探测**，不是版本闸。
+fn check_attach_support(cli: &Path) -> Result<()> {
+    if let Ok(out) = Command::new(cli).arg("--version").output() {
+        if let Some(note) = version_note(&String::from_utf8_lossy(&out.stdout)) {
+            log::info!("{note}");
+        }
+    }
+    match probe_attach(cli)? {
+        AttachSupport::Supported => Ok(()),
+        AttachSupport::Unsupported(why) => {
+            bail!("你的 Agent24 版本还不支持附着模块，请升级 Agent24（{why}）")
+        }
+    }
 }
 
 // ---------------------------------------------------------------- CLI 输出
@@ -209,7 +260,7 @@ pub fn pair(data_root: &Path) -> Result<(), AddError> {
     let cli = find_cli(cfg.agent24_cli_path.as_deref()).ok_or_else(|| {
         AddError::Failed("找不到 agent24 命令（设置里可指定路径，或装到 ~/.agent24/bin/）".into())
     })?;
-    check_version(&cli).map_err(|e| AddError::Failed(format!("{e:#}")))?;
+    check_attach_support(&cli).map_err(|e| AddError::Failed(format!("{e:#}")))?;
     let manifest = write_manifest(data_root).map_err(|e| AddError::Failed(format!("写 manifest 失败：{e:#}")))?;
     let out = Command::new(&cli)
         .args(["os", "attach", "add"])
@@ -364,11 +415,62 @@ mod tests {
     }
 
     #[test]
-    fn semver_parsing_and_gate() {
+    fn semver_parsing_and_version_is_only_a_note() {
         assert_eq!(parse_semver("agent24 0.5.2\n"), Some((0, 5, 2)));
         assert_eq!(parse_semver("agent24 v1.10.3-beta (abc)"), Some((1, 10, 3)));
         assert_eq!(parse_semver("no version here"), None);
-        assert!(version_ok(A3_MIN_VERSION));
+        assert!(version_note("agent24 0.5.0").unwrap().contains("已支持"));
+        assert!(version_note("agent24 0.3.0").unwrap().contains("以能力探测为准"));
+        assert_eq!(version_note("garbage"), None);
+    }
+
+    #[test]
+    fn attach_probe_truth_table() {
+        assert_eq!(judge_attach_probe(true, "{\"modules\":[]}\n", ""), AttachSupport::Supported);
+        assert_eq!(
+            judge_attach_probe(true, r#"{"modules":[{"name":"agentear"}]}"#, ""),
+            AttachSupport::Supported
+        );
+        assert!(matches!(
+            judge_attach_probe(false, "", "error: unrecognized subcommand 'attach'\n"),
+            AttachSupport::Unsupported(w) if w.contains("unrecognized subcommand")
+        ));
+        assert!(matches!(judge_attach_probe(true, "not json", ""), AttachSupport::Unsupported(_)));
+        assert!(matches!(judge_attach_probe(true, "{\"modules\":{}}", ""), AttachSupport::Unsupported(_)));
+        assert!(matches!(judge_attach_probe(true, "[]", ""), AttachSupport::Unsupported(_)));
+    }
+
+    /// 用假 CLI 脚本跑真实的 `probe_attach`（调用点），覆盖三种：支持 / 子命令不存在 / 输出非 JSON。
+    #[test]
+    fn attach_probe_against_fake_clis() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("agentear-probe-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mk = |name: &str, body: &str| {
+            let p = dir.join(name);
+            std::fs::write(&p, format!("#!/bin/sh\n{body}\n")).unwrap();
+            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+            p
+        };
+        let supported = mk(
+            "supported",
+            r#"if [ "$1 $2 $3 $4" = "os attach list --json" ]; then echo '{"modules":[]}'; exit 0; fi; exit 9"#,
+        );
+        let old = mk(
+            "old",
+            "echo \"error: unrecognized subcommand 'attach'\" >&2; exit 2",
+        );
+        let garbage = mk("garbage", "echo 'hello'; exit 0");
+        assert_eq!(probe_attach(&supported).unwrap(), AttachSupport::Supported);
+        assert!(matches!(
+            probe_attach(&old).unwrap(),
+            AttachSupport::Unsupported(w) if w.contains("unrecognized subcommand")
+        ));
+        assert!(matches!(probe_attach(&garbage).unwrap(), AttachSupport::Unsupported(_)));
+        let e = check_attach_support(&old).unwrap_err().to_string();
+        assert!(e.contains("还不支持附着模块"), "{e}");
+        assert!(check_attach_support(&supported).is_ok());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     const D: &str = "sha256:aa";

@@ -12,8 +12,10 @@
 # 环境变量（都可省）：
 #   AGENT24_BIN / AGENT24_CLI   已构建的 agent24d / agent24（缺省：$A24_BUILD/target/release/）
 #   A24_BUILD                   Agent24 构建目录（缺省 /private/tmp/claude-502/a24build）
-#   AGENT24_REPO + BUILD_A24=1  没有现成二进制时，从 $AGENT24_REPO 的 origin/main `git archive` 到
+#   AGENT24_REPO + BUILD_A24=1  没有现成二进制时，从 $AGENT24_REPO 的 $AGENT24_REF `git archive` 到
 #                               $A24_BUILD/src 再构建（不在 Agent24 仓库里建 worktree、不改它）
+#   AGENT24_REF                 构建用的 Agent24 引用（缺省 origin/main；对未合并分支预跑时如
+#                               AGENT24_REF=origin/<分支>，会先 fetch 该分支）
 #   AGENTEAR_BIN                缺省：本仓库 target/release/agentear
 #   AGENTEAR_VENDOR             ASR 二进制与模型目录（缺省：本仓库 vendor/）
 #   LOCAL_LLM_URL / LOCAL_LLM_KEY / LOCAL_MODEL
@@ -101,12 +103,15 @@ done
 
 if [ ! -x "${AGENT24_BIN}" ] || [ ! -x "${AGENT24_CLI}" ]; then
   if [ "${BUILD_A24:-0}" = "1" ] && [ -n "${AGENT24_REPO:-}" ]; then
-    say_ "  构建 Agent24（origin/main → ${A24_BUILD}）……"
+    A24_REF="${AGENT24_REF:-origin/main}"
+    say_ "  构建 Agent24（${A24_REF} → ${A24_BUILD}）……"
     rm -rf "${A24_BUILD}/src"
     mkdir -p "${A24_BUILD}/src"
-    git -C "${AGENT24_REPO}" fetch -q origin main
-    git -C "${AGENT24_REPO}" archive origin/main | tar -x -C "${A24_BUILD}/src"
-    git -C "${AGENT24_REPO}" rev-parse origin/main >"${A24_BUILD}/SOURCE"
+    case "${A24_REF}" in
+      origin/*) git -C "${AGENT24_REPO}" fetch -q origin "${A24_REF#origin/}" ;;
+    esac
+    git -C "${AGENT24_REPO}" archive "${A24_REF}" | tar -x -C "${A24_BUILD}/src"
+    git -C "${AGENT24_REPO}" rev-parse "${A24_REF}" >"${A24_BUILD}/SOURCE"
     (cd "${A24_BUILD}/src/rust" && CARGO_TARGET_DIR="${A24_BUILD}/target" cargo build --release -q -p agent24d -p agent24-cli)
   else
     skip_all "没有 agent24d/agent24 二进制（设 AGENT24_BIN/AGENT24_CLI，或 BUILD_A24=1 AGENT24_REPO=<Agent24 仓库>）"
@@ -204,9 +209,15 @@ ok "agent24d pid ${DAEMON_PID} 端口 ${A24_PORT}"
 
 # ---------- S3 注册（A3 §3.2） ----------
 step "S3 注册 AgentEar 为附着模块（agent24 os attach add --json）"
-if ! env HOME="${A24_HOME}" "${AGENT24_CLI}" os attach --help >/dev/null 2>&1; then
-  blocked "Agent24 CLI 没有 \`os attach\` 子命令 —— 等 Agent24 A3-2a（存储/REST/CLI）合并"
+# 能力探测（与 AgentEar 配对时 src/a3_pair.rs 的判据相同）：`os attach list --json` 退出码 0
+# 且输出为 {"modules":[...]}。Agent24 版本号不可靠（ME4 期间 main 一直报 0.3.0），不看它。
+if ! env HOME="${A24_HOME}" "${AGENT24_CLI}" os attach list --json >"${T}/probe.out" 2>"${T}/probe.err" </dev/null; then
+  blocked "Agent24 CLI 不支持附着模块（os attach list 失败：$(head -1 "${T}/probe.err")）—— 需要含 A3-2a 的 Agent24"
 fi
+if ! "${PY}" -c 'import json,sys;d=json.load(open(sys.argv[1]));sys.exit(0 if isinstance(d.get("modules"),list) else 1)' "${T}/probe.out" 2>/dev/null; then
+  blocked "Agent24 CLI 的 os attach list --json 输出不是 {\"modules\":[...]}：$(head -c 120 "${T}/probe.out")"
+fi
+ok "能力探测：os attach list --json → {\"modules\":[...]}"
 if ! env HOME="${A24_HOME}" "${AGENT24_CLI}" os attach add "${MANIFEST}" --json >"${T}/attach.json" 2>"${T}/attach.err" </dev/null; then
   blocked "attach add 失败：$(cat "${T}/attach.err")"
 fi
