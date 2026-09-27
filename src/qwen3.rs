@@ -889,15 +889,18 @@ fn owner_alive(pid: i32) -> bool {
     }
     let exists = unsafe { libc::kill(pid, 0) } == 0
         || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM);
-    exists && cmdline_of(pid).to_lowercase().contains("agentear")
+    // 进程在、但读不到命令行（`ps` 起不来）：**当它还活着**——
+    // 判错成「死了」就会去收一个可能正在被用的服务，那是误杀方向；判成活着只是这次漏收。
+    exists && cmdline_of(pid).map_or(true, |c| c.to_lowercase().contains("agentear"))
 }
 
-fn cmdline_of(pid: i32) -> String {
+/// 读进程命令行。`None` = **读不到**（`ps` 起不来），与「读到了、是空的」（进程已不在）分开。
+fn cmdline_of(pid: i32) -> Option<String> {
     Command::new("/bin/ps")
         .args(["-o", "command=", "-p", &pid.to_string()])
         .output()
+        .ok()
         .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-        .unwrap_or_default()
 }
 
 /// 收掉上一次留下的孤儿 speech-server。
@@ -933,7 +936,8 @@ fn reap_stale_in(dir: &Path, bin: &Path, me: i32, current_server: Option<i32>) {
                 let _ = fs::remove_file(&path);
             }
             ReapVerdict::KillAndRemove => {
-                if is_our_server_cmdline(&cmdline_of(server), bin) {
+                // 读不到命令行就不杀（宁可漏收）
+                if cmdline_of(server).is_some_and(|c| is_our_server_cmdline(&c, bin)) {
                     log::warn!("发现上一次留下的 Qwen3-ASR 常驻服务（pid {server}），收掉");
                     unsafe { libc::kill(server, libc::SIGTERM) };
                 }
