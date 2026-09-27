@@ -616,6 +616,15 @@ impl LlmEngine for HostLlm {
             max_tokens: Some(HOST_MAX_TOKENS),
         };
         let reply = self.link.model_complete(&req, self.timeout)?;
+        crate::timings::set_llm_reply(
+            &reply.model_id,
+            match reply.tier {
+                Tier::Local => "local",
+                Tier::Remote => "remote",
+            },
+            reply.prompt_tokens,
+            reply.completion_tokens,
+        );
         check_tier(&self.model_access, reply.tier)?;
         log::info!(
             "宿主推理：{}（tier {:?}，{}+{} tokens）",
@@ -798,6 +807,22 @@ pub fn turn_payload(phase: &str, turn: Option<u64>) -> Value {
     let mut p = json!({"phase": phase});
     if let Some(n) = turn.filter(|n| *n >= 1) {
         p["turn"] = json!(n);
+    }
+    p
+}
+
+/// 一轮收尾（`idle` / `failed`）的 `turn` 事件，带上这一轮的分段耗时。
+/// `timings` 里**只有数字与枚举**（见 `timings` 模块）——宿主拿去记进同一张计时表。
+pub fn turn_payload_with_timings(
+    phase: &str,
+    turn: Option<u64>,
+    timings: Option<&crate::timings::Timings>,
+) -> Value {
+    let mut p = turn_payload(phase, turn);
+    if let Some(t) = timings {
+        if let Ok(v) = serde_json::to_value(t) {
+            p["timings"] = v;
+        }
     }
     p
 }

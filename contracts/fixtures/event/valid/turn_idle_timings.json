@@ -1,0 +1,27 @@
+{
+  "schema": "agentear.event/1",
+  "event_id": "evt_0101",
+  "session_id": "ses_demo",
+  "seq": 7,
+  "type": "turn",
+  "payload": {
+    "phase": "idle",
+    "turn": 1,
+    "timings": {
+      "record_ms": 2400,
+      "asr_ms": 180,
+      "llm_first_ms": 410,
+      "llm_ms": 980,
+      "tts_first_ms": 1650,
+      "to_first_audio_ms": 2890,
+      "play_ms": 4120,
+      "total_ms": 7050,
+      "llm_via": "agent24",
+      "model": "Qwen3-8B-4bit",
+      "tier": "local",
+      "asr_backend": "builtin",
+      "prompt_tokens": 117,
+      "completion_tokens": 22
+    }
+  }
+}

@@ -1080,3 +1080,72 @@ fn reattach_does_not_carry_old_queue_to_the_new_host() {
     assert!(old.events().len() <= 1, "旧队列里没上线的不许再发往旧宿主");
     detach(&crate::config::Config::default());
 }
+
+/// 防漂移：真实的 `timings::Timings`（由 `compute` 算出、带上宿主推理的元数据）
+/// 经 `turn_payload_with_timings` 包进 `turn` 事件后，必须过 contracts 的 schema。
+/// schema 里 `timings` 是 `additionalProperties: false`——Rust 侧多一个字段这里就红。
+#[test]
+fn turn_event_with_real_timings_matches_schema() {
+    use crate::timings::{compute, Timings};
+    use std::time::Duration;
+    let ms = |v: u64| Some(Duration::from_millis(v));
+    let mut t: Timings = compute(
+        &[ms(180), ms(590), ms(1160), ms(2890), ms(7010)],
+        Some(2400),
+        Some(1650),
+        Duration::from_millis(7050),
+    );
+    t.llm_via = Some("agent24".into());
+    t.model = Some("Qwen3-8B-4bit".into());
+    t.tier = Some("local".into());
+    t.asr_backend = Some("builtin".into());
+    t.prompt_tokens = Some(117);
+    t.completion_tokens = Some(22);
+    t.interrupted = true;
+    for phase in ["idle", "failed"] {
+        let p = turn_payload_with_timings(phase, Some(1), Some(&t));
+        assert_eq!(p["timings"]["to_first_audio_ms"], 2890);
+        assert_event_valid(&envelope("ses_x", 1, "evt_x", "turn", p));
+    }
+    // 没有分段（例如宿主那边拿不到）时就是原来的 turn 事件，不带空对象。
+    let p = turn_payload_with_timings("idle", Some(1), None);
+    assert!(p.get("timings").is_none());
+    assert_event_valid(&envelope("ses_x", 2, "evt_y", "turn", p));
+}
+
+/// 全部 event fixtures（不只 timings 那几个）：`valid/*` 必须过 schema、`invalid/*` 必须被拒，
+/// `sequences/*` 里每条事件本身都合法。
+///
+/// `tests/contracts.rs::event_fixtures_match_schema` 已经做了同样的遍历——但它是**集成测试**，
+/// `cargo test --bin agentear` 跑不到它（#102 评审就是这样得出「删掉约束仍全绿」的）。
+/// 放一份在单元测试里，不管用哪种方式跑测试，fixtures 都有人守着。
+#[test]
+fn event_fixtures_agree_with_the_schema() {
+    let dir = contracts().join("fixtures/event");
+    let (schemas, idx) = compile("agentear.event.v1.schema.json");
+    let mut seen = [0usize; 2];
+    for (i, sub) in ["valid", "invalid"].iter().enumerate() {
+        for e in std::fs::read_dir(dir.join(sub)).unwrap() {
+            let p = e.unwrap().path();
+            if p.extension().is_none_or(|x| x != "json") {
+                continue;
+            }
+            let ok = schemas.validate(&read_json(&p), idx).is_ok();
+            assert_eq!(ok, *sub == "valid", "event fixture 与 schema 不一致：{}", p.display());
+            seen[i] += 1;
+        }
+    }
+    assert!(seen[0] > 0 && seen[1] > 0, "fixtures 目录是空的——空目录会让测试假绿：{seen:?}");
+    let mut seq_events = 0;
+    for e in std::fs::read_dir(contracts().join("fixtures/sequences")).unwrap() {
+        let p = e.unwrap().path();
+        if p.extension().is_none_or(|x| x != "json") {
+            continue;
+        }
+        for ev in read_json(&p)["events"].as_array().unwrap() {
+            assert!(schemas.validate(ev, idx).is_ok(), "sequences 里有非法事件：{}", p.display());
+            seq_events += 1;
+        }
+    }
+    assert!(seq_events > 0, "sequences 里一条事件都没有");
+}

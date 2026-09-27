@@ -280,7 +280,8 @@ for line in open(path, encoding="utf-8", errors="replace"):
     if ev.get("schema") != "agentear.event/1" or ev.get("type") != want:
         continue
     body = ev.get("payload") or {}
-    if all(body.get(k) == v for k, v in pairs):
+    # `has=<键>`：只要求这个键存在（例如 turn 的 timings 对象）。
+    if all((v in body) if c == "has" else body.get(c) == v for c, v in pairs):
         n += 1
 print(n)
 PYEOF
@@ -312,9 +313,23 @@ if grep -q '已附着到 Agent24' "${T}/ae.out"; then
 else
   blocked "握手失败：$(tail -5 "${T}/ae.err")"
 fi
-wait_ws 60 transcript final=true && ok "WS 收到 transcript（final）" || bad "60s 内 WS 没收到 transcript"
-wait_ws 30 turn phase=thinking && ok "WS 收到 turn thinking" || bad "WS 没收到 turn thinking"
-wait_ws 90 turn phase=idle && ok "WS 收到 turn idle（本轮结束）" || bad "WS 没收到 turn idle"
+# 先等**这一轮结束**（turn idle / failed 到达，或进程已经退出），再一起断言。
+# 早先是分别给 60 / 30 / 90 秒的窗口：高负载机器上会误报——实测 swap 17 GB/18 GB、
+# halmos 占满 CPU 时 ASR 要 113 s 才出 transcript，事件一条没丢、只是晚到。
+# 进程还得活着（S6 要在 linger 窗口里给它发反向命令），所以不能等进程退出。
+S5_DEADLINE=300
+for _ in $(seq 1 $((S5_DEADLINE * 10))); do
+  [ "$(ws_has turn phase=idle)" -gt 0 ] && break
+  [ "$(ws_has turn phase=failed)" -gt 0 ] && break
+  kill -0 "${AE_PID}" 2>/dev/null || break
+  sleep 0.1
+done
+[ "$(ws_has transcript final=true)" -gt 0 ] && ok "WS 收到 transcript（final）" || bad "本轮结束时 WS 仍没有 transcript（上限 ${S5_DEADLINE}s）"
+[ "$(ws_has turn phase=thinking)" -gt 0 ] && ok "WS 收到 turn thinking" || bad "WS 没收到 turn thinking"
+[ "$(ws_has turn phase=idle)" -gt 0 ] && ok "WS 收到 turn idle（本轮结束）" || bad "WS 没收到 turn idle（上限 ${S5_DEADLINE}s）"
+# v0.26.0：收尾的 turn 事件带分段耗时（只有数字与枚举）。
+[ "$(ws_has turn phase=idle has=timings)" -gt 0 ] && ok "turn idle 带 timings（分段耗时）" \
+  || bad "turn idle 没带 timings"
 if grep -qE 'privacy_denied|tier.?=.?remote' "${T}/ae.err" "${T}/ae.out" 2>/dev/null; then
   bad "AgentEar 报了隐私违例/远端 tier"
 fi
