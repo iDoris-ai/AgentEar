@@ -1187,10 +1187,39 @@
 - **没做**：真实 `A3Host`（UDS 注册 / token / 握手 / 重连 / 入站帧读写）——P2；
   菜单「恢复独立模式」入口——P2。
 
-### T6.1.2 P2 单轮端到端  `BLOCKED`（等 Agent24 冻结 A3 附着协议；那边的设计要 jason 排期，**还没开始**）
-- 模块模式下推送最终 transcript（只推对话模式的，B6）；接收 speak/stop，speak 排在当前回答之后（B7）；
-  独立模式保持原样；断连行为按 B5 执行，等 jason 确认。
-- **验收**（embedding.md §5）：真机说一句 → Agent24 收到转写 → 本地模型回复 → AgentEar 播放；全程没有远端流量。
+### T6.1.2 P2 单轮端到端（AgentEar 侧）  `IN_PROGRESS`（2026-09-27，v0.25.0，分支 `feat/a24-p2-a3-client`）
+- **规格**：Agent24 `docs/design/A3-ATTACHED-MODULE.md` **v2（PR #524 @68c2412，已冻结）** §4 / §5.6 / §6。
+  AgentEar 按文档**独立实现**，不依赖 Agent24 的 crate。
+- **做了（AgentEar 侧）**：
+  - `src/a3.rs`：真实 A3 客户端——std `UnixStream` + 线程（不引 tokio）；NDJSON 帧（≤1 MiB、id 字符串 ≤256 B、
+    按「有无 method」分拣、未知通知忽略、无主响应丢弃计数）；`initialize` 握手（与 A1 同字段，token 放 `auth_token`，
+    宽松解析 offer）；`_a24/events/emit`（`{kind: agentear.event, payload}`）、`_a24/model/complete`（**省略 request_id**、
+    超时发 `$/cancelRequest`、取消后的终态帧按 id 收走）；`_a24/command/invoke` 交给 P1 的 `handle_rpc_request`，
+    应答恒为对象。
+  - **§5.6 处置表**（纯函数真值表）：`auth_failed` / `version_mismatch` / `forbidden` / 协议错误 → 停止重连并在设置里提示；
+    `manifest_mismatch` → 本地 digest 与上次注册不同就**自动代跑 `attach add` 轮换一次**；`busy` 与连接失败 → 退避
+    （1 s 起翻倍、上限 30 s）；每次重连新 session、seq 从 1。
+  - **没授予模型**（offer 无 `_a24/model/`）：独立推理是本机的 → 用本机边车并报 `error{forbidden}`；否则只转写不回答。
+  - **事件限流**：`turn`/`speech`/`error` 被 `rate_limited` 丢弃计数；`transcript`/`proposal`/`confirm_reply` 退避重试、复用 event_id 与 seq。
+  - `assets/agent24/domain-os.yml`：附着 manifest（`version: "1"` = manifest 自身修订号，**不跟 app 版本**）；
+    digest = 原始字节 sha256，测试钉住「不含 app 版本号」。
+  - `src/a3_pair.rs`：配对（jason Q2=b）——CLI 查找（设置覆盖 → `~/.agent24/bin/agent24` → PATH）、`--version` 闸
+    （**最低版本待 Agent24 A3-2 合并后填**，现为 0.0.0 + TODO）、代跑 `os attach add <manifest> --json`（非 TTY，
+    `relax_requires_confirmation` → 提示去 Agent24 确认）、token 存 **Keychain**（Security framework，不走 `security` CLI 以免
+    token 进 argv）、撤销代跑 `os attach revoke`；启动时 digest 变了自动轮换。
+  - 设置窗口「Agent24」一行（状态 + 连接/断开，需要处理时按钮变回「连接」）；菜单栏停听时出现「恢复独立模式」（P1 遗留）。
+  - 命令行 `--talk-turn <wav> --host a3`（读配对凭据）；**仅供测试**的 `--a3-socket <path> --a3-token-file <file>`。
+  - `scripts/fake-agent24-kernel.py`：只按规格写的假内核，供没有 agent24d 的机器跑端到端。
+- **验收（本分支）**：`cargo test` 440 + 4 + 8 通过、0 失败；A3 相关 27 条（假内核走真 UDS）；**调用点变异 12 处全部变红**
+  （第一轮 3 处存活，根因是假内核线程里的断言 panic 被吞——已改成 join 传播）；`--talk-turn --host a3` 对假内核实跑：
+  握手 → transcript → model/complete（tier=local）→ turn 相位 → 宿主 speak 排在回答之后 → started/completed，0 失败；
+  无模型授权那条也实跑过（本机 mock 回答 + `error{forbidden}`、零次 model 调用）。
+- **修 PR #96 评审抓到的真问题**：`host::detach()` 只丢了 `tx`，已入队未投递的事件照样被后台线程送到旧宿主
+  （评审复现 delivered_after_detach=true）。现在 `Outbox` 带作废标志：detach 与换新附着都会作废旧队列，
+  投递线程每次尝试前看标志——不再投递、不再重试；新连接只收新 session 的事件。常驻回归 3 条
+  （FakeHost ×2 + 真 UDS 的 A3 版），调用点变异 3 处全红。
+- **还差（DoD）**：与**真 agent24d**（agent24-13 的 A3-1..A3-4 合并后）联调；隐私负测（外部 provider 计数桩 = 0）在
+  Agent24 侧 C8 做；真按键 / 设置窗口点击 / Keychain 弹窗需 jason 手测（C10）。
 
 ### T6.1.3 P3 提案闭环  `BLOCKED`（等 T6.1.2）
 - 发 proposal，自己不执行；附着模式下关掉本地的语音确认，改发 `confirm_reply`（B8）。

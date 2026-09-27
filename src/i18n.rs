@@ -117,6 +117,39 @@ pub enum Key {
     /// 菜单栏：Qwen3-ASR 常驻开关。**标题里写明代价**（快多少、占多少内存），
     /// 用户在点之前就该知道拿什么换什么。
     Qwen3Resident,
+    /// 设置窗口：与 Agent24 配对（代跑 `agent24 os attach add`，A3 §3.6）。
+    Agent24Connect,
+    /// 设置窗口：撤销与 Agent24 的配对。
+    Agent24Disconnect,
+    /// 菜单栏：与 Agent24 断开且停听时，手动回到独立模式（B5）。
+    ResumeStandalone,
+}
+
+/// 设置窗口里 Agent24 连接状态那一行（T6.1.2）。每个状态都要说清**下一步该做什么**。
+pub fn agent24_status(lang: Lang, st: &crate::a3::LinkStatus) -> &'static str {
+    use crate::a3::{LinkStatus as L, StopReason as R};
+    match st {
+        L::Unpaired => pick(lang, "Agent24: not paired", "Agent24：未配对", "Agent24: ยังไม่จับคู่"),
+        L::Connecting => pick(lang, "Agent24: connecting…", "Agent24：连接中……", "Agent24: กำลังเชื่อมต่อ…"),
+        L::Connected => pick(lang, "Agent24: connected (ears & mouth)", "Agent24：已连接（作为耳朵和嘴巴）", "Agent24: เชื่อมต่อแล้ว"),
+        L::DisconnectedStandalone => pick(
+            lang,
+            "Agent24: offline — running standalone, will reconnect",
+            "Agent24：未连上——独立模式运行中，会自动重连",
+            "Agent24: ออฟไลน์ — ใช้งานเดี่ยว จะเชื่อมต่อใหม่",
+        ),
+        L::DisconnectedStopped => pick(
+            lang,
+            "Agent24: disconnected — not listening (resume standalone from the menu)",
+            "Agent24：已断开——停听中（可在菜单里恢复独立模式）",
+            "Agent24: ขาดการเชื่อมต่อ — หยุดฟัง",
+        ),
+        L::NeedsAction(R::Repair) => pick(lang, "Agent24: pairing invalid — connect again", "Agent24：配对失效——请重新连接", "Agent24: การจับคู่ใช้ไม่ได้ — เชื่อมต่อใหม่"),
+        L::NeedsAction(R::Upgrade) => pick(lang, "Agent24: version mismatch — upgrade AgentEar or Agent24", "Agent24：版本不兼容——请升级 AgentEar 或 Agent24", "Agent24: เวอร์ชันไม่ตรงกัน — กรุณาอัปเกรด"),
+        L::NeedsAction(R::Disabled) => pick(lang, "Agent24: disabled in Agent24 — re-enable it there, then connect", "Agent24：已在 Agent24 里停用——那边重新启用后再连接", "Agent24: ถูกปิดใน Agent24"),
+        L::NeedsAction(R::ConfirmOnHost) => pick(lang, "Agent24: permission change needs confirming in Agent24", "Agent24：权限变更需要在 Agent24 那边确认", "Agent24: ต้องยืนยันการเปลี่ยนสิทธิ์ใน Agent24"),
+        L::NeedsAction(R::Protocol) => pick(lang, "Agent24: protocol error — see the log", "Agent24：协议错误——请看日志", "Agent24: ข้อผิดพลาดโปรโตคอล — ดูบันทึก"),
+    }
 }
 
 /// 三种语言的文案。参数顺序固定 `(en, zh, th)`。
@@ -265,6 +298,14 @@ pub fn t(lang: Lang, key: Key) -> &'static str {
             "Recording Sounds (beep on start / stop)",
             "录音提示音（开始 / 结束时嘟一声）",
             "เสียงแจ้งเตือนการอัด (เริ่ม / หยุด)",
+        ),
+        K::Agent24Connect => pick(lang, "Connect to Agent24", "连接 Agent24", "เชื่อมต่อ Agent24"),
+        K::Agent24Disconnect => pick(lang, "Disconnect from Agent24", "断开 Agent24", "ยกเลิกการเชื่อมต่อ Agent24"),
+        K::ResumeStandalone => pick(
+            lang,
+            "Resume Standalone Mode",
+            "恢复独立模式",
+            "กลับสู่โหมดใช้งานเดี่ยว",
         ),
         K::AsrEngineSection => pick(lang, "Speech recognition", "语音识别", "การรู้จำเสียง"),
         K::AsrEngineSenseVoice => pick(
@@ -441,7 +482,7 @@ fn fail_reason(lang: Lang, f: crate::download::Fail) -> &'static str {
 mod tests {
     use super::*;
 
-    const ALL_KEYS: [Key; 33] = [
+    const ALL_KEYS: [Key; 36] = [
         Key::AsrEngineSection,
         Key::AsrEngineSenseVoice,
         Key::Qwen3Resident,
@@ -475,6 +516,9 @@ mod tests {
         Key::SettingsTitle,
         Key::LaunchAtLogin,
         Key::RecordCue,
+        Key::Agent24Connect,
+        Key::Agent24Disconnect,
+        Key::ResumeStandalone,
     ];
 
     /// 每个状态、每种语言都有字，且按钮文字和状态对得上

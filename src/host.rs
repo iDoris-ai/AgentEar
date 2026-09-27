@@ -137,7 +137,11 @@ pub fn idoris_privacy_header(configured: &str) -> &'static str {
 /// 调用方（`talk::Engines::from_config`）原样构造，**这一档的行为不因本模块而变**。
 pub fn llm_engine(cfg: &crate::config::Config) -> Option<Arc<dyn LlmEngine>> {
     if attached() {
-        return Some(Arc::new(HostLlm::new(link(), cfg)));
+        let link = link();
+        if !link.grants_models() {
+            return no_model_grant(cfg, link);
+        }
+        return Some(Arc::new(HostLlm::new(link, cfg)));
     }
     match LlmTransport::parse(&cfg.talk_llm_transport) {
         LlmTransport::Sidecar => None,
@@ -166,6 +170,25 @@ pub fn llm_engine(cfg: &crate::config::Config) -> Option<Arc<dyn LlmEngine>> {
         // 没附着却选了「经宿主」：如实失败，**不偷偷退回边车**——
         // 那会让「我以为走的是 Agent24 的隐私策略」变成假的。
         LlmTransport::Agent24 => Some(Arc::new(HostLlm::new(Arc::new(NoHost), cfg))),
+    }
+}
+
+/// 附着着、但宿主**没授予模型**（A3 §4.3，AgentEar 对齐 2）。
+///
+/// - 独立推理档是本机的（回环边车 / mock）→ 视同 `local_only` 可用：返回 `None` 走本机边车，
+///   并报一条 `error{code: forbidden, "宿主未授予模型"}` 让宿主知道；
+/// - 否则 → **只转写、不回答**：返回一个必失败的宿主引擎（`forbidden`），绝不改发可能出本机的路径。
+pub fn no_model_grant(cfg: &crate::config::Config, link: Arc<dyn HostLink>) -> Option<Arc<dyn LlmEngine>> {
+    emit(
+        "error",
+        error_payload(&HostError::new("forbidden", "宿主未授予模型", false), None),
+    );
+    if standalone_is_local(cfg) {
+        log::warn!("Agent24 没授予模型：这一轮用本机边车回答（回环，等价 local_only）");
+        None
+    } else {
+        log::warn!("Agent24 没授予模型、独立推理又不是本机的：这一轮只转写、不回答");
+        Some(Arc::new(HostLlm::new(link, cfg)))
     }
 }
 
@@ -354,6 +377,11 @@ pub trait HostLink: Send + Sync {
     fn name(&self) -> &'static str;
     /// 现在是否附着着（连接可用）。
     fn attached(&self) -> bool;
+    /// 宿主有没有授予模型能力（A3：握手 offer 里有没有 `_a24/model/`）。
+    /// 没授予时**不得回落到任何可能出本机的路径**（A3 §4.3，AgentEar 对齐 2），见 [`llm_engine`]。
+    fn grants_models(&self) -> bool {
+        true
+    }
     /// `_a24/events/emit`，params = [`emit_params`]`(event)`。
     ///
     /// **只由后台投递线程调用**（见 [`emit`]）：同一 session 串行、等到应答再发下一条，
@@ -781,14 +809,50 @@ impl Default for Emitter {
     }
 }
 
-/// 投递一个 envelope，按 `retryable` 重试（复用同一个 envelope）。
+/// 这类事件被限流（`rate_limited`）时要不要重试（A3 §4.4，AgentEar 对齐 4）：
+/// `transcript` / `proposal` / `confirm_reply` 退避重试（复用 event_id 与 seq）；
+/// `turn` / `speech` / `error` 等状态事件**丢弃并计数**——宿主容忍 seq 缺口。
+pub fn retry_when_rate_limited(ty: &str) -> bool {
+    matches!(ty, "transcript" | "proposal" | "confirm_reply")
+}
+
+/// 被限流丢掉的状态事件数。
+pub static DROPPED_RATE_LIMITED: AtomicU64 = AtomicU64::new(0);
+
+/// 投递失败后要不要再试。
+pub fn should_retry_emit(ty: &str, e: &HostError) -> bool {
+    if e.kind == "rate_limited" {
+        return retry_when_rate_limited(ty);
+    }
+    e.retryable
+}
+
+/// 投递一个 envelope，按规则重试（复用同一个 envelope）。
 fn deliver(link: &dyn HostLink, ev: &Value) {
+    deliver_until(link, ev, &AtomicBool::new(false));
+}
+
+/// 同 [`deliver`]，但每次尝试前看一眼 `cancelled`：作废了就不再发、不再重试。
+/// （已经写上线的那一次无法收回——A3 下断开会关连接，那一次随之失败。）
+fn deliver_until(link: &dyn HostLink, ev: &Value, cancelled: &AtomicBool) {
+    let ty = ev["type"].as_str().unwrap_or_default();
     for attempt in 1..=EMIT_ATTEMPTS {
+        if cancelled.load(Ordering::SeqCst) {
+            log::debug!("附着已作废，{ty} 不再投递 / 重试");
+            return;
+        }
         match link.emit(ev) {
             Ok(()) => return,
-            Err(e) if e.retryable && attempt < EMIT_ATTEMPTS => {
+            Err(e) if should_retry_emit(ty, &e) && attempt < EMIT_ATTEMPTS => {
                 log::debug!("事件投递失败（第 {attempt} 次，重试）：{e}");
-                std::thread::sleep(Duration::from_millis(50 * attempt as u64));
+                // 限流时退避长一点：宿主令牌桶 5/s。
+                let base = if e.kind == "rate_limited" { 300 } else { 50 };
+                std::thread::sleep(Duration::from_millis(base * attempt as u64));
+            }
+            Err(e) if e.kind == "rate_limited" => {
+                DROPPED_RATE_LIMITED.fetch_add(1, Ordering::Relaxed);
+                log::info!("状态事件被限流，丢弃（{ty}）");
+                return;
             }
             Err(e) => {
                 log::warn!("事件投递失败，放弃（{}）：{e}", ev["type"]);
@@ -871,6 +935,15 @@ static STATE: Mutex<AttachState> = Mutex::new(AttachState::Standalone);
 struct Outbox {
     emitter: Arc<Emitter>,
     tx: std::sync::mpsc::Sender<Value>,
+    /// 这一代附着已作废（detach / 换新附着）。投递线程看到它就**不再投递、不再重试**，
+    /// 把缓冲里剩下的事件清掉。（PR #96 评审：原来只丢 `tx`，已入队的事件照样送到旧宿主。）
+    cancelled: Arc<AtomicBool>,
+}
+
+impl Outbox {
+    fn cancel(&self) {
+        self.cancelled.store(true, Ordering::SeqCst);
+    }
 }
 static EMITTER: Mutex<Option<Outbox>> = Mutex::new(None);
 /// 已入队、还没投递完的事件数（`flush` 用）。
@@ -878,12 +951,15 @@ static IN_FLIGHT: AtomicU64 = AtomicU64::new(0);
 
 fn start_outbox(link: Arc<dyn HostLink>) -> Outbox {
     let (tx, rx) = std::sync::mpsc::channel::<Value>();
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let flag = cancelled.clone();
     std::thread::Builder::new()
         .name("host-emit".into())
         .spawn(move || {
             // 发送端被丢掉（断开 / 换了新附着）时 recv 返回 Err，线程自然退出。
+            // 作废之后缓冲里剩下的每一条，`deliver_until` 第一次尝试前就会看到标志而放弃。
             while let Ok(ev) = rx.recv() {
-                deliver(link.as_ref(), &ev);
+                deliver_until(link.as_ref(), &ev, &flag);
                 IN_FLIGHT.fetch_sub(1, Ordering::SeqCst);
             }
         })
@@ -891,6 +967,7 @@ fn start_outbox(link: Arc<dyn HostLink>) -> Outbox {
     Outbox {
         emitter: Arc::new(Emitter::new()),
         tx,
+        cancelled,
     }
 }
 
@@ -916,7 +993,14 @@ static AWAITING: Mutex<Option<Awaiting>> = Mutex::new(None);
 /// 附着到一个宿主：换 session、状态进 Attached。
 pub fn attach(link: Arc<dyn HostLink>) {
     log::info!("附着到宿主：{}", link.name());
-    *EMITTER.lock().unwrap_or_else(|p| p.into_inner()) = Some(start_outbox(link.clone()));
+    // 换新附着：旧那一代的队列作废，**新连接的事件绝不被旧队列带走**，旧事件也不再发往旧宿主。
+    if let Some(old) = EMITTER
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .replace(start_outbox(link.clone()))
+    {
+        old.cancel();
+    }
     *LINK.write().unwrap_or_else(|p| p.into_inner()) = Some(link);
     *STATE.lock().unwrap_or_else(|p| p.into_inner()) = AttachState::Attached;
     crate::tray::set_host_disconnected(false);
@@ -929,7 +1013,10 @@ pub fn attach(link: Arc<dyn HostLink>) {
 /// （它们是宿主的意图，宿主不在了就不该继续念）。
 pub fn detach(cfg: &crate::config::Config) -> AttachState {
     *LINK.write().unwrap_or_else(|p| p.into_inner()) = None;
-    *EMITTER.lock().unwrap_or_else(|p| p.into_inner()) = None;
+    // 作废已入队未投递的事件（PR #96 评审）：只丢 `tx` 不够，缓冲里的照样会被投递到旧宿主。
+    if let Some(old) = EMITTER.lock().unwrap_or_else(|p| p.into_inner()).take() {
+        old.cancel();
+    }
     *AWAITING.lock().unwrap_or_else(|p| p.into_inner()) = None;
     center().lock().unwrap_or_else(|p| p.into_inner()).reset();
     let next = after_disconnect(
@@ -1530,7 +1617,9 @@ pub(crate) fn test_guard() -> std::sync::MutexGuard<'static, ()> {
     static GLOBAL: Mutex<()> = Mutex::new(());
     let g = GLOBAL.lock().unwrap_or_else(|p| p.into_inner());
     *LINK.write().unwrap_or_else(|p| p.into_inner()) = None;
-    *EMITTER.lock().unwrap_or_else(|p| p.into_inner()) = None;
+    if let Some(old) = EMITTER.lock().unwrap_or_else(|p| p.into_inner()).take() {
+        old.cancel();
+    }
     *STATE.lock().unwrap_or_else(|p| p.into_inner()) = AttachState::Standalone;
     *AWAITING.lock().unwrap_or_else(|p| p.into_inner()) = None;
     *center().lock().unwrap_or_else(|p| p.into_inner()) = CommandCenter::new();

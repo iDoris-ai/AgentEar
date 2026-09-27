@@ -5,6 +5,8 @@
 //! 天然给出段边界，每次录音就是一个有头有尾的文件对象。**不要在 M1 里
 //! 提前引入 TTS 或无边界流。**
 
+mod a3;
+mod a3_pair;
 mod asr;
 mod download;
 mod engine;
@@ -539,15 +541,7 @@ fn main() -> Result<()> {
         // `--host fake`：附着到进程内的假宿主跑这一轮——推理经「宿主」、
         // 事件报给「宿主」，跑完把宿主收到的事件逐行打出来。
         // 这是 P2 用真实宿主跑 `--talk-turn --host a3` 之前的可测入口。
-        let fake_host = match flag_value(&args, "--host") {
-            None => None,
-            Some("fake") => {
-                let fake = std::sync::Arc::new(host::FakeHost::new());
-                host::attach(fake.clone());
-                Some(fake)
-            }
-            Some(other) => anyhow::bail!("--host 只认 fake（真实宿主 a3 在 P2 接入），收到 {other}"),
-        };
+        let cli_host = attach_cli_host(&args)?;
         // 会话状态机要么已经开着，要么按这次的语言现开一个。
         // 命令行要能独立跑完整一轮，所以不能依赖 `talk_enabled`——
         // 那个开关管的是**守护进程**要不要在录音后自动接话。
@@ -585,9 +579,7 @@ fn main() -> Result<()> {
             with_session(|s| s.finish_listening());
             with_session(|s| s.turn_ready("", None));
             println!("（这段音频没有语音，轮次结束）");
-            if let Some(fake) = &fake_host {
-                print_fake_host_events(fake);
-            }
+            cli_host.finish();
             return Ok(());
         }
         // ②③④ 与守护进程一模一样：会话推进 → LLM → TTS → 播放
@@ -596,9 +588,7 @@ fn main() -> Result<()> {
             asr_lang: transcript.lang.clone(),
         };
         answer_out_loud(&cfg, &heard, lang, Some(&meta));
-        if let Some(fake) = &fake_host {
-            print_fake_host_events(fake);
-        }
+        cli_host.finish();
         return Ok(());
     }
 
@@ -808,20 +798,8 @@ fn main() -> Result<()> {
         let store = store::Store::open(&data_root)?;
         // `--host fake`：附着到进程内假宿主——验「附着时只提出、确认归宿主」这条规则。
         // 跑完把宿主收到的事件打出来。
-        let fake_host = match flag_value(&args, "--host") {
-            None => None,
-            Some("fake") => {
-                let fake = std::sync::Arc::new(host::FakeHost::new());
-                host::attach(fake.clone());
-                Some(fake)
-            }
-            Some(other) => anyhow::bail!("--host 只认 fake（真实宿主 a3 在 P2 接入），收到 {other}"),
-        };
-        let done = |fake: &Option<std::sync::Arc<host::FakeHost>>| {
-            if let Some(f) = fake {
-                print_fake_host_events(f);
-            }
-        };
+        let fake_host = attach_cli_host(&args)?;
+        let done = |h: &CliHost| h.finish();
         println!("① 用户说：{text}");
         let first = run_command_turn(&store, &cfg, &text, &hash);
         match first {
@@ -1059,6 +1037,10 @@ fn main() -> Result<()> {
     // 理由挡住菜单栏图标出现。`apply()` 自己现读配置、自己持锁，
     // 这里不用传参数。
     std::thread::spawn(launch_agent::apply);
+
+    // Agent24 附着（T6.1.2）：配对过就起连接守护（后台线程，连不上按 §5.6 退避）；
+    // 没配对就什么都不做——独立版零行为变化。
+    a3_pair::start(data_root.clone());
 
     // 边车按需拉起。**放后台线程**：拉起要等模型加载（实测冷启动几十秒），
     // 卡在这里会让菜单栏图标迟迟不出现，用户以为程序没启动。
@@ -2097,6 +2079,83 @@ fn ensure_session_listening(lang: talk::TalkLang) {
 /// 但**不许静默**——边车没起时日志里必须能看出是「谁没起」，
 /// 否则用户只会觉得「按了没反应」。
 /// 把假宿主收到的事件与模型请求逐行打出来（JSON Lines），给人看、也给脚本 grep。
+/// 命令行 `--host` 附着到的宿主（`--talk-turn` / `--run-command` 用）。
+enum CliHost {
+    None,
+    Fake(std::sync::Arc<host::FakeHost>),
+    /// 真实 Agent24（A3 附着）。一次性连接：不起守护、不重连。
+    A3(std::sync::Arc<a3::Conn>),
+}
+
+impl CliHost {
+    /// 一轮跑完：打印/收尾并断开。
+    fn finish(&self) {
+        match self {
+            CliHost::None => {}
+            CliHost::Fake(f) => print_fake_host_events(f),
+            CliHost::A3(conn) => {
+                // 宿主可能在这一轮里下发了 speak（排在回答之后播）：命令行别在它播完前就退出，
+                // 否则 speech 只报了 started、永远等不到 completed。上限 60 s。
+                let t0 = Instant::now();
+                while t0.elapsed() < Duration::from_secs(60) {
+                    let busy = {
+                        let c = host::center().lock().unwrap_or_else(|p| p.into_inner());
+                        c.playing().is_some() || c.queue_len() > 0
+                    };
+                    if !busy {
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+                let drained = host::flush(Duration::from_secs(15));
+                println!(
+                    "\n== 已向 Agent24 投递事件{}；丢弃的无主响应帧 {} ==",
+                    if drained { "（队列已清空）" } else { "（⚠️ 还有事件没投递完）" },
+                    conn.stray.load(std::sync::atomic::Ordering::Relaxed)
+                );
+                conn.close();
+                host::detach(&config::get());
+            }
+        }
+    }
+}
+
+/// 解析 `--host fake|a3`。
+///
+/// `a3` 默认读配对好的凭据（config 的 socket + Keychain 的 token）。
+/// **仅供测试**的覆盖参数：`--a3-socket <path>` 与 `--a3-token-file <file>`——
+/// 让假内核 / 联调环境不必动用户的 Keychain。
+fn attach_cli_host(args: &[String]) -> anyhow::Result<CliHost> {
+    match flag_value(args, "--host") {
+        None => Ok(CliHost::None),
+        Some("fake") => {
+            let fake = std::sync::Arc::new(host::FakeHost::new());
+            host::attach(fake.clone());
+            Ok(CliHost::Fake(fake))
+        }
+        Some("a3") => {
+            let creds = match (flag_value(args, "--a3-socket"), flag_value(args, "--a3-token-file")) {
+                (Some(sock), Some(tf)) => a3::Creds {
+                    socket: std::path::PathBuf::from(sock),
+                    token: a3::read_token_file(std::path::Path::new(tf))?,
+                    digest: a3::manifest_digest(),
+                },
+                (None, None) => a3_pair::current_creds()
+                    .ok_or_else(|| anyhow::anyhow!("还没和 Agent24 配对（设置里「连接 Agent24」），或用 --a3-socket/--a3-token-file 测试"))?,
+                _ => anyhow::bail!("--a3-socket 与 --a3-token-file 要一起给"),
+            };
+            let conn = a3::connect_once(&creds)?;
+            println!(
+                "已附着到 Agent24（offer：{}）",
+                conn.offer.provides.join(", ")
+            );
+            host::attach(std::sync::Arc::new(a3::A3Host { conn: conn.clone() }));
+            Ok(CliHost::A3(conn))
+        }
+        Some(other) => anyhow::bail!("--host 只认 fake / a3，收到 {other}"),
+    }
+}
+
 fn print_fake_host_events(fake: &host::FakeHost) {
     // 事件在后台线程里投递，打印前先等队列清空。
     if !host::flush(Duration::from_secs(5)) {

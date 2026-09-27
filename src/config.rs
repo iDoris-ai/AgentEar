@@ -331,6 +331,20 @@ pub struct Config {
     /// - `stop` = 一律停听并提示，要用户自己处理。
     #[serde(deserialize_with = "lenient")]
     pub attach_fallback: String,
+    /// `agent24` CLI 的路径覆盖（设置里可改）。空 = 按 `~/.agent24/bin/agent24` → PATH 找（A3 §3.6）。
+    #[serde(deserialize_with = "lenient")]
+    pub agent24_cli_path: Option<String>,
+    /// 配对拿到的附着 socket 路径（`attach add` 返回的 `socket_path`）。**None = 没配对**。
+    ///
+    /// ⚠️ token **不在这里**——它只存 macOS Keychain（`a3_pair::KEYCHAIN_SERVICE`）。
+    #[serde(deserialize_with = "lenient")]
+    pub agent24_socket_path: Option<String>,
+    /// 当前 token 的短 id（展示 / 日志用，不能反推 token）。
+    #[serde(deserialize_with = "lenient")]
+    pub agent24_token_id: Option<String>,
+    /// 上次成功注册时的 manifest digest。与本地 manifest 不同 → 自动重新注册（A3 §5.6）。
+    #[serde(deserialize_with = "lenient")]
+    pub agent24_registered_digest: Option<String>,
     /// 通话 TTS 引擎：`http`（默认，指 `services/tts` 的 VoxCPM2 边车）
     /// 或 `say`（零依赖兜底）。
     #[serde(deserialize_with = "lenient")]
@@ -589,6 +603,10 @@ impl Default for Config {
             idoris_privacy: default_idoris_privacy(),
             agent24_model_access: default_agent24_model_access(),
             attach_fallback: default_attach_fallback(),
+            agent24_cli_path: None,
+            agent24_socket_path: None,
+            agent24_token_id: None,
+            agent24_registered_digest: None,
             talk_tts_engine: default_talk_tts_engine(),
             commands_enabled: default_commands_enabled(),
             command_confirm_secs: default_command_confirm_secs(),
