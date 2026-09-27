@@ -479,7 +479,11 @@ impl FakeHost {
             responder: Box::new(|req| ModelReply {
                 text: format!(
                     "（假宿主）收到：{}",
-                    req.messages.last().map(|(_, c)| c.as_str()).unwrap_or("")
+                    // 模拟一个守规矩的模型：认得 /no_think 开关，不会把它当正文念回来
+                    req.messages
+                        .last()
+                        .map(|(_, c)| c.trim_end_matches(NO_THINK_SUFFIX))
+                        .unwrap_or("")
                 ),
                 model_id: "fake-local".into(),
                 tier: Tier::Local,
@@ -601,16 +605,15 @@ impl LlmEngine for HostLlm {
         "agent24"
     }
 
-    fn reply(&self, system: &str, user: &str, _lang: TalkLang) -> Result<String> {
+    fn reply(&self, system: &str, user: &str, lang: TalkLang) -> Result<String> {
         let req = ModelRequest {
             messages: vec![
                 ("system".into(), system.into()),
-                ("user".into(), user.into()),
+                ("user".into(), no_think(user)),
             ],
             complexity: Complexity::Simple,
             request_id: new_id("req"),
-            // 与本机边车同一个上限：一到两句话，不需要宿主默认的 1024。
-            max_tokens: Some(160),
+            max_tokens: Some(HOST_MAX_TOKENS),
         };
         let reply = self.link.model_complete(&req, self.timeout)?;
         check_tier(&self.model_access, reply.tier)?;
@@ -621,11 +624,111 @@ impl LlmEngine for HostLlm {
             reply.prompt_tokens,
             reply.completion_tokens
         );
-        let text = talk::strip_thinking(&reply.text);
-        if text.trim().is_empty() {
-            return Err(HostError::new("internal", "宿主回了一段空回答", true).into());
+        // 我们总是给宿主请求加了 /no_think（见 no_think），所以这里是「附着 + 已知在对付
+        // 会思考的模型」的场景，才允许「无头思考」规则生效。
+        match judge_host_reply(&reply, HOST_MAX_TOKENS, true) {
+            HostAnswer::Speak(text) => Ok(text),
+            HostAnswer::Empty => Err(HostError::new("internal", "宿主回了一段空回答", true).into()),
+            HostAnswer::ReasoningTruncated => {
+                // 宁可不说，不念独白：这一轮只念一句提示，并告诉宿主为什么。
+                log::warn!(
+                    "宿主模型 {} 把 {} 个 token 全用在了思考上、没给出答案（没见到 {}）——这一轮不念原文",
+                    reply.model_id,
+                    reply.completion_tokens,
+                    talk::THINK_CLOSE
+                );
+                emit(
+                    "error",
+                    error_payload(&HostError::new("internal", "reasoning_truncated", true), None),
+                );
+                Ok(reasoning_truncated_hint(lang).to_string())
+            }
         }
-        Ok(text)
+    }
+}
+
+/// 附着路径追加在 user 消息末尾的 Qwen3 **官方软开关**（Qwen3 模型卡「soft switch」：
+/// 在 user/system 消息里写 `/no_think` 关掉这一轮的思考）。
+///
+/// 为什么只能这样：宿主的 `_a24/model/complete` 是 `deny_unknown_fields`，
+/// 没有 `chat_template_kwargs` 可传，AgentEar 选不了模型也关不了模板里的思考；
+/// 而 jason 2026-09-27 真机实测，Agent24 把请求路由到了 **Qwen3-8B-4bit**，
+/// 160 个 token 全耗在思考上、整段内心独白被念了出来。
+/// 对不认识这个开关的模型，它只是句尾一段无害的文字。
+///
+/// **不加到 idoris 那一档**：那一档走 OpenAI 兼容请求，调用方能直接传模板参数，
+/// 该在那边用正规开关（`chat_template_kwargs`）而不是往用户的话里塞字；
+/// 边车路径已经用 `--chat-template-args '{"enable_thinking": false}'` 关掉了。
+pub const NO_THINK_SUFFIX: &str = " /no_think";
+
+/// 给 user 消息加上 [`NO_THINK_SUFFIX`]（已经有了就不重复加）。
+pub fn no_think(user: &str) -> String {
+    // 判重与拼接用同一套规则：先去掉尾随空白，已经以开关结尾就不再加。
+    let base = user.trim_end();
+    if base.ends_with(NO_THINK_SUFFIX.trim_start()) {
+        base.to_string()
+    } else {
+        format!("{base}{NO_THINK_SUFFIX}")
+    }
+}
+
+/// 附着路径的 `max_tokens`。
+///
+/// 原来和边车一样是 160（一到两句话足够）。但宿主的模型不由 AgentEar 选：
+/// 万一 `/no_think` 被忽略、模型还是先想一阵，160 会在思考半途截断，连答案都到不了。
+/// 512 给思考留出余量；念出来的只有剥掉思考之后切好句的正文，上限变大不会让话变长。
+pub const HOST_MAX_TOKENS: u32 = 512;
+
+/// 宿主这一轮的回答该怎么处理。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HostAnswer {
+    /// 剥掉思考段后的正文，可以念。
+    Speak(String),
+    /// 剥完什么都没剩，也没有被截断：当失败处理。
+    Empty,
+    /// **被截断在思考里**：用满了 `max_tokens`、却没出现 `</think>`——
+    /// 手里这段文字只能是没想完的思考（或者失控的长篇），**不能念**。
+    ReasoningTruncated,
+}
+
+/// 纯函数判据。「被截断」用确定信号判断（`completion_tokens >= max_tokens`），
+/// 不靠关键词猜文字像不像思考：我们要的是一两句话（系统提示限 40 字），
+/// 用满 512 个 token 本身就说明这一轮不正常。
+///
+/// `asked_no_think` = 这一轮请求是我们加了 [`NO_THINK_SUFFIX`] 的宿主推理，也就是
+/// 「已知在对付会思考的模型」。**只有这时**才应用「无头思考」规则：第一个 `</think>`
+/// 之前没有 `<think` → 它之前的全是思考（Qwen3 模板把 `<think>` 放在 prompt 里，
+/// 输出没有开头标签）。这条规则**不进**全局的 `talk::strip_thinking`——那里一句合法
+/// 提到 `</think>` 的正文会被腰斩（PR #101 评审反例），边车/本机路径一个字节都不能变。
+/// 残余风险：附着路径上模型的正文**真的**以「……</think>……」开头时也会被截掉前半句——
+/// 但那一轮我们明确要求了关掉思考，出现孤立结束标签几乎只可能是思考泄漏。
+pub fn judge_host_reply(reply: &ModelReply, max_tokens: u32, asked_no_think: bool) -> HostAnswer {
+    let truncated = reply.completion_tokens >= u64::from(max_tokens);
+    if truncated && !reply.text.contains(talk::THINK_CLOSE) {
+        return HostAnswer::ReasoningTruncated;
+    }
+    let body = if asked_no_think { strip_headless_thinking(&reply.text) } else { reply.text.as_str() };
+    let text = talk::strip_thinking(body);
+    if text.trim().is_empty() {
+        return HostAnswer::Empty;
+    }
+    HostAnswer::Speak(text)
+}
+
+/// 附着路径专用：第一个 `</think>` 之前没有 `<think` 时，丢掉它及之前的全部。
+fn strip_headless_thinking(text: &str) -> &str {
+    match text.find(talk::THINK_CLOSE) {
+        Some(end) if !text[..end].contains("<think") => &text[end + talk::THINK_CLOSE.len()..],
+        _ => text,
+    }
+}
+
+/// 被截断在思考里时念的那一句（中/英/泰）。
+pub fn reasoning_truncated_hint(lang: TalkLang) -> &'static str {
+    match lang {
+        TalkLang::Zh => "这个问题我没想明白，换个说法再问我一次吧。",
+        TalkLang::En => "I couldn't work that one out. Could you ask me another way?",
+        TalkLang::Th => "ข้อนี้ฉันยังคิดไม่ออก ลองถามใหม่อีกแบบได้ไหม",
     }
 }
 
