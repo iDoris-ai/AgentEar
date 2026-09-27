@@ -62,34 +62,76 @@ pub trait Transport: Send + Sync {
 /// 上百个传递依赖和一整套 TLS 栈，而这里连的是 127.0.0.1，连 TLS 都不需要。
 pub struct Curl;
 
+/// 同 [`Curl`]，但每个请求额外带上几条头（`Name: value`）。
+///
+/// 给直连 iDoris 用：它的控制面走 `X-iDoris-*` 头（隐私档默认 `local_only`），
+/// 而本机边车不认也不需要这些头——所以不改 `Curl` 本身，另起一个带头的变体，
+/// 保证**独立版默认那条路的 curl 参数一项都不变**（`curl_args` 的用例钉住）。
+pub struct CurlWith {
+    pub headers: Vec<String>,
+}
+
+/// 组装 curl 参数。`stream` 决定是不是 SSE（`-N` + `Accept`），
+/// `extra` 是额外的 `-H`，**插在固定头之后、请求体之前**。
+///
+/// 抽成纯函数是为了能测：`Curl` 走 `extra = []`，产出必须与改造前逐项相同。
+fn curl_args(url: &str, timeout_secs: u64, stream: bool, extra: &[String]) -> Vec<String> {
+    let mut a: Vec<String> = vec!["-fsS".into()];
+    if stream {
+        a.push("-N".into());
+    }
+    // curl 自己的超时**只覆盖它认得的阶段**（连接、传输）。
+    // 父进程那一侧另有 deadline，见 run_with_deadline。
+    a.extend(["--max-time".into(), timeout_secs.to_string()]);
+    a.extend(["-X".into(), "POST".into()]);
+    a.extend(["-H".into(), "Content-Type: application/json".into()]);
+    if stream {
+        a.extend(["-H".into(), "Accept: text/event-stream".into()]);
+    }
+    for h in extra {
+        a.extend(["-H".into(), h.clone()]);
+    }
+    // 请求体走 stdin：转写内容可能很长，也可能含引号和换行，
+    // 塞进 argv 既有长度上限又容易被 shell 语义咬到
+    a.extend(["--data-binary".into(), "@-".into()]);
+    // ⚠️ **路径由这里拼**：`url` 是 base（`http://127.0.0.1:8794`）。
+    // 流式漏了这一段就是 404，而且会被上层当成「流式不可用」静默退回整句路径——
+    // 实测踩到：修好之前跑出来的是「有文字、没声音」。
+    a.push(format!("{url}/v1/chat/completions"));
+    a
+}
+
+fn curl_post_json(url: &str, body: &str, timeout_secs: u64, extra: &[String]) -> Result<String> {
+    let mut cmd = Command::new("/usr/bin/curl");
+    cmd.args(curl_args(url, timeout_secs, false, extra));
+    // 父进程的墙钟给到 curl 超时之上再加 5 秒：正常情况下该由 curl
+    // 自己先退出，父进程这层只兜住「curl 根本没在按预期推进」的情况。
+    run_with_deadline(cmd, body, Duration::from_secs(timeout_secs + 5))
+}
+
+/// `curl -N`：**关掉输出缓冲**。不加它 curl 会把整段响应攒在缓冲区里，
+/// 我们读到的仍然是「一次性的一大块」——流式就成了摆设。
+fn curl_post_sse(
+    url: &str,
+    body: &str,
+    timeout_secs: u64,
+    extra: &[String],
+    on_line: &mut (dyn FnMut(&str) + Send),
+) -> Result<()> {
+    let mut cmd = Command::new("/usr/bin/curl");
+    cmd.args(curl_args(url, timeout_secs, true, extra));
+    run_with_deadline_lines(cmd, body, Duration::from_secs(timeout_secs + 5), on_line)
+}
+
 impl Transport for Curl {
     fn post_json(&self, url: &str, body: &str, timeout_secs: u64) -> Result<String> {
-        let mut cmd = Command::new("/usr/bin/curl");
-        cmd.arg("-fsS")
-            // curl 自己的超时**只覆盖它认得的阶段**（连接、传输）。
-            // 父进程那一侧另有 deadline，见 run_with_deadline。
-            .arg("--max-time")
-            .arg(timeout_secs.to_string())
-            .arg("-X")
-            .arg("POST")
-            .arg("-H")
-            .arg("Content-Type: application/json")
-            // 请求体走 stdin：转写内容可能很长，也可能含引号和换行，
-            // 塞进 argv 既有长度上限又容易被 shell 语义咬到
-            .arg("--data-binary")
-            .arg("@-")
-            .arg(format!("{url}/v1/chat/completions"));
-        // 父进程的墙钟给到 curl 超时之上再加 5 秒：正常情况下该由 curl
-        // 自己先退出，父进程这层只兜住「curl 根本没在按预期推进」的情况。
-        run_with_deadline(cmd, body, Duration::from_secs(timeout_secs + 5))
+        curl_post_json(url, body, timeout_secs, &[])
     }
 
     fn supports_stream(&self) -> bool {
         true
     }
 
-    /// `curl -N`：**关掉输出缓冲**。不加它 curl 会把整段响应攒在缓冲区里，
-    /// 我们读到的仍然是「一次性的一大块」——流式就成了摆设。
     fn post_sse_lines(
         &self,
         url: &str,
@@ -97,25 +139,27 @@ impl Transport for Curl {
         timeout_secs: u64,
         on_line: &mut (dyn FnMut(&str) + Send),
     ) -> Result<()> {
-        let mut cmd = Command::new("/usr/bin/curl");
-        cmd.arg("-fsS")
-            .arg("-N")
-            .arg("--max-time")
-            .arg(timeout_secs.to_string())
-            .arg("-X")
-            .arg("POST")
-            .arg("-H")
-            .arg("Content-Type: application/json")
-            .arg("-H")
-            .arg("Accept: text/event-stream")
-            .arg("--data-binary")
-            .arg("@-")
-            // ⚠️ **和 `post_json` 一样，路径由这里拼**：`url` 是 base
-            // （`http://127.0.0.1:8794`）。漏了这一段就是 404，
-            // 而且它会被上层当成「流式不可用」静默退回整句路径——
-            // 实测踩到：修好之前跑出来的是「有文字、没声音」。
-            .arg(format!("{url}/v1/chat/completions"));
-        run_with_deadline_lines(cmd, body, Duration::from_secs(timeout_secs + 5), on_line)
+        curl_post_sse(url, body, timeout_secs, &[], on_line)
+    }
+}
+
+impl Transport for CurlWith {
+    fn post_json(&self, url: &str, body: &str, timeout_secs: u64) -> Result<String> {
+        curl_post_json(url, body, timeout_secs, &self.headers)
+    }
+
+    fn supports_stream(&self) -> bool {
+        true
+    }
+
+    fn post_sse_lines(
+        &self,
+        url: &str,
+        body: &str,
+        timeout_secs: u64,
+        on_line: &mut (dyn FnMut(&str) + Send),
+    ) -> Result<()> {
+        curl_post_sse(url, body, timeout_secs, &self.headers, on_line)
     }
 }
 
@@ -389,6 +433,39 @@ pub mod test_support {
 
 #[cfg(test)]
 mod tests {
+    /// 独立版那条路（`Curl`，没有额外头）的参数必须与改造前逐项相同——
+    /// 这是「默认行为一个字节不变」在传输层的落点。
+    #[test]
+    fn plain_curl_args_are_unchanged() {
+        let a = curl_args("http://127.0.0.1:8794", 60, false, &[]);
+        assert_eq!(
+            a,
+            [
+                "-fsS", "--max-time", "60", "-X", "POST", "-H",
+                "Content-Type: application/json", "--data-binary", "@-",
+                "http://127.0.0.1:8794/v1/chat/completions",
+            ]
+        );
+        let s = curl_args("http://127.0.0.1:8794", 60, true, &[]);
+        assert_eq!(
+            s,
+            [
+                "-fsS", "-N", "--max-time", "60", "-X", "POST", "-H",
+                "Content-Type: application/json", "-H", "Accept: text/event-stream",
+                "--data-binary", "@-", "http://127.0.0.1:8794/v1/chat/completions",
+            ]
+        );
+    }
+
+    #[test]
+    fn extra_headers_go_before_the_body() {
+        let a = curl_args("http://x", 5, false, &["X-iDoris-Privacy: local_only".to_string()]);
+        let h = a.iter().position(|x| x == "X-iDoris-Privacy: local_only").unwrap();
+        let b = a.iter().position(|x| x == "--data-binary").unwrap();
+        assert_eq!(a[h - 1], "-H");
+        assert!(h < b);
+    }
+
     use super::*;
     use test_support::Fake;
 
