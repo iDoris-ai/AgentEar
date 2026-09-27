@@ -24,6 +24,18 @@
 > 要补真审查：把 iDoris-ai 加进监控范围、把 daemon 起起来，让它重审 `edc8bcc`。
 > ⚠️ 分支保护是「必需审查 1 + 管理员同样受限」，所以 `gh pr merge --admin` **会被平台拒**——
 > 这条记下来，省得下次再试一遍。
+## 本轮（2026-09-27，v0.25.0）：嵌入 Agent24 的 P2（AgentEar 侧）——真实 A3 附着客户端 + 配对（T6.1.2）
+
+**依据**：Agent24 A3 设计 **v2 已冻结**（PR #524 @68c2412）。AgentEar 侧按文档独立实现，Agent24 仓库一行没碰。
+
+- 真实客户端 `src/a3.rs`（UDS + NDJSON JSON-RPC，std 线程，无 tokio）、配对 `src/a3_pair.rs`（代跑 `agent24 os attach add`，
+  token 进 Keychain）、附着 manifest `assets/agent24/domain-os.yml`（修订号与 app 版本脱钩）、设置窗口 Agent24 一行、
+  菜单「恢复独立模式」、`--talk-turn --host a3`、假内核脚本 `scripts/fake-agent24-kernel.py`。
+- **独立版不变**：没配对时不起连接、不发事件（`a3_pair::start` 只在 config 有 `agent24_socket_path` 时才连）。
+- **测试的一个真教训**：第一轮变异有 3 处存活——假内核一侧的断言在子线程里 panic 被 `let _ = join()` 吞了，
+  测试照样绿。改成 join 并 `resume_unwind` 之后 12/12 变红。**跨线程的断言必须把 panic 传回测试线程。**
+- **待填**：`A3_MIN_VERSION`（Agent24 A3-2 合并时给出）。**待联调**：真 agent24d（A3-1..A3-4 合并后）+ C10 真机。
+
 ## 本轮（2026-09-27，v0.24.0）：嵌入 Agent24 的 P1 骨架（T6.1.1）
 
 **P0 已合并**（PR #95，`522f9eb`）。本轮把 AgentEar 内部改成「可插拔宿主」，**独立版默认行为不变**：

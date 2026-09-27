@@ -146,6 +146,10 @@ const TAG_LAUNCH_AT_LOGIN: isize = 10;
 const TAG_RECORD_CUE: isize = 11;
 /// 菜单栏：Qwen3-ASR 常驻开关。
 const TAG_QWEN3_RESIDENT: isize = 12;
+/// Agent24 配对 / 撤销（设置窗口），与断开停听时「恢复独立模式」（菜单栏）。T6.1.2。
+const TAG_A24_PAIR: isize = 13;
+const TAG_A24_UNPAIR: isize = 14;
+const TAG_RESUME_STANDALONE: isize = 15;
 /// 设置窗口「语音识别」下拉框：`+0` SenseVoice，`+1` / `+2` = `Qwen3Model::ALL` 的下标 + 1。
 /// ⚠️ 必须 < `TAG_DEVICE_BASE`（1000）——`handle` 里 `t >= TAG_DEVICE_BASE` 会吞掉一切更大的 tag。
 const TAG_ASR_ENGINE_BASE: isize = 900;
@@ -644,6 +648,19 @@ fn populate(menu: &NSMenu, mtm: MainThreadMarker, target: &MenuTarget) {
         cfg.auto_paste,
     ));
 
+    // —— 与 Agent24 断开且停听时：手动回独立模式（B5，P1 遗留）——
+    // 只在停听状态出现：平时多一项只是噪音；停听时它是用户唯一的出路。
+    if crate::host::state() == crate::host::AttachState::Disconnected {
+        menu.addItem(&NSMenuItem::separatorItem(mtm));
+        menu.addItem(&item(
+            mtm,
+            target,
+            i18n::t(lang, Key::ResumeStandalone),
+            TAG_RESUME_STANDALONE,
+            false,
+        ));
+    }
+
     // —— 设置…（原生窗口）——
     //
     // 2026-09-23（jason 拍板）：菜单栏越堆越长，「自动上屏」以下那一串
@@ -732,7 +749,7 @@ fn list_voices(cfg: &config::Config, root: &std::path::Path) -> Vec<String> {
 
 fn handle(tag: isize, mtm: MainThreadMarker) {
     // Qwen3 相关的 tag 先处理：900/950 段落在音色（800 + 下标）的理论范围里。
-    if handle_qwen3(tag) {
+    if handle_qwen3(tag) || handle_a24(tag) {
         return;
     }
     // 模式切换单独处理：它的副作用不止改配置（要掐播放、要开关会话）。
@@ -1063,6 +1080,76 @@ thread_local! {
     /// 不能只在打开窗口时画一次）。由菜单栏的 0.5 s 定时器调 `refresh_qwen3_rows`。
     static QWEN3_ROWS: std::cell::RefCell<Option<Qwen3Rows>> =
         const { std::cell::RefCell::new(None) };
+    /// 设置窗口里 Agent24 那一行（状态 + 连接/断开按钮），同样由 0.5 s 定时器活刷新。
+    static A24_ROW: std::cell::RefCell<Option<(Retained<NSTextField>, Retained<NSButton>)>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// 配对 / 撤销正在后台跑（代跑 CLI 可能要几秒，不能卡主线程）。
+static A24_BUSY: AtomicBool = AtomicBool::new(false);
+
+/// 刷新设置窗口里 Agent24 那一行。
+fn refresh_a24_row(lang: Lang) {
+    A24_ROW.with(|r| {
+        let r = r.borrow();
+        let Some((label, button)) = r.as_ref() else { return };
+        let st = crate::a3::status();
+        label.setStringValue(&NSString::from_str(i18n::agent24_status(lang, &st)));
+        let paired = config::get().agent24_socket_path.is_some();
+        // 停止重连（配对失效 / 被停用 / 需确认）时给「连接」：重新配对即手动重连（A3 §5.6）。
+        let needs_action = matches!(st, crate::a3::LinkStatus::NeedsAction(_));
+        let (text, tag) = if paired && !needs_action {
+            (i18n::t(lang, Key::Agent24Disconnect), TAG_A24_UNPAIR)
+        } else {
+            (i18n::t(lang, Key::Agent24Connect), TAG_A24_PAIR)
+        };
+        button.setTitle(&NSString::from_str(text));
+        button.setTag(tag);
+        button.setEnabled(!A24_BUSY.load(Ordering::SeqCst));
+    });
+}
+
+/// 点「连接 / 断开 Agent24」：在后台线程代跑 CLI，结果靠定时器刷新到界面上。
+fn handle_a24(tag: isize) -> bool {
+    match tag {
+        TAG_A24_PAIR | TAG_A24_UNPAIR => {
+            if A24_BUSY.swap(true, Ordering::SeqCst) {
+                return true;
+            }
+            let root = store_root();
+            std::thread::spawn(move || {
+                if tag == TAG_A24_PAIR {
+                    match crate::a3_pair::pair(&root) {
+                        Ok(()) => {}
+                        Err(crate::a3_pair::AddError::NeedsHostConfirm) => {
+                            crate::a3::set_status(crate::a3::LinkStatus::NeedsAction(
+                                crate::a3::StopReason::ConfirmOnHost,
+                            ));
+                        }
+                        Err(crate::a3_pair::AddError::Failed(e)) => {
+                            log::error!("与 Agent24 配对失败：{e}");
+                            crate::a3::set_status(crate::a3::LinkStatus::NeedsAction(
+                                crate::a3::StopReason::Repair,
+                            ));
+                        }
+                    }
+                } else if let Err(e) = crate::a3_pair::revoke() {
+                    log::warn!("{e:#}");
+                }
+                A24_BUSY.store(false, Ordering::SeqCst);
+            });
+            true
+        }
+        TAG_RESUME_STANDALONE => {
+            crate::host::resume_standalone();
+            if crate::a3::status() == crate::a3::LinkStatus::DisconnectedStopped {
+                crate::a3::set_status(crate::a3::LinkStatus::DisconnectedStandalone);
+            }
+            log::info!("用户手动恢复独立模式");
+            true
+        }
+        _ => false,
+    }
 }
 
 struct Qwen3Rows {
@@ -1247,7 +1334,8 @@ fn build_settings_content(
     // 边车状态那一行**即使是空文案也占位**——用固定行数换布局代码简单，
     // 空标签不可见，视觉上跟"少一行"没区别。
     // + 语音识别（下拉框）+ 两个 Qwen3 模型各一行
-    let rows = 3 + 1 + 1 + 3 + 4;
+    // + Agent24 一行（状态 + 连接/断开按钮）
+    let rows = 3 + 1 + 1 + 3 + 1 + 4;
     let content_h = MARGIN * 2.0 + rows as f64 * ROW_H + (rows - 1) as f64 * ROW_GAP;
     window.setContentSize(NSSize::new(SETTINGS_WIDTH, content_h));
 
@@ -1312,6 +1400,18 @@ fn build_settings_content(
         }
         QWEN3_ROWS.with(|r| *r.borrow_mut() = Some(Qwen3Rows { popup, rows }));
         refresh_qwen3_rows(lang);
+    }
+    {
+        // Agent24 附着（T6.1.2）：状态 + 一个按钮（没配对 = 连接；配对了 = 断开）。
+        let y = next_row();
+        let label = info_label(mtm, "", y);
+        label.setFrame(rect(MARGIN + 18.0, y, SETTINGS_WIDTH - 2.0 * MARGIN - 18.0 - 170.0, ROW_H));
+        let b = action_button(mtm, &target, "", TAG_A24_PAIR, y);
+        b.setFrame(rect(SETTINGS_WIDTH - MARGIN - 164.0, y, 164.0, ROW_H));
+        content.addSubview(&label);
+        content.addSubview(&b);
+        A24_ROW.with(|r| *r.borrow_mut() = Some((label, b)));
+        refresh_a24_row(lang);
     }
     {
         let row_y = next_row();
@@ -1506,6 +1606,7 @@ pub fn install(mtm: MainThreadMarker) -> Option<Tray> {
                 let visible = SETTINGS_WINDOW.with(|w| w.borrow().as_ref().is_some_and(|w| w.isVisible()));
                 if visible {
                     refresh_qwen3_rows(config::get().ui_lang);
+                    refresh_a24_row(config::get().ui_lang);
                 }
                 if let Some(button) = item_for_timer.button(mtm) {
                     // 每次都重读语言，这样切换后标题最多 0.5s 就跟上

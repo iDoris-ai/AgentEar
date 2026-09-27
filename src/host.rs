@@ -137,7 +137,11 @@ pub fn idoris_privacy_header(configured: &str) -> &'static str {
 /// 调用方（`talk::Engines::from_config`）原样构造，**这一档的行为不因本模块而变**。
 pub fn llm_engine(cfg: &crate::config::Config) -> Option<Arc<dyn LlmEngine>> {
     if attached() {
-        return Some(Arc::new(HostLlm::new(link(), cfg)));
+        let link = link();
+        if !link.grants_models() {
+            return no_model_grant(cfg, link);
+        }
+        return Some(Arc::new(HostLlm::new(link, cfg)));
     }
     match LlmTransport::parse(&cfg.talk_llm_transport) {
         LlmTransport::Sidecar => None,
@@ -166,6 +170,25 @@ pub fn llm_engine(cfg: &crate::config::Config) -> Option<Arc<dyn LlmEngine>> {
         // 没附着却选了「经宿主」：如实失败，**不偷偷退回边车**——
         // 那会让「我以为走的是 Agent24 的隐私策略」变成假的。
         LlmTransport::Agent24 => Some(Arc::new(HostLlm::new(Arc::new(NoHost), cfg))),
+    }
+}
+
+/// 附着着、但宿主**没授予模型**（A3 §4.3，AgentEar 对齐 2）。
+///
+/// - 独立推理档是本机的（回环边车 / mock）→ 视同 `local_only` 可用：返回 `None` 走本机边车，
+///   并报一条 `error{code: forbidden, "宿主未授予模型"}` 让宿主知道；
+/// - 否则 → **只转写、不回答**：返回一个必失败的宿主引擎（`forbidden`），绝不改发可能出本机的路径。
+pub fn no_model_grant(cfg: &crate::config::Config, link: Arc<dyn HostLink>) -> Option<Arc<dyn LlmEngine>> {
+    emit(
+        "error",
+        error_payload(&HostError::new("forbidden", "宿主未授予模型", false), None),
+    );
+    if standalone_is_local(cfg) {
+        log::warn!("Agent24 没授予模型：这一轮用本机边车回答（回环，等价 local_only）");
+        None
+    } else {
+        log::warn!("Agent24 没授予模型、独立推理又不是本机的：这一轮只转写、不回答");
+        Some(Arc::new(HostLlm::new(link, cfg)))
     }
 }
 
@@ -354,6 +377,11 @@ pub trait HostLink: Send + Sync {
     fn name(&self) -> &'static str;
     /// 现在是否附着着（连接可用）。
     fn attached(&self) -> bool;
+    /// 宿主有没有授予模型能力（A3：握手 offer 里有没有 `_a24/model/`）。
+    /// 没授予时**不得回落到任何可能出本机的路径**（A3 §4.3，AgentEar 对齐 2），见 [`llm_engine`]。
+    fn grants_models(&self) -> bool {
+        true
+    }
     /// `_a24/events/emit`，params = [`emit_params`]`(event)`。
     ///
     /// **只由后台投递线程调用**（见 [`emit`]）：同一 session 串行、等到应答再发下一条，
@@ -781,14 +809,40 @@ impl Default for Emitter {
     }
 }
 
-/// 投递一个 envelope，按 `retryable` 重试（复用同一个 envelope）。
+/// 这类事件被限流（`rate_limited`）时要不要重试（A3 §4.4，AgentEar 对齐 4）：
+/// `transcript` / `proposal` / `confirm_reply` 退避重试（复用 event_id 与 seq）；
+/// `turn` / `speech` / `error` 等状态事件**丢弃并计数**——宿主容忍 seq 缺口。
+pub fn retry_when_rate_limited(ty: &str) -> bool {
+    matches!(ty, "transcript" | "proposal" | "confirm_reply")
+}
+
+/// 被限流丢掉的状态事件数。
+pub static DROPPED_RATE_LIMITED: AtomicU64 = AtomicU64::new(0);
+
+/// 投递失败后要不要再试。
+pub fn should_retry_emit(ty: &str, e: &HostError) -> bool {
+    if e.kind == "rate_limited" {
+        return retry_when_rate_limited(ty);
+    }
+    e.retryable
+}
+
+/// 投递一个 envelope，按规则重试（复用同一个 envelope）。
 fn deliver(link: &dyn HostLink, ev: &Value) {
+    let ty = ev["type"].as_str().unwrap_or_default();
     for attempt in 1..=EMIT_ATTEMPTS {
         match link.emit(ev) {
             Ok(()) => return,
-            Err(e) if e.retryable && attempt < EMIT_ATTEMPTS => {
+            Err(e) if should_retry_emit(ty, &e) && attempt < EMIT_ATTEMPTS => {
                 log::debug!("事件投递失败（第 {attempt} 次，重试）：{e}");
-                std::thread::sleep(Duration::from_millis(50 * attempt as u64));
+                // 限流时退避长一点：宿主令牌桶 5/s。
+                let base = if e.kind == "rate_limited" { 300 } else { 50 };
+                std::thread::sleep(Duration::from_millis(base * attempt as u64));
+            }
+            Err(e) if e.kind == "rate_limited" => {
+                DROPPED_RATE_LIMITED.fetch_add(1, Ordering::Relaxed);
+                log::info!("状态事件被限流，丢弃（{ty}）");
+                return;
             }
             Err(e) => {
                 log::warn!("事件投递失败，放弃（{}）：{e}", ev["type"]);

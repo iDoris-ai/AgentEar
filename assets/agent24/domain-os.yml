@@ -1,0 +1,18 @@
+# AgentEar 附着到 Agent24 时注册的 manifest（Agent24 A3 设计 §3.1）。
+#
+# ⚠️ 这份文件的**原始字节**就是配对凭据的一部分：Agent24 按它的 sha256 校验握手
+# （manifest_digest）。改一个字节（包括这几行注释）digest 就变，已配对的用户下次
+# 连接会得 manifest_mismatch，AgentEar 会自动代跑 `agent24 os attach add` 轮换
+# （只有不放宽隐私的变更能自动成功，见 A3 §3.5）。
+#
+# `version` 是**这份 manifest 自身的修订号**，不是 AgentEar 的版本号：只在能力、
+# 命令、隐私声明变化时 +1。跟 app 版本走会让每次升级都触发一次重新配对。
+name: agentear
+version: "1"
+route_namespace: /api/v1/agentear
+event_module: agentear
+data_dir: ~/.agent24/os/agentear/
+impl_kind: attached_process
+kernel_capabilities: [events, models]
+model_access: local_only
+host_commands: [speak, stop_playback]
