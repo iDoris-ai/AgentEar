@@ -110,6 +110,13 @@ pub enum Key {
     LaunchAtLogin,
     /// 录音开始/结束提示音开关（`cue.rs`）。
     RecordCue,
+    /// 设置窗口「语音识别」那一行的标签（SenseVoice / Qwen3-ASR 二选一）。
+    AsrEngineSection,
+    /// 「语音识别」下拉框里随包的那一项。
+    AsrEngineSenseVoice,
+    /// 菜单栏：Qwen3-ASR 常驻开关。**标题里写明代价**（快多少、占多少内存），
+    /// 用户在点之前就该知道拿什么换什么。
+    Qwen3Resident,
 }
 
 /// 三种语言的文案。参数顺序固定 `(en, zh, th)`。
@@ -259,6 +266,19 @@ pub fn t(lang: Lang, key: Key) -> &'static str {
             "录音提示音（开始 / 结束时嘟一声）",
             "เสียงแจ้งเตือนการอัด (เริ่ม / หยุด)",
         ),
+        K::AsrEngineSection => pick(lang, "Speech recognition", "语音识别", "การรู้จำเสียง"),
+        K::AsrEngineSenseVoice => pick(
+            lang,
+            "SenseVoice (built-in, default)",
+            "SenseVoice（随包 · 默认）",
+            "SenseVoice (ในตัว · ค่าเริ่มต้น)",
+        ),
+        K::Qwen3Resident => pick(
+            lang,
+            "Qwen3-ASR: Keep Loaded (≈1.6 s faster, uses 1–2.5 GB RAM)",
+            "Qwen3-ASR 常驻（每句快约 1.6 秒，多占 1–2.5 GB 内存）",
+            "Qwen3-ASR: โหลดค้างไว้ (เร็วขึ้น ≈1.6 วิ ใช้ RAM 1–2.5 GB)",
+        ),
     }
 }
 
@@ -328,6 +348,83 @@ pub fn thai_option(lang: Lang, state: crate::download::State) -> String {
     }
 }
 
+/// 「语音识别」下拉框里 Qwen3 的一项：名字 + 体积（没装时写明要下载）。
+pub fn qwen3_engine_option(lang: Lang, label: &str, mb: u64, ready: bool) -> String {
+    if ready {
+        return label.to_string();
+    }
+    match lang {
+        Lang::En => format!("{label} — download {mb} MB"),
+        Lang::Zh => format!("{label}（需下载 {mb} MB）"),
+        Lang::Th => format!("{label} — ดาวน์โหลด {mb} MB"),
+    }
+}
+
+/// 设置窗口里每个 Qwen3 模型那一行的状态文字。
+///
+/// `bytes`：下载中时的（已下, 总共）。**写字节数而不只是百分比**：
+/// 2.5 GB 的下载在慢网上要很久，「312 / 2468 MB」比「12%」更能让人判断要不要等。
+pub fn qwen3_status(
+    lang: Lang,
+    label: &str,
+    mb: u64,
+    state: crate::download::State,
+    bytes: Option<(u64, u64)>,
+) -> String {
+    use crate::download::State as S;
+    match state {
+        S::Ready => match lang {
+            Lang::En => format!("{label} ({mb} MB) — installed"),
+            Lang::Zh => format!("{label}（{mb} MB）—— 已安装"),
+            Lang::Th => format!("{label} ({mb} MB) — ติดตั้งแล้ว"),
+        },
+        S::Absent => match lang {
+            Lang::En => format!("{label} ({mb} MB) — not downloaded"),
+            Lang::Zh => format!("{label}（{mb} MB）—— 未下载"),
+            Lang::Th => format!("{label} ({mb} MB) — ยังไม่ได้ดาวน์โหลด"),
+        },
+        S::Downloading(pct) => {
+            let (done, total) = bytes
+                .map(|(a, b)| (a / 1_000_000, b / 1_000_000))
+                .unwrap_or((0, 0));
+            match lang {
+                Lang::En => format!("{label} — downloading {pct}% ({done} / {total} MB)"),
+                Lang::Zh => format!("{label} —— 下载中 {pct}%（{done} / {total} MB）"),
+                Lang::Th => format!("{label} — กำลังดาวน์โหลด {pct}% ({done} / {total} MB)"),
+            }
+        }
+        S::Verifying => match lang {
+            Lang::En => format!("{label} — verifying (checksum + offline test)…"),
+            Lang::Zh => format!("{label} —— 校验中（sha + 断网试跑）……"),
+            Lang::Th => format!("{label} — กำลังตรวจสอบ…"),
+        },
+        S::Failed(crate::download::Fail::Cancelled) => match lang {
+            Lang::En => format!("{label} — paused (downloaded part kept)"),
+            Lang::Zh => format!("{label} —— 已取消（已下的部分保留）"),
+            Lang::Th => format!("{label} — หยุดแล้ว (เก็บส่วนที่โหลดไว้)"),
+        },
+        S::Failed(f) => match lang {
+            Lang::En => format!("{label} — failed ({}), see log", fail_reason(lang, f)),
+            Lang::Zh => format!("{label} —— 失败（{}），详情看日志", fail_reason(lang, f)),
+            Lang::Th => format!("{label} — ล้มเหลว ({})", fail_reason(lang, f)),
+        },
+    }
+}
+
+/// 那一行右边按钮的文字。`None` = 不需要按钮（已安装）。
+pub fn qwen3_button(lang: Lang, state: crate::download::State) -> Option<&'static str> {
+    use crate::download::{Fail, State as S};
+    match state {
+        S::Ready => None,
+        S::Absent => Some(pick(lang, "Download", "下载", "ดาวน์โหลด")),
+        S::Downloading(_) => Some(pick(lang, "Cancel", "取消", "ยกเลิก")),
+        // 校验只要几秒到十几秒，中途打断没意义（也不安全：冒烟跑在子进程里）
+        S::Verifying => Some(pick(lang, "Wait…", "请稍候", "รอสักครู่")),
+        S::Failed(Fail::Cancelled) => Some(pick(lang, "Resume", "继续下载", "ดาวน์โหลดต่อ")),
+        S::Failed(_) => Some(pick(lang, "Retry", "重试", "ลองใหม่")),
+    }
+}
+
 fn fail_reason(lang: Lang, f: crate::download::Fail) -> &'static str {
     use crate::download::Fail as F;
     match f {
@@ -336,6 +433,7 @@ fn fail_reason(lang: Lang, f: crate::download::Fail) -> &'static str {
         F::Disk => pick(lang, "disk full", "磁盘不足", "พื้นที่ไม่พอ"),
         F::Busy => pick(lang, "already running", "已在下载", "กำลังดาวน์โหลดอยู่"),
         F::Io => pick(lang, "file error", "文件错误", "ไฟล์ผิดพลาด"),
+        F::Cancelled => pick(lang, "cancelled", "已取消", "ยกเลิกแล้ว"),
     }
 }
 
@@ -343,7 +441,10 @@ fn fail_reason(lang: Lang, f: crate::download::Fail) -> &'static str {
 mod tests {
     use super::*;
 
-    const ALL_KEYS: [Key; 30] = [
+    const ALL_KEYS: [Key; 33] = [
+        Key::AsrEngineSection,
+        Key::AsrEngineSenseVoice,
+        Key::Qwen3Resident,
         Key::StartRecording,
         Key::Transcribing,
         Key::TitleTranscribing,
@@ -375,6 +476,31 @@ mod tests {
         Key::LaunchAtLogin,
         Key::RecordCue,
     ];
+
+    /// 每个状态、每种语言都有字，且按钮文字和状态对得上
+    /// （下载中必须是「取消」，已安装不给按钮）。
+    #[test]
+    fn qwen3_status_and_button_cover_every_state() {
+        use crate::download::{Fail, State as S};
+        let states = [
+            S::Absent,
+            S::Downloading(42),
+            S::Verifying,
+            S::Ready,
+            S::Failed(Fail::Network),
+            S::Failed(Fail::Cancelled),
+        ];
+        for lang in Lang::ALL {
+            for st in states {
+                let line = qwen3_status(lang, "Qwen3-ASR 0.6B", 713, st, Some((300_000_000, 713_000_000)));
+                assert!(line.contains("Qwen3-ASR 0.6B"), "{lang:?}/{st:?}: {line}");
+            }
+            assert_eq!(qwen3_button(lang, S::Ready), None, "装好了不给按钮");
+            assert_eq!(qwen3_button(lang, S::Downloading(1)), Some(pick(lang, "Cancel", "取消", "ยกเลิก")));
+            let dl = qwen3_status(lang, "X", 1, S::Downloading(42), Some((300_000_000, 713_000_000)));
+            assert!(dl.contains("300") && dl.contains("713"), "下载中要写字节数：{dl}");
+        }
+    }
 
     #[test]
     fn nothing_is_empty() {

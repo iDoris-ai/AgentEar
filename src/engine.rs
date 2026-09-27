@@ -40,7 +40,9 @@ pub enum AsrBackend {
     Builtin,
     /// 外部 `speech` CLI（soniqo/speech-swift）的 Qwen3-ASR，一个模型覆盖中英泰。
     ///
-    /// **不随包分发**，要用户自己 `brew install speech`。
+    /// **不随包分发**。v0.23 起由设置窗口按需下载（`qwen3.rs`：钉死版本的
+    /// speech-swift 运行时 + 从 Hugging Face 下的 0.6B / 1.7B 权重）；
+    /// 没下载时退回 PATH 上的 `speech`（老的 `brew install speech` 用户）。
     /// 实测数据见 `docs/benchmarks-m3.md`：泰语纯净集 CER 0.0%，
     /// 但 code-switch 那一格没有胜过现有链路，**所以它不是默认值**。
     ///
@@ -137,7 +139,9 @@ impl AsrEngine for BuiltinEngine {
 /// 隔离不了 CLI 参数和 stdout 格式的变化。所以 `preflight` 里做版本探测，
 /// 不兼容时**拒绝启动并说清楚**，而不是在运行中静默出错。
 pub struct SpeechSwiftEngine {
-    bin: PathBuf,
+    /// 老路径：PATH 上的 `speech`（brew 装的）。我们自己下载的运行时
+    /// 装好时不用它，见 [`qwen3::is_ready`](crate::qwen3::is_ready)。
+    legacy_bin: PathBuf,
     /// 术语表渲染出的 context 字符串。空字符串 = 不传 `--context`。
     ///
     /// 实测（`benchmarks-m3.md` §2.1）：给它 terms.json 里的拉丁词，
@@ -149,7 +153,7 @@ impl SpeechSwiftEngine {
     /// `data_root` 用来读 `terms.json`。传 `None` 表示不加 context。
     pub fn new(data_root: Option<&Path>) -> Self {
         let context = data_root.map(latin_context_from_terms).unwrap_or_default();
-        Self { bin: PathBuf::from("speech"), context }
+        Self { legacy_bin: PathBuf::from("speech"), context }
     }
 
     /// Qwen3-ASR 的语言提示。
@@ -175,10 +179,16 @@ impl AsrEngine for SpeechSwiftEngine {
     }
 
     fn preflight(&self, _lang: AsrLang) -> Result<()> {
-        let out = Command::new(&self.bin).arg("--help").output().with_context(|| {
+        let m = crate::config::get().qwen3_model;
+        // 我们自己下的那份：版本钉死、装的时候跑过断网冒烟，不需要再探契约。
+        if crate::qwen3::is_ready(m) {
+            return Ok(());
+        }
+        let out = Command::new(&self.legacy_bin).arg("--help").output().with_context(|| {
             format!(
-                "找不到 `{}`。speech-swift 不随包分发，先装：brew install speech",
-                self.bin.display()
+                "{} 还没下载：打开菜单「设置…」→ 语音识别，选它就会下载\
+                 （或者自己装 speech CLI：brew install speech）",
+                m.label()
             )
         })?;
         if !out.status.success() {
@@ -195,11 +205,11 @@ impl AsrEngine for SpeechSwiftEngine {
         // 上游把 `--context` 改名的话照样过检，然后在运行时静默拿到更差的结果。
         // 进程边界隔离的是 Swift ABI，**隔离不了 CLI 参数的变化**，
         // 所以这道检查是那个风险的唯一防线。
-        let sub = Command::new(&self.bin)
+        let sub = Command::new(&self.legacy_bin)
             .arg("transcribe")
             .arg("--help")
             .output()
-            .with_context(|| format!("探测 {} transcribe --help 失败", self.bin.display()))?;
+            .with_context(|| format!("探测 {} transcribe --help 失败", self.legacy_bin.display()))?;
         let h = String::from_utf8_lossy(&sub.stdout);
         for need in ["--engine", "--language", "--context"] {
             if !h.contains(need) {
@@ -213,14 +223,34 @@ impl AsrEngine for SpeechSwiftEngine {
     }
 
     fn transcribe(&self, wav: &Path, lang: AsrLang) -> Result<Transcript> {
-        let mut cmd = Command::new(&self.bin);
+        // **每轮现读配置**：设置窗口里换模型、菜单里开关常驻，下一轮就生效。
+        let cfg = crate::config::get();
+        let m = cfg.qwen3_model;
+        let ours = crate::qwen3::is_ready(m);
+        if ours && cfg.qwen3_resident {
+            match crate::qwen3::server_transcribe(m, wav, Self::lang_flag(lang), &self.context) {
+                Ok(t) => return Ok(t),
+                // 常驻服务出问题不能让这一轮丢字：退回逐次调用，慢 1–2 s 但有结果。
+                Err(e) => log::warn!("Qwen3-ASR 常驻服务失败，这一轮退回逐次调用：{e:#}"),
+            }
+        }
+        let bin = if ours {
+            crate::qwen3::speech_bin().context("数据目录未初始化")?
+        } else {
+            self.legacy_bin.clone()
+        };
+        let mut cmd = if ours {
+            crate::qwen3::speech_command(&bin)
+        } else {
+            Command::new(&bin)
+        };
+        // 模型档位来自配置：默认 0.6B（小内存）。T3.5.1 实测 1.7B 在英文 /
+        // 中英混说上更准（`docs/benchmarks-asr-zh-en.md`），要用户自己选。
         cmd.arg("transcribe")
             .arg("--engine")
             .arg("qwen3")
-            // 1.7B 而不是 0.6B：实测 0.6B 三项指标都退
-            //（纯泰语 0.8%→2.4%，英文词命中 36%→28%）。
             .arg("-m")
-            .arg("1.7B");
+            .arg(m.cli_size());
         if let Some(l) = Self::lang_flag(lang) {
             cmd.arg("--language").arg(l);
         }
@@ -234,7 +264,7 @@ impl AsrEngine for SpeechSwiftEngine {
 
         let out = cmd
             .output()
-            .with_context(|| format!("启动 {} 失败", self.bin.display()))?;
+            .with_context(|| format!("启动 {} 失败", bin.display()))?;
         if !out.status.success() {
             bail!(
                 "speech transcribe 失败 (exit {:?}):\n{}",
@@ -255,7 +285,7 @@ impl AsrEngine for SpeechSwiftEngine {
 /// 这和 `asr.rs` 里两套解析的教训是同一条：**每个后端的输出协议都要单独钉住**，
 /// 不要靠「看起来像正文」这类启发式。SenseVoice 那边靠 `<|zh|>` 标记，
 /// whisper 那边靠 `-np -nt` 之后的非空行，这里靠 `Result: ` 前缀。
-fn parse_speech_output(stdout: &str) -> Result<Transcript> {
+pub(crate) fn parse_speech_output(stdout: &str) -> Result<Transcript> {
     // 尾部元数据行，出现即表示结果已经结束。
     fn is_trailer(t: &str) -> bool {
         t.starts_with("Time:") || t.starts_with("RTF:")
@@ -376,6 +406,73 @@ pub fn build(
         AsrBackend::Builtin => Ok(Box::new(BuiltinEngine::new(vendor, data_root)?)),
         AsrBackend::SpeechSwift => Ok(Box::new(SpeechSwiftEngine::new(data_root))),
     }
+}
+
+/// 守护进程用的引擎：**每一轮按当前配置分派**到 builtin 或 speech_swift。
+///
+/// 为什么不在启动时定死：设置窗口里切「语音识别」要**即时生效**
+/// （jason 要亲手对比 SenseVoice / Qwen3 0.6B / 1.7B / 常驻与否），
+/// 而 `worker` 手里只有一个 `Box<dyn AsrEngine>`。重启进程来换引擎太重，
+/// 还会丢掉正在进行的会话。
+///
+/// `pinned`：命令行 `--asr-backend` 显式指定时锁死，不跟配置走（排障用）。
+pub struct Dispatch {
+    pinned: Option<AsrBackend>,
+    /// builtin 需要 vendor 里的文件。构造失败不立刻报错——用户可能只用 Qwen3；
+    /// 轮到它时（preflight / transcribe）再把原因报出来。
+    builtin: std::result::Result<BuiltinEngine, String>,
+    speech: SpeechSwiftEngine,
+}
+
+impl Dispatch {
+    fn selected(&self) -> AsrBackend {
+        self.pinned.unwrap_or_else(|| crate::config::get().asr_backend)
+    }
+
+    fn current(&self) -> Result<&dyn AsrEngine> {
+        match self.selected() {
+            AsrBackend::Builtin => match &self.builtin {
+                Ok(b) => Ok(b),
+                Err(e) => bail!("内置 ASR 不可用：{e}"),
+            },
+            AsrBackend::SpeechSwift => Ok(&self.speech),
+        }
+    }
+}
+
+impl AsrEngine for Dispatch {
+    fn name(&self) -> &'static str {
+        match self.selected() {
+            AsrBackend::Builtin => "builtin",
+            AsrBackend::SpeechSwift => "speech_swift",
+        }
+    }
+
+    fn supports(&self, lang: AsrLang) -> bool {
+        self.current().map(|e| e.supports(lang)).unwrap_or(false)
+    }
+
+    fn preflight(&self, lang: AsrLang) -> Result<()> {
+        self.current()?.preflight(lang)
+    }
+
+    fn transcribe(&self, wav: &Path, lang: AsrLang) -> Result<Transcript> {
+        self.current()?.transcribe(wav, lang)
+    }
+}
+
+pub fn build_dynamic(
+    pinned: Option<AsrBackend>,
+    vendor: &Path,
+    data_root: Option<&Path>,
+) -> Result<Box<dyn AsrEngine>> {
+    let builtin = BuiltinEngine::new(vendor, data_root).map_err(|e| format!("{e:#}"));
+    if pinned == Some(AsrBackend::Builtin) {
+        if let Err(e) = &builtin {
+            bail!("{e}");
+        }
+    }
+    Ok(Box::new(Dispatch { pinned, builtin, speech: SpeechSwiftEngine::new(data_root) }))
 }
 
 #[cfg(test)]

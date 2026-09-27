@@ -2,11 +2,34 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-## 当前状态：**v0.22.0 —— 语音边车端口被别的程序占着时自动换空闲端口拉起（不改 config.json，运行态记录 `run/talk-sidecars.json`，崩溃重启后按 pid 接回）；默认 TTS 端口 8765→8796；对话模式因边车不可用没说出来时用 `say` 念一句（同一原因 3 分钟一次）**；v0.21.1 修「双击进对话模式后第一轮没回答」：边车端口被别的程序占着时报清楚是谁占的、不再误拉起；第一轮先等边车拉起完（最多 30s）再答**；v0.21.0 录音开始/结束提示音（单击一声、双击两声；开始高音、结束低音；设置里可关，默认开）**；v0.20.1 开机自启的实例崩溃后由 launchd 自动拉起（`KeepAlive.SuccessfulExit=false`，菜单退出 / SIGTERM 以 0 退出、不拉起）；v0.20.0 的开机自动启动 + 原生设置窗口仍**均未经真实点击验收**；M1/M2 已发布；**M3 通话链路已跑通，V1 打断定为推键式长期终态（v0.19.0 起才在守护进程里真正生效），不做 VAD 自动打断 / 双讲**
+## 当前状态：**v0.23.0 —— Qwen3-ASR 可选后端：设置窗口里选 0.6B / 1.7B 即下载（speech-swift v0.0.28 钉死 + HF 权重钉 commit，不随包），菜单栏切常驻；默认 ASR 仍是随包 SenseVoice，Qwen3 内默认 0.6B 逐次（小内存）**；v0.22.0 —— 语音边车端口被别的程序占着时自动换空闲端口拉起（不改 config.json，运行态记录 `run/talk-sidecars.json`，崩溃重启后按 pid 接回）；默认 TTS 端口 8765→8796；对话模式因边车不可用没说出来时用 `say` 念一句（同一原因 3 分钟一次）；v0.21.1 修「双击进对话模式后第一轮没回答」：边车端口被别的程序占着时报清楚是谁占的、不再误拉起；第一轮先等边车拉起完（最多 30s）再答**；v0.21.0 录音开始/结束提示音（单击一声、双击两声；开始高音、结束低音；设置里可关，默认开）**；v0.20.1 开机自启的实例崩溃后由 launchd 自动拉起（`KeepAlive.SuccessfulExit=false`，菜单退出 / SIGTERM 以 0 退出、不拉起）；v0.20.0 的开机自动启动 + 原生设置窗口仍**均未经真实点击验收**；M1/M2 已发布；**M3 通话链路已跑通，V1 打断定为推键式长期终态（v0.19.0 起才在守护进程里真正生效），不做 VAD 自动打断 / 双讲**
 
 M1 完成；**知识库投递 + 全文检索默认开（v0.4.2）**；M2 理解层已发布（v0.4.0）但默认关；
 **v0.6.0 加了通话链路（说一句答一句、可按键打断）**，**v0.5.0 加了可切换的 ASR 后端**（`--asr-backend` / `config.json` 的 `asr_backend`，
-**默认仍是 `builtin`**，`speech_swift` 要用户自己装 `speech` CLI，且**菜单栏里没有这一项**）。
+**默认仍是 `builtin`**）。**v0.23.0 起 `speech_swift`（Qwen3-ASR）在设置窗口里选了就下载**
+（`src/qwen3.rs`，ADR-0010；见下方「Qwen3-ASR 可选后端」一节），不再要求用户自己装 brew。
+
+### Qwen3-ASR 可选后端（v0.23.0，T3.5.6，jason 2026-09-26 拍板 ADR-0010 §6）
+
+- **入口**：设置窗口「语音识别」下拉（SenseVoice / Qwen3 0.6B / 1.7B）+ 每个模型一行下载进度；
+  菜单栏「Qwen3-ASR 常驻」开关。**选了没装的那档 → 下载，装好并过断网冒烟才切**
+  （`tray::QWEN3_INTENT`，同泰语的 `THAI_INTENT`：下载期间改主意就不切）。
+- **默认小内存**：Qwen3 内默认 0.6B、逐次调用；常驻空闲 `qwen3_idle_secs`（600 s，最短 60）后退出。
+  老 speech_swift 用户（config 无 `qwen3_model` 键）迁移为 1.7B——**判据是键没出现过**。
+- **钉死**：`qwen3::SPEECH_VERSION` + tarball sha；HF 权重 `resolve/<commit>/` + 逐文件 sha。
+  **升级 speech = 改常量 + sha + 本机重跑 `--fetch-qwen3` 与 `--asr-bench`。**
+- ⚠️ **所有 speech 进程都跑在 `sandbox-exec` 禁出站 TCP 里**：speech 找不到模型会静默下载
+  （调研时当场下过 611 MB）。**只禁 TCP、不禁 UDP 是实测出来的**——禁 UDP 会让它判缓存无效、
+  转而重试下载约 2 分钟（`qwen3.rs` 常量注释 + 测试钉住）。
+- ⚠️ **常驻服务必须显式传模型名**（`Qwen3Model::server_model`），端口用系统分配的空闲端口
+  （8765 被别家占过，固定端口迟早撞车）；`--transcribe` 这类一次性子命令结束时由
+  `qwen3::ServerGuard` 收掉；被 kill -9 留下的孤儿下次启动按 `speech-server.pid` 收（先核对命令行）。
+- ⚠️ **下载中被 kill，curl 子进程不会跟着死**（泰语下载也是）——`download::kill_curls()`
+  在信号 / 菜单退出 / 重启三条路上调用。
+- 实测（`docs/benchmarks-asr-zh-en.md` §9，合成语音、只量速度与内存）：常驻热态 0.6B 0.09–0.35 s、
+  1.7B 0.19–0.69 s；逐次 1.8–2.5 s；0.6B ≈ 816 MiB、1.7B ≈ 2.49 GiB。
+  **常驻形态的准确率没用 60×3 组重跑过**，不要写成「与 CLI 相同」。
+- GGUF 路线（llama.cpp）另开 **T3.5.7** 评准确率，没做。
 
 **M3 实时对话（ADR-0007）：V1 的通话链路已随 v0.6.0 发布；v0.7.0 给了它产品入口。**
 
@@ -491,6 +514,8 @@ cargo test                                    # 300 passed / 0 failed / 7 ignore
 ./target/release/agentear --diagnose          # 环境自检：权限、音频设备、ASR 依赖
 ./target/release/agentear --debug-keys        # 打印每个修饰键事件，排查按键问题
 ./target/release/agentear --fetch-thai        # 预下载泰语模型（574 MB），只装不改识别语言
+./target/release/agentear --fetch-qwen3 0.6b  # 预下载 Qwen3-ASR（运行时 99 MB + 0.6B 713 MB / 1.7B 2.47 GB），只装不切
+./target/release/agentear --asr-bench x.wav --runs 5   # 同进程轮流切 SenseVoice / Qwen3 两档 × 两形态并计时（会改 config，配临时 AGENTEAR_DATA）
 ./target/release/agentear --transcribe x.wav --lang th   # 不改配置试泰语链路
 ./target/release/agentear --classify "这是一个 idea"      # 给一段文字分类（评测脚本也走这条）
 ./target/release/agentear --replay-kb                    # 从 routes/ 全量重建 kb/，幂等，可反复跑
