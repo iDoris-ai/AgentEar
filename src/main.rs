@@ -2096,13 +2096,18 @@ impl CliHost {
             CliHost::A3(conn) => {
                 // 宿主可能在这一轮里下发了 speak（排在回答之后播）：命令行别在它播完前就退出，
                 // 否则 speech 只报了 started、永远等不到 completed。上限 60 s。
+                //
+                // **仅供测试**：`AGENTEAR_A3_LINGER_SECS=<n>`（≤120）让连接在这一轮跑完后
+                // 再保持 n 秒，好让端到端脚本从宿主外部 `POST …/commands/speak` 送进来
+                // （`scripts/e2e-agent24.sh`）。不设 = 0，行为与原来完全相同。
+                let linger = Duration::from_secs(a3_linger_secs());
                 let t0 = Instant::now();
-                while t0.elapsed() < Duration::from_secs(60) {
+                while t0.elapsed() < linger + Duration::from_secs(60) {
                     let busy = {
                         let c = host::center().lock().unwrap_or_else(|p| p.into_inner());
                         c.playing().is_some() || c.queue_len() > 0
                     };
-                    if !busy {
+                    if !busy && t0.elapsed() >= linger {
                         break;
                     }
                     std::thread::sleep(Duration::from_millis(50));
@@ -2118,6 +2123,16 @@ impl CliHost {
             }
         }
     }
+}
+
+/// `AGENTEAR_A3_LINGER_SECS`（仅供测试）：`--host a3` 一轮跑完后连接多保持几秒。
+/// 非法值与未设置都当 0；上限 120 s，免得写错成一个很大的数把命令行挂住。
+fn a3_linger_secs() -> u64 {
+    parse_linger(std::env::var("AGENTEAR_A3_LINGER_SECS").ok().as_deref())
+}
+
+fn parse_linger(v: Option<&str>) -> u64 {
+    v.and_then(|s| s.trim().parse::<u64>().ok()).unwrap_or(0).min(120)
 }
 
 /// 解析 `--host fake|a3`。
@@ -3080,6 +3095,17 @@ mod host_wiring_tests {
         assert!(!needs_asr_preflight(&a(&["--run-command", "x", "--host", "fake"])));
         assert!(!needs_asr_preflight(&a(&["--say", "你好"])));
         assert!(needs_asr_preflight(&a(&["--commands", "--add-command-wav", "x.wav"])), "混了会转写的：保守，照样检查");
+    }
+
+    /// 测试用的 linger：未设 / 非法 = 0（行为不变），上限 120。
+    #[test]
+    fn a3_linger_defaults_to_zero_and_is_capped() {
+        assert_eq!(parse_linger(None), 0);
+        assert_eq!(parse_linger(Some("")), 0);
+        assert_eq!(parse_linger(Some("abc")), 0);
+        assert_eq!(parse_linger(Some("-3")), 0);
+        assert_eq!(parse_linger(Some(" 20 ")), 20);
+        assert_eq!(parse_linger(Some("9999")), 120);
     }
 
     #[test]

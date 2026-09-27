@@ -24,7 +24,17 @@
 > 要补真审查：把 iDoris-ai 加进监控范围、把 daemon 起起来，让它重审 `edc8bcc`。
 > ⚠️ 分支保护是「必需审查 1 + 管理员同样受限」，所以 `gh pr merge --admin` **会被平台拒**——
 > 这条记下来，省得下次再试一遍。
-## 本轮（2026-09-27，v0.25.1）：#97 评审两条非阻塞
+## 本轮（2026-09-27，v0.25.1 续）：真 agent24d 端到端 29/29 + 兼容检查改能力探测
+
+- `scripts/e2e-agent24.sh`：对 Agent24 #532@`b111ac4`（A3-3，叠在 #529 A3-2b 上）预跑 **29/29**
+  （run5 28/0；run6 加 S3 能力探测 29/0），证据 `docs/data/e2e-agent24-2026-09/`。
+  远端计数桩用 `[::ffff:127.0.0.1]`（v4-mapped → Remote 层，照 Agent24 `me4_model_blackbox.rs`），不依赖 LAN 网卡。
+  脚本两处 bug 由协调者实跑发现并修：WS 帧外层是 `{type:"module",payload:{module,kind,payload}}`；
+  S8 的事件文件曾覆盖 S5 的。
+- `a3_pair`：版本闸（`A3_MIN_VERSION` 占位）改为**能力探测** `os attach list --json`——Agent24 ME4 期间
+  一直报 0.3.0，版本号不可靠。探测有副作用（临时拉起 ephemeral daemon），只在点连接/自动轮换时各一次。
+- **待办**：Agent24 合并 A3 系列后对其 main 复验；jason 真机 C10。
+
 
 - `a3::strip_nulls` 递归进数组元素（数组里的 null 值保留）；`tray::spawn_busy` + `BusyGuard`：
   配对/撤销后台任务 panic 后 `A24_BUSY` 一定复位，按钮不会永久灰掉。

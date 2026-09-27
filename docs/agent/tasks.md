@@ -1187,7 +1187,10 @@
 - **没做**：真实 `A3Host`（UDS 注册 / token / 握手 / 重连 / 入站帧读写）——P2；
   菜单「恢复独立模式」入口——P2。
 
-### T6.1.2 P2 单轮端到端（AgentEar 侧）  `IN_PROGRESS`（2026-09-27，v0.25.0，分支 `feat/a24-p2-a3-client`）
+### T6.1.2 P2 单轮端到端（AgentEar 侧）  `DONE`（AgentEar 侧；2026-09-27）
+> ✅ **AgentEar 侧 DONE**：v0.25.0（#97）+ v0.25.1（#98 与本 PR）。**E2E 对 Agent24 #529+#532 分支 29/29**（`docs/data/e2e-agent24-2026-09/`）。
+> ⏳ **待 Agent24 合并 A3 系列后对 Agent24 main 复验**（`AGENT24_REF=origin/main BUILD_A24=1 scripts/e2e-agent24.sh`）。真按键 / 设置窗口点「连接」/ Keychain 首次弹窗 / 桌面面板显示仍需 jason 手测（C10）。
+> （以下为原记录，v0.25.0 时的分支 `feat/a24-p2-a3-client`）
 - **规格**：Agent24 `docs/design/A3-ATTACHED-MODULE.md` **v2（PR #524 @68c2412，已冻结）** §4 / §5.6 / §6。
   AgentEar 按文档**独立实现**，不依赖 Agent24 的 crate。
 - **做了（AgentEar 侧）**：
