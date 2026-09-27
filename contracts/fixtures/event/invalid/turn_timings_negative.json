@@ -1,0 +1,14 @@
+{
+  "schema": "agentear.event/1",
+  "event_id": "evt_0101",
+  "session_id": "ses_demo",
+  "seq": 7,
+  "type": "turn",
+  "payload": {
+    "phase": "idle",
+    "turn": 1,
+    "timings": {
+      "asr_ms": -5
+    }
+  }
+}

@@ -31,6 +31,7 @@ mod sidecar;
 mod store;
 mod talk;
 mod terms;
+mod timings;
 mod tray;
 
 use crate::kb::KbSink;
@@ -77,6 +78,7 @@ fn main() -> Result<()> {
     // 那种错很难发现，因为默认配置恰好是大多数情况下对的那个。
     let data_root = data_root()?;
     download::set_data_root(data_root.clone());
+    timings::init(&data_root);
     // 术语表在**启动时**就确保存在，不等到第一次纠错。
     //
     // 早先只在纠错路径里 load，而纠错默认是关的——于是「首次启动写入默认表」
@@ -564,10 +566,13 @@ fn main() -> Result<()> {
         } else {
             asr::AsrLang::Auto
         };
+        // 分段耗时：命令行这一轮从「开始转写」起算（没有松键这一刻，也没有录音时长）。
+        timings::begin_at(Instant::now(), "conversation", None, engine.name());
         let t_asr = Instant::now();
         let transcript = engine
             .transcribe(std::path::Path::new(&wav), asr_lang)
             .with_context(|| format!("转写失败：{wav}"))?;
+        timings::mark(timings::Stage::AsrDone);
         let heard = paste::sanitize(&transcript.text);
         println!(
             "① 听到（ASR {:.2}s）：{heard}",
@@ -579,6 +584,7 @@ fn main() -> Result<()> {
             with_session(|s| s.finish_listening());
             with_session(|s| s.turn_ready("", None));
             println!("（这段音频没有语音，轮次结束）");
+            timings::finish("empty");
             cli_host.finish();
             return Ok(());
         }
@@ -588,7 +594,35 @@ fn main() -> Result<()> {
             asr_lang: transcript.lang.clone(),
         };
         answer_out_loud(&cfg, &heard, lang, Some(&meta));
+        if let Some(t) = timings::last() {
+            if let Some(line) = timings::menu_line(&t, cfg.ui_lang) {
+                println!("⏱ {line}");
+            }
+        }
         cli_host.finish();
+        return Ok(());
+    }
+
+    // ------------------------------------------------------------------
+    //   --timings [--last N]   每轮分段耗时的统计（中位数 / p90 / 最大值）
+    //
+    // 数据来自 `<数据目录>/derived/timings.jsonl`（每轮一行，只有数字与枚举）。
+    // 只报这三个数：仓库规矩是**不报一个好看的区间**。
+    // ------------------------------------------------------------------
+    if args.iter().any(|a| a == "--timings") {
+        let path = data_root.join("derived").join("timings.jsonl");
+        let last_n = match flag_value(&args, "--last") {
+            Some(v) => Some(v.parse::<usize>().context("--last 后面要跟一个正整数")?),
+            None => None,
+        };
+        let recs = timings::read_records(&path);
+        if recs.is_empty() {
+            println!("还没有分段耗时记录（{}）——跑一轮对话或输入法之后再看", path.display());
+        } else {
+            print!("{}", timings::report(&recs, last_n));
+            println!("
+来源：{}", path.display());
+        }
         return Ok(());
     }
 
@@ -1266,6 +1300,8 @@ fn finish(state: State, store: &store::Store, asr: &dyn engine::AsrEngine) -> Re
     else {
         return Ok(state);
     };
+    // 松键那一刻：这一轮分段耗时的 t0（「说完到听到」从这里起算）。
+    let t_release = Instant::now();
 
     // 收尾：把停止瞬间还在缓冲里的采样也写进去
     let tail = recorder.drain();
@@ -1307,6 +1343,13 @@ fn finish(state: State, store: &store::Store, asr: &dyn engine::AsrEngine) -> Re
         tray::set(tray::Status::Idle);
         return Ok(State::Idle);
     }
+    // 过短丢弃 / 按键确认之后才开表：那些不是「一轮」。
+    let turn_mode = if config::get().talk_mode == config::TalkMode::Conversation {
+        "conversation"
+    } else {
+        "input_method"
+    };
+    let turn_id = timings::begin_at(t_release, turn_mode, Some((secs * 1000.0) as u64), asr.name());
     tray::set(tray::Status::Transcribing);
 
     // raw 先落盘并走完提交协议，再谈转写。
@@ -1321,7 +1364,9 @@ fn finish(state: State, store: &store::Store, asr: &dyn engine::AsrEngine) -> Re
     println!("✓ 已保存 {secs:.1}s 录音");
 
     let t_asr = Instant::now();
-    match asr.transcribe(&committed.path, asr_lang) {
+    let transcribed = asr.transcribe(&committed.path, asr_lang);
+    timings::mark(timings::Stage::AsrDone);
+    match transcribed {
         Ok(t) if !t.text.is_empty() => {
             log::debug!(
                 "转写耗时 {:.2}s，语种 {}",
@@ -1480,6 +1525,7 @@ fn finish(state: State, store: &store::Store, asr: &dyn engine::AsrEngine) -> Re
             if cfg.commands_enabled {
                 match run_command_turn(store, &cfg, &text, &committed.content_hash) {
                     CommandTurn::Handled => {
+                        timings::finish("command");
                         tray::set(tray::Status::Idle);
                         return Ok(State::Idle);
                     }
@@ -1487,6 +1533,7 @@ fn finish(state: State, store: &store::Store, asr: &dyn engine::AsrEngine) -> Re
                     // 不往下走 LLM（用户刚才是在下指令，不是聊天），
                     // 也不当作没命中。
                     CommandTurn::Asked => {
+                        timings::finish("command");
                         tray::set(tray::Status::Idle);
                         return Ok(State::Idle);
                     }
@@ -1532,15 +1579,29 @@ fn finish(state: State, store: &store::Store, asr: &dyn engine::AsrEngine) -> Re
                     asr_lang: t.lang.clone(),
                 };
                 std::thread::spawn(move || {
+                    // 回答线程接着这一轮的表往下打点（等边车的时间也算在「说完到听到」里——
+                    // 用户确实在等它）。
+                    timings::bind(turn_id);
                     if talk::await_sidecars_for_turn(seq) {
                         answer_out_loud(&cfg_owned, &text_owned, talk_lang, Some(&meta));
+                    } else {
+                        timings::finish("failed");
                     }
                 });
+            } else {
+                // 输入法模式：这一轮到上屏为止，只有 ASR 这一段。
+                timings::finish("ok");
             }
         }
-        Ok(_) => log::warn!("转写结果为空（这段音频可能没有语音）"),
+        Ok(_) => {
+            timings::finish("empty");
+            log::warn!("转写结果为空（这段音频可能没有语音）")
+        }
         // raw 已经安全落盘，转写失败只是丢了一次派生结果，可以重跑
-        Err(e) => log::error!("转写失败（raw 音频已保留，可重试）: {e:#}"),
+        Err(e) => {
+            timings::finish("asr_failed");
+            log::error!("转写失败（raw 音频已保留，可重试）: {e:#}")
+        }
     }
 
     tray::set(tray::Status::Idle);
@@ -2206,6 +2267,17 @@ fn turn_error(e: &anyhow::Error) -> host::HostError {
     host::HostError::new(code, msg, true)
 }
 
+/// 这一轮推理走哪条路（记进分段耗时）：附着时一律经宿主，否则看配置。
+fn llm_via(cfg: &config::Config) -> &str {
+    if host::attached() {
+        "agent24"
+    } else if cfg.talk_llm_engine == "mock" {
+        "mock"
+    } else {
+        cfg.talk_llm_transport.as_str()
+    }
+}
+
 fn answer_out_loud(cfg: &config::Config, heard: &str, lang: talk::TalkLang, meta: Option<&TurnMeta>) {
     // 附着时：这一轮开始了（宿主排队的播报等它说完再放，B7），并把转写报给宿主。
     // **只有对话模式会走到这里**——输入法模式不发转写（B6）。独立模式下这些都是空操作。
@@ -2222,6 +2294,7 @@ fn answer_out_loud(cfg: &config::Config, heard: &str, lang: talk::TalkLang, meta
         ),
     );
     host::emit("turn", host::turn_payload("thinking", turn_no));
+    timings::set_via(llm_via(cfg));
     answer_out_loud_inner(cfg, heard, lang, turn_no);
     host::set_turn_active(false);
 }
@@ -2268,7 +2341,8 @@ fn answer_out_loud_inner(cfg: &config::Config, heard: &str, lang: talk::TalkLang
             println!("（这一轮没说出来，详见日志）");
             let err = turn_error(&e);
             host::emit("error", host::error_payload(&err, None));
-            host::emit("turn", host::turn_payload("failed", turn_no));
+            let tm = timings::finish("failed");
+            host::emit("turn", host::turn_payload_with_timings("failed", turn_no, tm.as_ref()));
             // 原因是边车不可用时，用 `say` 念一句（带节流），别让用户以为「按了没反应」。
             // **宿主那边的错误（超时 / 无本地模型 / 隐私拒绝……）不念这一句**：
             // 那不是本机边车的问题，「语音服务没启动」会把用户引到错的地方；
@@ -2299,7 +2373,8 @@ fn answer_out_loud_inner(cfg: &config::Config, heard: &str, lang: talk::TalkLang
     };
     println!("🔊 {reply}");
     talk::note_turn_ok();
-    host::emit("turn", host::turn_payload("idle", turn_no));
+    let tm = timings::finish("ok");
+    host::emit("turn", host::turn_payload_with_timings("idle", turn_no, tm.as_ref()));
     // 全文补进这一轮（进 Speaking 相时还没有它）。
     if let Some(Err(e)) = with_session(|s| s.note_reply(reply.clone())) {
         log::warn!("补记回答失败: {e}");
@@ -2741,6 +2816,7 @@ const TEXT_ONLY_SUBCOMMANDS: &[&str] = &[
     "--ask",
     "--cue",
     "--cue-wav",
+    "--timings",
 ];
 
 /// 这次运行要不要先做 ASR 依赖检查。守护进程（无子命令）和一切会转写的子命令都要；
@@ -3082,6 +3158,35 @@ mod host_wiring_tests {
         assert_eq!(t["lang"], "zh-CN");
         assert_eq!(t["content_hash"], HASH);
         assert_eq!(fake.requests.lock().unwrap().len(), 1, "推理经宿主");
+        host::detach(&cfg);
+    }
+
+    #[test]
+    fn a_timed_attached_turn_reports_timings_on_the_closing_turn_event() {
+        let (_g, _store, mut cfg) = setup();
+        let _tg = timings::test_guard();
+        cfg.talk_mode = config::TalkMode::Conversation;
+        let fake = Arc::new(host::FakeHost::new());
+        fake.push_reply(Err(host::HostError::new("timeout", "宿主太慢", true)));
+        host::attach(fake.clone());
+        // 与守护进程 `finish()` 同一个顺序：松键开表 → ASR 完成打点 → 回答
+        timings::begin_at(Instant::now(), "conversation", Some(1500), "builtin");
+        timings::mark(timings::Stage::AsrDone);
+        answer_out_loud(&cfg, "今天天气怎么样？", talk::TalkLang::Zh, None);
+        assert!(host::flush(Duration::from_secs(2)));
+        let closing = events_of(&fake, "turn")
+            .into_iter()
+            .find(|e| e["payload"]["phase"] == "failed")
+            .expect("失败的一轮要有 turn:failed");
+        let t = &closing["payload"]["timings"];
+        assert!(t.is_object(), "收尾的 turn 事件要带分段耗时：{closing}");
+        assert_eq!(t["llm_via"], "agent24", "附着时推理经宿主");
+        assert_eq!(t["record_ms"], 1500);
+        assert!(t["asr_ms"].is_u64());
+        assert!(t["total_ms"].is_u64());
+        assert!(t.get("to_first_audio_ms").is_none(), "没出声就不能有首声耗时");
+        // 这一轮已经收过表，不能再收第二次
+        assert!(timings::finish("ok").is_none());
         host::detach(&cfg);
     }
 

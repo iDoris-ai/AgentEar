@@ -1225,9 +1225,16 @@
 - **还差（DoD）**：与**真 agent24d**（agent24-13 的 A3-1..A3-4 合并后）联调；隐私负测（外部 provider 计数桩 = 0）在
   Agent24 侧 C8 做；真按键 / 设置窗口点击 / Keychain 弹窗需 jason 手测（C10）。
 
-### T6.1.2b 附着时思考模型的独白被念出  `PR_OPEN`（2026-09-27，v0.25.2，分支 `fix/attached-thinking-model`）
+### T6.1.2b 附着时思考模型的独白被念出  `DONE`（2026-09-27，#101 合并，v0.25.2 已发布）
 - jason 真机：Agent24 路由到 Qwen3-8B-4bit，输出无 `<think>` 开头标签、160 token 用完在思考里 → 独白被 TTS 念出。
 - 修：附着请求加 ` /no_think`；**附着路径专属**（`host::judge_host_reply`，仅在加了 /no_think 的请求上）认无开头标签的思考段——全局 `strip_thinking` 不变（#101 评审：合法提到 `</think>` 的正文会被腰斩）；截断在思考里只念提示 + error{internal, reasoning_truncated}；附着上限 512。实测 136→22 tokens。
+
+### T6.1.5 每轮分段耗时（看得到 + 落盘积累）  `PR_OPEN`（2026-09-27，v0.26.0，分支 `feat/turn-timings`）
+- 需求：jason（经 agent24-13 转述）——本地模型卖点是隐私和快，每轮要看到毫秒级耗时并落盘，作为定位慢点的依据。
+- 做法：`src/timings.rs`（全局时钟 + 线程绑定轮次；缺段省略不填 0）；菜单栏「上一轮：说完→出声」；`--timings [--last N]`（中位数/p90/最大值，最近秩）；
+  `derived/timings.jsonl`（只有数字与枚举，10 MB 滚动）；附着时收尾 `turn` 事件带可选 `timings`（schema + fixtures）。
+- 验收：`cargo test`；调用点变异 5 处全红；`--talk-turn` 独立 + `--host fake` 实跑；对真实 agent24d E2E 30/0（新增「turn idle 带 timings」）。
+- 待 jason 手测：真按键后菜单栏那一行。
 
 ### T6.1.2c 跟进：「用满上限」与「截断在思考里」分不开  `BACKLOG`（#101 评审非阻塞项）
 - 现判据：`completion_tokens >= max_tokens` 且没见到 `</think>` → 当作思考截断，只念提示。一段**不含思考、恰好用满 512** 的正常长答案也会被误判。

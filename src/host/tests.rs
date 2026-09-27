@@ -1080,3 +1080,35 @@ fn reattach_does_not_carry_old_queue_to_the_new_host() {
     assert!(old.events().len() <= 1, "旧队列里没上线的不许再发往旧宿主");
     detach(&crate::config::Config::default());
 }
+
+/// 防漂移：真实的 `timings::Timings`（由 `compute` 算出、带上宿主推理的元数据）
+/// 经 `turn_payload_with_timings` 包进 `turn` 事件后，必须过 contracts 的 schema。
+/// schema 里 `timings` 是 `additionalProperties: false`——Rust 侧多一个字段这里就红。
+#[test]
+fn turn_event_with_real_timings_matches_schema() {
+    use crate::timings::{compute, Timings};
+    use std::time::Duration;
+    let ms = |v: u64| Some(Duration::from_millis(v));
+    let mut t: Timings = compute(
+        &[ms(180), ms(590), ms(1160), ms(2890), ms(7010)],
+        Some(2400),
+        Some(1650),
+        Duration::from_millis(7050),
+    );
+    t.llm_via = Some("agent24".into());
+    t.model = Some("Qwen3-8B-4bit".into());
+    t.tier = Some("local".into());
+    t.asr_backend = Some("builtin".into());
+    t.prompt_tokens = Some(117);
+    t.completion_tokens = Some(22);
+    t.interrupted = true;
+    for phase in ["idle", "failed"] {
+        let p = turn_payload_with_timings(phase, Some(1), Some(&t));
+        assert_eq!(p["timings"]["to_first_audio_ms"], 2890);
+        assert_event_valid(&envelope("ses_x", 1, "evt_x", "turn", p));
+    }
+    // 没有分段（例如宿主那边拿不到）时就是原来的 turn 事件，不带空对象。
+    let p = turn_payload_with_timings("idle", Some(1), None);
+    assert!(p.get("timings").is_none());
+    assert_event_valid(&envelope("ses_x", 2, "evt_y", "turn", p));
+}

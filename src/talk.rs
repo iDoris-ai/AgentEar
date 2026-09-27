@@ -2417,13 +2417,17 @@ pub fn speak(engines: &Engines, text: &str, lang: TalkLang) -> Result<Duration> 
     let started = Instant::now();
     let wav = engines.tts.synthesize(text, lang)?;
     let synth = started.elapsed();
+    crate::timings::note_tts_first(synth);
     log::info!(
         "通话 TTS（{}）{:.2}s，{} 字节",
         engines.tts.name(),
         synth.as_secs_f32(),
         wav.len()
     );
-    play_blocking(&wav)
+    crate::timings::mark(crate::timings::Stage::AudioFirst);
+    let played = play_blocking(&wav);
+    crate::timings::mark(crate::timings::Stage::PlayEnd);
+    played
 }
 
 /// 一轮问答 + 逐句合成 + 逐句播放：**「边出边合成」的落点**。
@@ -2454,6 +2458,7 @@ pub fn answer_and_speak_streamed(
     if !engines.llm.streams() {
         // 引擎不支持流式：老老实实走老路，行为与 v0.9.0 完全一致。
         let reply = answer(engines, cfg, user_text, lang)?;
+        crate::timings::mark(crate::timings::Stage::LlmDone);
         on_first_audio();
         let played = speak(engines, &reply, lang)?;
         return Ok((reply, played));
@@ -2471,14 +2476,23 @@ pub fn answer_and_speak_streamed(
     let abort_prod = abort.clone();
     let started = Instant::now();
     let interrupts_at_start = interrupts();
+    // 生产者线程另起，打点前要绑定到同一轮（见 `timings` 模块说明）。
+    let turn_id = crate::timings::bound();
 
     let producer = std::thread::spawn(move || -> Result<String> {
+        crate::timings::bind(turn_id);
         let mut splitter = SentenceSplitter::new();
+        let mut got_first_token = false;
         let mut first_sentence = true;
         let mut echoed = false;
         let send = |sentence: &str| -> bool {
+            let t_synth = Instant::now();
             match tts.synthesize(sentence, lang) {
-                Ok(wav) => tx.send(Ok(wav)).is_ok(),
+                Ok(wav) => {
+                    // 只记第一段：它决定「说完到听到」，后面的段在播放期间重叠合成。
+                    crate::timings::note_tts_first(t_synth.elapsed());
+                    tx.send(Ok(wav)).is_ok()
+                }
                 Err(e) => {
                     let _ = tx.send(Err(e));
                     false
@@ -2486,6 +2500,14 @@ pub fn answer_and_speak_streamed(
             }
         };
         let mut on_delta = |delta: &str| {
+            // ⚠️ SSE 的逐行回调可能跑在传输层自己的读线程上（实测：`post_sse_lines`
+            // 在另一条线程里回调）。那条线程没绑定到这一轮，打点会被当成「别人的」丢掉——
+            // 首字耗时就这样悄悄缺了。每次进来都绑一下（只是写一个 thread-local）。
+            crate::timings::bind(turn_id);
+            if !got_first_token && !delta.is_empty() {
+                got_first_token = true;
+                crate::timings::mark(crate::timings::Stage::LlmFirst);
+            }
             if echoed {
                 return; // 已经判定为复述：后面的碎片一律不再合成
             }
@@ -2509,6 +2531,7 @@ pub fn answer_and_speak_streamed(
             }
         };
         let text = llm.reply_stream(&system, &question, lang, &mut on_delta)?;
+        crate::timings::mark(crate::timings::Stage::LlmDone);
         // 尾句没有句末标点，`splitter` 里还压着——在这里补上。
         if let Some(rest) = splitter.finish() {
             if !echoed && !abort_prod.load(std::sync::atomic::Ordering::Relaxed) {
@@ -2538,10 +2561,12 @@ pub fn answer_and_speak_streamed(
                         engines.llm.name(),
                         t.as_secs_f32()
                     );
+                    crate::timings::mark(crate::timings::Stage::AudioFirst);
                     on_first_audio();
                 }
                 played += play_blocking(&wav)?;
                 if interrupts() != interrupts_at_start {
+                    crate::timings::note_interrupted();
                     // 被打断了：剩下的句子不必再合成，也不必再播。
                     abort.store(true, std::sync::atomic::Ordering::Relaxed);
                     break;
@@ -2553,6 +2578,9 @@ pub fn answer_and_speak_streamed(
                 break;
             }
         }
+    }
+    if first_audio.is_some() {
+        crate::timings::mark(crate::timings::Stage::PlayEnd);
     }
     let produced = producer.join().unwrap_or_else(|_| Err(anyhow::anyhow!("合成线程崩了")));
     // ⚠️ 已经播出去的不补、不撤——用户听到半句，好过听到一句错位的话。

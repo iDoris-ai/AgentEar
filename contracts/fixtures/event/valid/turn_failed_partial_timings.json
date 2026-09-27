@@ -1,0 +1,18 @@
+{
+  "schema": "agentear.event/1",
+  "event_id": "evt_0101",
+  "session_id": "ses_demo",
+  "seq": 7,
+  "type": "turn",
+  "payload": {
+    "phase": "failed",
+    "turn": 2,
+    "timings": {
+      "asr_ms": 130,
+      "total_ms": 60200,
+      "llm_via": "sidecar",
+      "asr_backend": "speech_swift",
+      "interrupted": true
+    }
+  }
+}
