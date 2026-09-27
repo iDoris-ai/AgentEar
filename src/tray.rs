@@ -1088,6 +1088,34 @@ thread_local! {
 /// 配对 / 撤销正在后台跑（代跑 CLI 可能要几秒，不能卡主线程）。
 static A24_BUSY: AtomicBool = AtomicBool::new(false);
 
+/// 持有期间 `flag` 为 true，**drop 时（含 panic 展开）一定复位为 false**。
+///
+/// 为什么要 guard 而不是在闭包末尾手写 `store(false)`：后台线程里 `pair()`/`revoke()`
+/// 一旦 panic，末尾那一行就不会执行，`A24_BUSY` 永久卡在 true，设置窗口的
+/// 「连接 / 断开」按钮从此灰掉直到重启（#97 评审）。
+struct BusyGuard(&'static AtomicBool);
+
+impl Drop for BusyGuard {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::SeqCst);
+    }
+}
+
+/// 抢占 `flag` 并在后台线程里跑 `job`；已经在跑时返回 `None`（什么都不做）。
+/// 不论 `job` 正常返回还是 panic，`flag` 都会在线程结束前复位。
+fn spawn_busy<F>(flag: &'static AtomicBool, job: F) -> Option<std::thread::JoinHandle<()>>
+where
+    F: FnOnce() + Send + 'static,
+{
+    if flag.swap(true, Ordering::SeqCst) {
+        return None;
+    }
+    Some(std::thread::spawn(move || {
+        let _guard = BusyGuard(flag);
+        job();
+    }))
+}
+
 /// 刷新设置窗口里 Agent24 那一行。
 fn refresh_a24_row(lang: Lang) {
     A24_ROW.with(|r| {
@@ -1113,11 +1141,9 @@ fn refresh_a24_row(lang: Lang) {
 fn handle_a24(tag: isize) -> bool {
     match tag {
         TAG_A24_PAIR | TAG_A24_UNPAIR => {
-            if A24_BUSY.swap(true, Ordering::SeqCst) {
-                return true;
-            }
             let root = store_root();
-            std::thread::spawn(move || {
+            // 已经在跑就什么都不做（按钮本来也是灰的）；返回的句柄不 join。
+            let _ = spawn_busy(&A24_BUSY, move || {
                 if tag == TAG_A24_PAIR {
                     match crate::a3_pair::pair(&root) {
                         Ok(()) => {}
@@ -1136,7 +1162,6 @@ fn handle_a24(tag: isize) -> bool {
                 } else if let Err(e) = crate::a3_pair::revoke() {
                     log::warn!("{e:#}");
                 }
-                A24_BUSY.store(false, Ordering::SeqCst);
             });
             true
         }
@@ -1634,6 +1659,36 @@ pub fn run(mtm: MainThreadMarker) -> ! {
 mod tests {
     use super::*;
     use crate::config::TalkMode;
+
+    /// #97 评审：后台配对/撤销 panic 后，忙碌标志必须复位，否则按钮永久灰掉。
+    #[test]
+    fn busy_flag_resets_even_when_the_job_panics() {
+        static FLAG: AtomicBool = AtomicBool::new(false);
+        let h = spawn_busy(&FLAG, || panic!("模拟 pair() 在后台线程里 panic"))
+            .expect("第一次应当抢到");
+        assert!(h.join().is_err(), "job 确实 panic 了");
+        assert!(!FLAG.load(Ordering::SeqCst), "panic 之后标志必须复位");
+        // 复位之后还能再跑一次（按钮恢复可用）。
+        let h = spawn_busy(&FLAG, || {}).expect("复位后应当能再抢到");
+        h.join().unwrap();
+        assert!(!FLAG.load(Ordering::SeqCst));
+    }
+
+    /// 正在跑的时候再点一次：不起第二个线程，标志保持 true 直到第一个结束。
+    #[test]
+    fn busy_flag_rejects_a_second_job_while_running() {
+        static FLAG: AtomicBool = AtomicBool::new(false);
+        let (tx, rx) = std::sync::mpsc::channel::<()>();
+        let h = spawn_busy(&FLAG, move || {
+            let _ = rx.recv();
+        })
+        .expect("第一次应当抢到");
+        assert!(spawn_busy(&FLAG, || {}).is_none(), "在跑时不许再起一个");
+        assert!(FLAG.load(Ordering::SeqCst));
+        tx.send(()).unwrap();
+        h.join().unwrap();
+        assert!(!FLAG.load(Ordering::SeqCst));
+    }
 
     /// **点哪一项就切到哪个模式**——这是这次菜单唯一不能靠人眼看出来的错法。
     #[test]
