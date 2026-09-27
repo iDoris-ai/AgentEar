@@ -942,3 +942,48 @@ fn paths_for_the_host_hide_the_user_name() {
     let user = home.rsplit('/').next().unwrap();
     assert!(!tilde_path(&format!("{home}/a/b.json")).contains(user));
 }
+
+/// PR #96 评审的场景（常驻回归）：事件入队后、还没投递完就 detach——
+/// **缓冲里的不再投递，失败的那一次也不再重试**。评审原话：delivered_after_detach=true。
+#[test]
+fn detach_voids_queued_and_retrying_events() {
+    let _g = test_guard();
+    let fake = Arc::new(FakeHost::new());
+    fake.emit_delay_ms.store(200, Ordering::SeqCst);
+    // 第一条第一次投递「失败但已记录」，于是会退避重试——重试不许在 detach 之后发生。
+    fake.emit_failures.store(1, Ordering::SeqCst);
+    attach(fake.clone());
+    emit("turn", turn_payload("thinking", Some(1)));
+    emit("transcript", transcript_payload("一", "zh-CN", None));
+    emit("transcript", transcript_payload("二", "zh-CN", None));
+    std::thread::sleep(Duration::from_millis(50)); // 第一条正在投递
+    detach(&crate::config::Config::default());
+    assert!(flush(Duration::from_secs(3)), "作废后队列要能清空，IN_FLIGHT 不能卡住");
+    std::thread::sleep(Duration::from_millis(500));
+    let n = fake.events().len();
+    assert!(n <= 1, "detach 之后不许再投递（只有已在线上的那一次可能落地），实际 {n} 条");
+}
+
+/// 换新附着：旧队列的事件绝不被带到新宿主，新宿主只收到新 session 的事件。
+#[test]
+fn reattach_does_not_carry_old_queue_to_the_new_host() {
+    let _g = test_guard();
+    let old = Arc::new(FakeHost::new());
+    old.emit_delay_ms.store(200, Ordering::SeqCst);
+    attach(old.clone());
+    for i in 0..3 {
+        emit("transcript", transcript_payload(&format!("旧{i}"), "zh-CN", None));
+    }
+    std::thread::sleep(Duration::from_millis(50));
+    let new = Arc::new(FakeHost::new());
+    attach(new.clone());
+    emit("transcript", transcript_payload("新", "zh-CN", None));
+    assert!(flush(Duration::from_secs(3)));
+    std::thread::sleep(Duration::from_millis(400));
+    let got = new.events();
+    assert_eq!(got.len(), 1, "新宿主只该收到新事件：{got:?}");
+    assert_eq!(got[0]["payload"]["text"], "新");
+    assert_eq!(got[0]["seq"], 1, "新附着 = 新 session，seq 从 1");
+    assert!(old.events().len() <= 1, "旧队列里没上线的不许再发往旧宿主");
+    detach(&crate::config::Config::default());
+}

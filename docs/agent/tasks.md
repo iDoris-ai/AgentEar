@@ -1214,6 +1214,10 @@
   （第一轮 3 处存活，根因是假内核线程里的断言 panic 被吞——已改成 join 传播）；`--talk-turn --host a3` 对假内核实跑：
   握手 → transcript → model/complete（tier=local）→ turn 相位 → 宿主 speak 排在回答之后 → started/completed，0 失败；
   无模型授权那条也实跑过（本机 mock 回答 + `error{forbidden}`、零次 model 调用）。
+- **修 PR #96 评审抓到的真问题**：`host::detach()` 只丢了 `tx`，已入队未投递的事件照样被后台线程送到旧宿主
+  （评审复现 delivered_after_detach=true）。现在 `Outbox` 带作废标志：detach 与换新附着都会作废旧队列，
+  投递线程每次尝试前看标志——不再投递、不再重试；新连接只收新 session 的事件。常驻回归 3 条
+  （FakeHost ×2 + 真 UDS 的 A3 版），调用点变异 3 处全红。
 - **还差（DoD）**：与**真 agent24d**（agent24-13 的 A3-1..A3-4 合并后）联调；隐私负测（外部 provider 计数桩 = 0）在
   Agent24 侧 C8 做；真按键 / 设置窗口点击 / Keychain 弹窗需 jason 手测（C10）。
 

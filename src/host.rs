@@ -829,8 +829,18 @@ pub fn should_retry_emit(ty: &str, e: &HostError) -> bool {
 
 /// 投递一个 envelope，按规则重试（复用同一个 envelope）。
 fn deliver(link: &dyn HostLink, ev: &Value) {
+    deliver_until(link, ev, &AtomicBool::new(false));
+}
+
+/// 同 [`deliver`]，但每次尝试前看一眼 `cancelled`：作废了就不再发、不再重试。
+/// （已经写上线的那一次无法收回——A3 下断开会关连接，那一次随之失败。）
+fn deliver_until(link: &dyn HostLink, ev: &Value, cancelled: &AtomicBool) {
     let ty = ev["type"].as_str().unwrap_or_default();
     for attempt in 1..=EMIT_ATTEMPTS {
+        if cancelled.load(Ordering::SeqCst) {
+            log::debug!("附着已作废，{ty} 不再投递 / 重试");
+            return;
+        }
         match link.emit(ev) {
             Ok(()) => return,
             Err(e) if should_retry_emit(ty, &e) && attempt < EMIT_ATTEMPTS => {
@@ -925,6 +935,15 @@ static STATE: Mutex<AttachState> = Mutex::new(AttachState::Standalone);
 struct Outbox {
     emitter: Arc<Emitter>,
     tx: std::sync::mpsc::Sender<Value>,
+    /// 这一代附着已作废（detach / 换新附着）。投递线程看到它就**不再投递、不再重试**，
+    /// 把缓冲里剩下的事件清掉。（PR #96 评审：原来只丢 `tx`，已入队的事件照样送到旧宿主。）
+    cancelled: Arc<AtomicBool>,
+}
+
+impl Outbox {
+    fn cancel(&self) {
+        self.cancelled.store(true, Ordering::SeqCst);
+    }
 }
 static EMITTER: Mutex<Option<Outbox>> = Mutex::new(None);
 /// 已入队、还没投递完的事件数（`flush` 用）。
@@ -932,12 +951,15 @@ static IN_FLIGHT: AtomicU64 = AtomicU64::new(0);
 
 fn start_outbox(link: Arc<dyn HostLink>) -> Outbox {
     let (tx, rx) = std::sync::mpsc::channel::<Value>();
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let flag = cancelled.clone();
     std::thread::Builder::new()
         .name("host-emit".into())
         .spawn(move || {
             // 发送端被丢掉（断开 / 换了新附着）时 recv 返回 Err，线程自然退出。
+            // 作废之后缓冲里剩下的每一条，`deliver_until` 第一次尝试前就会看到标志而放弃。
             while let Ok(ev) = rx.recv() {
-                deliver(link.as_ref(), &ev);
+                deliver_until(link.as_ref(), &ev, &flag);
                 IN_FLIGHT.fetch_sub(1, Ordering::SeqCst);
             }
         })
@@ -945,6 +967,7 @@ fn start_outbox(link: Arc<dyn HostLink>) -> Outbox {
     Outbox {
         emitter: Arc::new(Emitter::new()),
         tx,
+        cancelled,
     }
 }
 
@@ -970,7 +993,14 @@ static AWAITING: Mutex<Option<Awaiting>> = Mutex::new(None);
 /// 附着到一个宿主：换 session、状态进 Attached。
 pub fn attach(link: Arc<dyn HostLink>) {
     log::info!("附着到宿主：{}", link.name());
-    *EMITTER.lock().unwrap_or_else(|p| p.into_inner()) = Some(start_outbox(link.clone()));
+    // 换新附着：旧那一代的队列作废，**新连接的事件绝不被旧队列带走**，旧事件也不再发往旧宿主。
+    if let Some(old) = EMITTER
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .replace(start_outbox(link.clone()))
+    {
+        old.cancel();
+    }
     *LINK.write().unwrap_or_else(|p| p.into_inner()) = Some(link);
     *STATE.lock().unwrap_or_else(|p| p.into_inner()) = AttachState::Attached;
     crate::tray::set_host_disconnected(false);
@@ -983,7 +1013,10 @@ pub fn attach(link: Arc<dyn HostLink>) {
 /// （它们是宿主的意图，宿主不在了就不该继续念）。
 pub fn detach(cfg: &crate::config::Config) -> AttachState {
     *LINK.write().unwrap_or_else(|p| p.into_inner()) = None;
-    *EMITTER.lock().unwrap_or_else(|p| p.into_inner()) = None;
+    // 作废已入队未投递的事件（PR #96 评审）：只丢 `tx` 不够，缓冲里的照样会被投递到旧宿主。
+    if let Some(old) = EMITTER.lock().unwrap_or_else(|p| p.into_inner()).take() {
+        old.cancel();
+    }
     *AWAITING.lock().unwrap_or_else(|p| p.into_inner()) = None;
     center().lock().unwrap_or_else(|p| p.into_inner()).reset();
     let next = after_disconnect(
@@ -1584,7 +1617,9 @@ pub(crate) fn test_guard() -> std::sync::MutexGuard<'static, ()> {
     static GLOBAL: Mutex<()> = Mutex::new(());
     let g = GLOBAL.lock().unwrap_or_else(|p| p.into_inner());
     *LINK.write().unwrap_or_else(|p| p.into_inner()) = None;
-    *EMITTER.lock().unwrap_or_else(|p| p.into_inner()) = None;
+    if let Some(old) = EMITTER.lock().unwrap_or_else(|p| p.into_inner()).take() {
+        old.cancel();
+    }
     *STATE.lock().unwrap_or_else(|p| p.into_inner()) = AttachState::Standalone;
     *AWAITING.lock().unwrap_or_else(|p| p.into_inner()) = None;
     *center().lock().unwrap_or_else(|p| p.into_inner()) = CommandCenter::new();

@@ -599,3 +599,68 @@ fn backoff_doubles_to_thirty_seconds() {
     }
     assert_eq!(seq, [1, 2, 4, 8, 16, 30, 30, 30]);
 }
+
+/// PR #96 评审在 A3 上的版本：断开后旧队列里的事件**不会出现在新连接上**，
+/// 也不再发往旧连接；新连接只收到新 session 的事件。
+#[test]
+fn old_connection_queue_never_reaches_the_new_connection() {
+    let _g = host::test_guard();
+    let p1 = sock_path("oldq");
+    let p2 = sock_path("newq");
+    let old_seen = Arc::new(Mutex::new(Vec::<Value>::new()));
+    let new_seen = Arc::new(Mutex::new(Vec::<Value>::new()));
+    let o2 = old_seen.clone();
+    let t1 = kernel(&p1, 1, move |_, mut k| {
+        k.accept_ok(&["_a24/events/", "_a24/model/"]);
+        // 慢内核：每条 emit 200 ms 后才应答，让后面的事件堆在模块的队列里。
+        while let Ok(Some(b)) = read_frame(&mut k.r) {
+            let v: Value = serde_json::from_slice(&b).unwrap();
+            if v["method"] == "_a24/events/emit" {
+                o2.lock().unwrap().push(v["params"]["payload"].clone());
+                std::thread::sleep(Duration::from_millis(200));
+                let mut out = serde_json::to_vec(&json!({"jsonrpc":"2.0","id":v["id"],"result":{}})).unwrap();
+                out.push(b'\n');
+                if k.w.write_all(&out).is_err() {
+                    break;
+                }
+            }
+        }
+    });
+    let n2 = new_seen.clone();
+    let t2 = kernel(&p2, 1, move |_, mut k| {
+        k.accept_ok(&["_a24/events/", "_a24/model/"]);
+        while let Ok(Some(b)) = read_frame(&mut k.r) {
+            let v: Value = serde_json::from_slice(&b).unwrap();
+            if v["method"] == "_a24/events/emit" {
+                n2.lock().unwrap().push(v["params"]["payload"].clone());
+                k.send(json!({"jsonrpc":"2.0","id":v["id"],"result":{}}));
+            }
+        }
+    });
+    let c1 = Conn::connect(&creds(&p1), quiet_handler()).unwrap();
+    host::attach(Arc::new(A3Host { conn: c1.clone() }));
+    for i in 0..4 {
+        host::emit("transcript", host::transcript_payload(&format!("旧{i}"), "zh-CN", None));
+    }
+    std::thread::sleep(Duration::from_millis(50)); // 第一条在线上
+    // 断连：与守护线程的顺序一致——关连接、detach，然后连新的。
+    c1.close();
+    host::detach(&crate::config::Config::default());
+    let c2 = Conn::connect(&creds(&p2), quiet_handler()).unwrap();
+    host::attach(Arc::new(A3Host { conn: c2.clone() }));
+    host::emit("transcript", host::transcript_payload("新", "zh-CN", None));
+    assert!(host::flush(Duration::from_secs(5)), "旧队列不能卡住新连接的投递");
+    c2.close();
+    host::detach(&crate::config::Config::default());
+    t1.join();
+    t2.join();
+    let old = old_seen.lock().unwrap().clone();
+    let new = new_seen.lock().unwrap().clone();
+    assert!(old.len() <= 1, "断开后旧队列不许再发往旧连接：{old:?}");
+    assert_eq!(new.len(), 1, "新连接只该收到新事件：{new:?}");
+    assert_eq!(new[0]["payload"]["text"], "新");
+    assert_eq!(new[0]["seq"], 1);
+    if let Some(o) = old.first() {
+        assert_ne!(o["session_id"], new[0]["session_id"]);
+    }
+}
