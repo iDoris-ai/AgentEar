@@ -1221,6 +1221,9 @@
 - **还差（DoD）**：与**真 agent24d**（agent24-13 的 A3-1..A3-4 合并后）联调；隐私负测（外部 provider 计数桩 = 0）在
   Agent24 侧 C8 做；真按键 / 设置窗口点击 / Keychain 弹窗需 jason 手测（C10）。
 
+### T6.1.2a #97 评审跟进  `PR_OPEN`（2026-09-27，v0.25.1，分支 `fix/a24-p2-review-nits`）
+- `strip_nulls` 递归数组元素；`A24_BUSY` panic 兜底（drop guard）。验收：`cargo test -- strip_nulls_recurses busy_flag` 3 条绿，调用点变异红。
+
 ### T6.1.3 P3 提案闭环  `BLOCKED`（等 T6.1.2）
 - 发 proposal，自己不执行；附着模式下关掉本地的语音确认，改发 `confirm_reply`（B8）。
 - **验收**：拒绝时零执行；确认的内容与执行载荷同源；超出支持范围的 action type 会被安全拒绝。
