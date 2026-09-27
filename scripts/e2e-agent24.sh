@@ -228,39 +228,57 @@ else
 fi
 
 # ---------- S4 事件订阅 ----------
+# 当前事件文件（S5 用 events.ndjson，S8 用 events2.ndjson，互不覆盖）。
+EVENTS="${T}/events.ndjson"
+
 step "S4 订阅 GET /api/v1/events（WS）"
 "${PY}" "${HERE}/e2e-agent24/ws_collect.py" --port "${A24_PORT}" --token "${A24_TOKEN}" \
-  --out "${T}/events.ndjson" --ready-file "${T}/ws.ready" >"${T}/ws.log" 2>&1 &
+  --out "${EVENTS}" --ready-file "${T}/ws.ready" >"${T}/ws.log" 2>&1 &
 PIDS="${PIDS} $!"
 for _ in $(seq 1 50); do [ -s "${T}/ws.ready" ] && break; sleep 0.1; done
 [ -s "${T}/ws.ready" ] && ok "WS 已连上" || blocked "WS 连不上：$(cat "${T}/ws.log")"
 
-# 统计 WS 里 agentear 事件：$1 = 事件 type，可选 $2 = payload 里要匹配的子串
+# 统计 WS 里 agentear 事件。agent24d 的 WS 帧真实形状：
+#   {"v":1,"seq":N,"ts":..,"type":"module",
+#    "payload":{"module":"agentear","kind":"agentear.event","payload":<完整 agentear.event/1>}}
+# $1 = 事件 type（transcript/turn/speech/error…）；其后可跟若干 `字段=值`，
+# 按**解析后的对象**比对 agentear.event/1 的 payload 字段（值按 JSON 解析：true / "x" / 1；
+# 解析不了就当字符串），不依赖序列化空格。
 ws_has() {
-  "${PY}" - "${T}/events.ndjson" "$1" "${2:-}" <<'PYEOF'
+  "${PY}" - "${EVENTS}" "$@" <<'PYEOF'
 import json, sys
-path, want, sub = sys.argv[1], sys.argv[2], sys.argv[3]
+path, want, conds = sys.argv[1], sys.argv[2], sys.argv[3:]
+def val(v):
+    try:
+        return json.loads(v)
+    except ValueError:
+        return v
+pairs = [(c.split("=", 1)[0], val(c.split("=", 1)[1])) for c in conds]
 n = 0
 for line in open(path, encoding="utf-8", errors="replace"):
     try:
         m = json.loads(line)
     except ValueError:
         continue
-    if m.get("module") != "agentear" or m.get("kind") != "agentear.event":
+    if m.get("type") != "module":
         continue
-    ev = m.get("payload") or {}
+    outer = m.get("payload") or {}
+    if outer.get("module") != "agentear" or outer.get("kind") != "agentear.event":
+        continue
+    ev = outer.get("payload") or {}
     if ev.get("schema") != "agentear.event/1" or ev.get("type") != want:
         continue
-    if sub and sub not in json.dumps(ev, ensure_ascii=False):
-        continue
-    n += 1
+    body = ev.get("payload") or {}
+    if all(body.get(k) == v for k, v in pairs):
+        n += 1
 print(n)
 PYEOF
 }
-wait_ws() { # $1 type $2 substring $3 timeout-s
-  local i
-  for i in $(seq 1 $(($3 * 10))); do
-    [ "$(ws_has "$1" "$2")" -gt 0 ] && return 0
+wait_ws() { # $1 超时秒；其余参数同 ws_has
+  local secs="$1" i
+  shift
+  for i in $(seq 1 $((secs * 10))); do
+    [ "$(ws_has "$@")" -gt 0 ] && return 0
     sleep 0.1
   done
   return 1
@@ -283,9 +301,9 @@ if grep -q '已附着到 Agent24' "${T}/ae.out"; then
 else
   blocked "握手失败：$(tail -5 "${T}/ae.err")"
 fi
-wait_ws transcript '"final": true' 60 && ok "WS 收到 transcript（final）" || bad "60s 内 WS 没收到 transcript"
-wait_ws turn thinking 30 && ok "WS 收到 turn thinking" || bad "WS 没收到 turn thinking"
-wait_ws turn idle 90 && ok "WS 收到 turn idle（本轮结束）" || bad "WS 没收到 turn idle"
+wait_ws 60 transcript final=true && ok "WS 收到 transcript（final）" || bad "60s 内 WS 没收到 transcript"
+wait_ws 30 turn phase=thinking && ok "WS 收到 turn thinking" || bad "WS 没收到 turn thinking"
+wait_ws 90 turn phase=idle && ok "WS 收到 turn idle（本轮结束）" || bad "WS 没收到 turn idle"
 if grep -qE 'privacy_denied|tier.?=.?remote' "${T}/ae.err" "${T}/ae.out" 2>/dev/null; then
   bad "AgentEar 报了隐私违例/远端 tier"
 fi
@@ -300,7 +318,7 @@ case "${CODE}" in
   *) bad "speak → ${CODE} $(cat "${T}/api.body" 2>/dev/null)" ;;
 esac
 if [ "${CODE}" = "200" ]; then
-  wait_ws speech '"completed"' 40 && [ "$(ws_has speech e2e-speak-1)" -gt 0 ] \
+  wait_ws 40 speech state=completed command_id=e2e-speak-1 \
     && ok "WS 收到 speech completed（command_id=e2e-speak-1）" || bad "40s 内没收到 e2e-speak-1 的 speech completed"
   CODE2="$(api POST /api/v1/os/agentear/commands/speak "${T}/speak.json" || true)"
   [ "${CODE2}" = "200" ] && ok "同一 command_id 重发 → 200（幂等，不应再播一次）" || bad "重发 → ${CODE2}"
@@ -330,9 +348,10 @@ fi
 step "S8 负测：本地 provider 不可用 → unavailable 且计数桩仍 = 0"
 stop_daemon
 start_daemon "http://127.0.0.1:1" || blocked "负测用的 agent24d 没起来"
-: >"${T}/events.ndjson"
+EVENTS="${T}/events2.ndjson"
+: >"${EVENTS}"
 "${PY}" "${HERE}/e2e-agent24/ws_collect.py" --port "${A24_PORT}" --token "${A24_TOKEN}" \
-  --out "${T}/events.ndjson" --ready-file "${T}/ws2.ready" >"${T}/ws2.log" 2>&1 &
+  --out "${EVENTS}" --ready-file "${T}/ws2.ready" >"${T}/ws2.log" 2>&1 &
 PIDS="${PIDS} $!"
 for _ in $(seq 1 50); do [ -s "${T}/ws2.ready" ] && break; sleep 0.1; done
 # daemon 重启后 token 仍有效（A3 §5.4），socket 在同一路径重建。
@@ -343,11 +362,9 @@ if env AGENTEAR_DATA="${AE_DATA}" AGENTEAR_VENDOR="${AGENTEAR_VENDOR}" \
   :
 fi
 grep -q '已附着到 Agent24' "${T}/ae2.out" && ok "daemon 重启后同一 token 重新握手成功" || bad "重启后握手失败：$(tail -3 "${T}/ae2.err")"
-if wait_ws error unavailable 30 || grep -q 'unavailable' "${T}/ae2.err"; then
-  ok "得到 unavailable（本地不可用时失败关闭）"
-else
-  bad "没看到 unavailable 错误（本地 provider 不可用时应失败关闭）"
-fi
+wait_ws 30 error code=unavailable && ok "WS 收到 error{code:unavailable}（本地不可用时失败关闭）" \
+  || bad "WS 没收到 error{code:unavailable}（本地 provider 不可用时应失败关闭）"
+wait_ws 30 turn phase=failed && ok "WS 收到 turn failed" || bad "WS 没收到 turn failed"
 grep -q 'REMOTE-STUB-REPLY' "${T}/ae2.out" "${T}/ae2.err" && bad "AgentEar 念出了远端桩的回答！" || ok "没有用到远端回答"
 [ "$(stub_count)" = "0" ] && ok "外部计数桩仍 = 0" || bad "外部计数桩 = $(stub_count)"
 
