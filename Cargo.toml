@@ -1,6 +1,6 @@
 [package]
 name = "agentear"
-version = "0.25.2"
+version = "0.25.3"
 edition = "2021"
 description = "本地语音采集与转写守护进程（快捷键录音 → 本地转写 → 自动上屏）"
 license = "Apache-2.0"
@@ -38,9 +38,6 @@ block2 = "0.6.2"
 core-graphics = "0.25.0"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
-# Agent24 附着 token 存 macOS Keychain（T6.1.2）。用 Security framework 而不是 `security` CLI：
-# 后者 `add-generic-password -w <token>` 要把 token 放进 argv，同用户 `ps` 看得见。
-security-framework = "3"
 
 [profile.release]
 opt-level = 3

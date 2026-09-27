@@ -609,7 +609,7 @@ pub fn disconnect_now() {
 
 /// 守护线程要的依赖：凭据从哪来、manifest_mismatch 时怎么轮换。
 pub struct Supervisor {
-    /// 读当前凭据（配置 + Keychain）。`None` = 没配对。
+    /// 读当前凭据（配置 + `<数据目录>/agent24/token`）。`None` = 没配对。
     pub creds: Box<dyn Fn() -> Option<Creds> + Send>,
     /// 自动轮换：`Ok(())` = 已拿到新 token（下一轮读 creds 就是新的）。
     pub rotate: Box<dyn Fn() -> Result<(), StopReason> + Send>,

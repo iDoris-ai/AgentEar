@@ -1159,7 +1159,7 @@ fn handle_a24(tag: isize) -> bool {
                             ));
                         }
                     }
-                } else if let Err(e) = crate::a3_pair::revoke() {
+                } else if let Err(e) = crate::a3_pair::revoke(&root) {
                     log::warn!("{e:#}");
                 }
             });

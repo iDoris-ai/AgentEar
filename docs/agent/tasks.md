@@ -1225,9 +1225,14 @@
 - **还差（DoD）**：与**真 agent24d**（agent24-13 的 A3-1..A3-4 合并后）联调；隐私负测（外部 provider 计数桩 = 0）在
   Agent24 侧 C8 做；真按键 / 设置窗口点击 / Keychain 弹窗需 jason 手测（C10）。
 
-### T6.1.2b 附着时思考模型的独白被念出  `PR_OPEN`（2026-09-27，v0.25.2，分支 `fix/attached-thinking-model`）
+### T6.1.2b 附着时思考模型的独白被念出  `DONE`（2026-09-27，#101 合并，v0.25.2 已发布）
 - jason 真机：Agent24 路由到 Qwen3-8B-4bit，输出无 `<think>` 开头标签、160 token 用完在思考里 → 独白被 TTS 念出。
 - 修：附着请求加 ` /no_think`；**附着路径专属**（`host::judge_host_reply`，仅在加了 /no_think 的请求上）认无开头标签的思考段——全局 `strip_thinking` 不变（#101 评审：合法提到 `</think>` 的正文会被腰斩）；截断在思考里只念提示 + error{internal, reasoning_truncated}；附着上限 512。实测 136→22 tokens。
+
+### T6.1.2d 附着 token 改存 0600 文件（不再用钥匙串）  `PR_OPEN`（2026-09-27，v0.25.3，分支 `fix/agent24-token-file`）
+- 起因：jason 升级到 v0.25.2 首启弹「AgentEar wants to access key ai.idoris.agentear.agent24 … login keychain password」。自签证书无 Team ID → 钥匙串分区按 cdhash 认 app → 每次升级都弹。jason 拍板改存 `<数据目录>/agent24/token`（0600）。
+- 迁移：配对过但无 token 文件 → 代跑 `attach add` 重新签发；不读、不删旧钥匙串项（都会弹框），旧 token 随轮换作废。
+- 验证：7 处调用点变异全红；隔离 agent24d 实测全新配对 / 迁移（旧 token auth_failed）/ 宽权限拒用 / daemon 不在时迁移。
 
 ### T6.1.2c 跟进：「用满上限」与「截断在思考里」分不开  `BACKLOG`（#101 评审非阻塞项）
 - 现判据：`completion_tokens >= max_tokens` 且没见到 `</think>` → 当作思考截断，只念提示。一段**不含思考、恰好用满 512** 的正常长答案也会被误判。

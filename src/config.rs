@@ -336,7 +336,7 @@ pub struct Config {
     pub agent24_cli_path: Option<String>,
     /// 配对拿到的附着 socket 路径（`attach add` 返回的 `socket_path`）。**None = 没配对**。
     ///
-    /// ⚠️ token **不在这里**——它只存 macOS Keychain（`a3_pair::KEYCHAIN_SERVICE`）。
+    /// ⚠️ token **不在这里**——它只存 `<数据目录>/agent24/token`（0600，`a3_pair::store_token`）。
     #[serde(deserialize_with = "lenient")]
     pub agent24_socket_path: Option<String>,
     /// 当前 token 的短 id（展示 / 日志用，不能反推 token）。

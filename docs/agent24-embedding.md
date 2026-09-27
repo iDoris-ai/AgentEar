@@ -105,3 +105,5 @@ P1 可由两边并行开发，但只能用 fake host/module 和暂定 fixtures�
 4. **proposal 三种 action 的宿主支持** → ⏳ 属 P3。现阶段宿主只展示 proposal，**`builtin` 标「已在 AgentEar 本地执行」、永不执行**；P3 执行门也排除 builtin。
 5. **schema 所属与发布** → ✅ AgentEar 维护 `agentear.event/1`、`agentear.proposal/1`、`agentear.command/1`（本仓库 `contracts/`，基准 `522f9eb`）；
    Agent24 以 vendored 副本 + 记录 commit 的方式引用；error.code = wire ErrorKind 18 个 + AgentEar 自有 4 个。
+
+补记（2026-09-27，v0.25.3）：AgentEar 的附着 token 由 macOS 钥匙串改存 `<数据目录>/agent24/token`（0600）——自签证书下钥匙串分区按 cdhash 认 app，每次升级都弹密码框；A3 威胁模型不防同 UID，两者等价。
