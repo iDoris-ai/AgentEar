@@ -1225,6 +1225,10 @@
 - **还差（DoD）**：与**真 agent24d**（agent24-13 的 A3-1..A3-4 合并后）联调；隐私负测（外部 provider 计数桩 = 0）在
   Agent24 侧 C8 做；真按键 / 设置窗口点击 / Keychain 弹窗需 jason 手测（C10）。
 
+### T6.1.2b 附着时思考模型的独白被念出  `PR_OPEN`（2026-09-27，v0.25.2，分支 `fix/attached-thinking-model`）
+- jason 真机：Agent24 路由到 Qwen3-8B-4bit，输出无 `<think>` 开头标签、160 token 用完在思考里 → 独白被 TTS 念出。
+- 修：附着请求加 ` /no_think`；`strip_thinking` 认无开头标签的思考段；截断在思考里只念提示 + error{internal, reasoning_truncated}；附着上限 512。实测 136→22 tokens。
+
 ### T6.1.2a #97 评审跟进  `DONE`（2026-09-27，#98 合并，随 v0.25.1 发布）
 - `strip_nulls` 递归数组元素；`A24_BUSY` panic 兜底（drop guard）。验收：`cargo test -- strip_nulls_recurses busy_flag` 3 条绿，调用点变异红。
 

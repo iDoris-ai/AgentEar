@@ -346,6 +346,9 @@ fn think_filtered(text: &str) -> String {
 /// `think_filtered` 里用来判断「尾部是不是半个标签」的那个标签。
 const THINK_TAG: &str = "<think";
 
+/// 思考段的结束标签。
+pub const THINK_CLOSE: &str = "</think>";
+
 /// 一行 SSE 里的 `choices[0].delta.content`。
 ///
 /// `Ok(None)` = 这一块没有正文（首包只带 role、末包带 finish_reason），
@@ -367,6 +370,15 @@ fn sse_delta(payload: &str) -> Result<Option<String>> {
 /// 所以在客户端再兜一层：这道防线不依赖任何模型的具体行为。
 pub fn strip_thinking(text: &str) -> String {
     let mut out = text.to_string();
+    // **没有开头标签的思考段**：Qwen3 这类模型的聊天模板把 `<think>` 放在 prompt 里，
+    // 输出直接从思考内部开始，只在结尾有 `</think>`（jason 2026-09-27 真机：附着 Agent24、
+    // 路由到 Qwen3-8B-4bit 时整段内心独白被念了出来）。第一个 `</think>` 之前若没有
+    // `<think`，它之前的全是思考 → 连同标签一起丢掉。
+    if let Some(end) = out.find(THINK_CLOSE) {
+        if !out[..end].contains("<think") {
+            out = out[end + THINK_CLOSE.len()..].to_string();
+        }
+    }
     while let (Some(start), Some(end)) = (out.find("<think"), out.find("</think>")) {
         if end < start {
             break;
@@ -2818,6 +2830,15 @@ mod tests {
             "今天天气不错。"
         );
         assert_eq!(strip_thinking("<think>half"), "<think>half", "没闭合时不要吞掉正文");
+        // 没有开头标签（Qwen3 模板把 <think> 放在 prompt 里）：结尾标签之前的全是思考
+        assert_eq!(
+            strip_thinking("好的，用户让我讲个笑话。我需要先确认……\n</think>\n\n为什么星星会笑？"),
+            "为什么星星会笑？"
+        );
+        // /no_think 下 Qwen3 仍会吐一对空标签
+        assert_eq!(strip_thinking("<think>\n\n</think>\n\n今天挺好。"), "今天挺好。");
+        // 结尾标签前已经有开头标签：走原规则，前面的正文保留
+        assert_eq!(strip_thinking("你好。<think>想</think>再见。"), "你好。再见。");
     }
 
     #[test]

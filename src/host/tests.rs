@@ -311,6 +311,80 @@ fn host_llm_success_failure_and_cancel() {
     );
 }
 
+fn reply_n(text: &str, completion_tokens: u64) -> ModelReply {
+    ModelReply {
+        text: text.into(),
+        model_id: "Qwen3-8B-4bit".into(),
+        tier: Tier::Local,
+        prompt_tokens: 100,
+        completion_tokens,
+    }
+}
+
+/// jason 2026-09-27 真机：附着 Agent24、路由到 Qwen3-8B-4bit，
+/// 输出不带 `<think>` 开头标签、160 token 全耗在思考上 → 整段内心独白被念出来。
+#[test]
+fn judge_host_reply_never_speaks_the_monologue() {
+    let max = HOST_MAX_TOKENS;
+    // ① 无开头标签的思考 + </think> + 答案 → 只念答案
+    assert_eq!(
+        judge_host_reply(&reply_n("好的，用户让我讲个笑话。我先想想……\n</think>\n\n为什么星星会笑？", 80), max),
+        HostAnswer::Speak("为什么星星会笑？".into())
+    );
+    // ② 截断的纯思考（用满 max_tokens、没见到 </think>）→ 不念原文
+    let monologue = "好的，用户让我讲个笑话。我需要先确认自己是否符合要求。用户之前提到过如果问天气";
+    assert_eq!(judge_host_reply(&reply_n(monologue, u64::from(max)), max), HostAnswer::ReasoningTruncated);
+    // ③ /no_think 下的空标签 + 答案
+    assert_eq!(
+        judge_host_reply(&reply_n("<think>\n\n</think>\n\n今天挺好。", 12), max),
+        HostAnswer::Speak("今天挺好。".into())
+    );
+    // ④ 正常答案
+    assert_eq!(judge_host_reply(&reply_n("今天挺好。", 6), max), HostAnswer::Speak("今天挺好。".into()));
+    // 截断但已经想完（有 </think>）：答案可能被截短，但它是正文，照念
+    assert_eq!(
+        judge_host_reply(&reply_n("想……</think>答案的前半句", u64::from(max)), max),
+        HostAnswer::Speak("答案的前半句".into())
+    );
+    // 没截断、剥完为空
+    assert_eq!(judge_host_reply(&reply_n("<think>只有思考</think>", 20), max), HostAnswer::Empty);
+}
+
+#[test]
+fn host_llm_asks_for_no_think_and_speaks_a_hint_when_reasoning_is_cut() {
+    let _g = global_lock();
+    let fake = Arc::new(FakeHost::new());
+    attach(fake.clone());
+    let llm = host_llm(&fake, "local_only");
+    // 请求：user 末尾带 /no_think、上限 HOST_MAX_TOKENS
+    fake.push_reply(Ok(reply_n("<think>\n\n</think>\n\n好的。", 5)));
+    assert_eq!(llm.reply("系统", "讲个笑话", TalkLang::Zh).unwrap(), "好的。");
+    let sent = fake.requests.lock().unwrap()[0].clone();
+    assert_eq!(sent["messages"][1]["content"], "讲个笑话 /no_think");
+    assert_eq!(sent["max_tokens"], HOST_MAX_TOKENS);
+    // 截断在思考里：念提示，不念独白，并报一条 error
+    fake.push_reply(Ok(reply_n("好的，用户让我讲个笑话。我需要先确认", u64::from(HOST_MAX_TOKENS))));
+    let said = llm.reply("系统", "讲个笑话", TalkLang::Zh).unwrap();
+    assert_eq!(said, reasoning_truncated_hint(TalkLang::Zh));
+    assert!(!said.contains("用户让我"));
+    assert!(flush(Duration::from_secs(3)));
+    let errs: Vec<_> = fake
+        .events()
+        .into_iter()
+        .filter(|e| e["type"] == "error")
+        .collect();
+    assert_eq!(errs.len(), 1, "截断要报且只报一条 error");
+    assert_eq!(errs[0]["payload"]["code"], "internal");
+    assert_eq!(errs[0]["payload"]["message"], "reasoning_truncated");
+    detach(&crate::config::Config::default());
+    // 三种语言的提示都有、都不空
+    for l in [TalkLang::Zh, TalkLang::En, TalkLang::Th] {
+        assert!(!reasoning_truncated_hint(l).is_empty());
+    }
+    // no_think 不重复加
+    assert_eq!(no_think("你好 /no_think"), "你好 /no_think");
+}
+
 #[test]
 fn host_llm_refuses_a_remote_answer_under_local_only() {
     let fake = Arc::new(FakeHost::new());
