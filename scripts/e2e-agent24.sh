@@ -19,7 +19,9 @@
 #   LOCAL_LLM_URL / LOCAL_LLM_KEY / LOCAL_MODEL
 #                               本地 provider（缺省 oMLX http://127.0.0.1:8088、key xiaobao8088、
 #                               Qwen3-0.6B-4bit），交给 agent24d 的 OMLX_URL / OMLX_API_KEY / DEFAULT_MODEL
-#   REMOTE_HOST                 外部计数桩监听的**非回环**地址（缺省自动取 en0/en1 的 IPv4）
+#   （外部计数桩监听 127.0.0.1，但以 IPv4-mapped 地址 http://[::ffff:127.0.0.1]:<port> 交给
+#    OLLAMA_URL——Agent24 路由器把 v4-mapped 判为非本地、落 Remote 层；流量实际不出本机，
+#    也不依赖本机有 LAN 网卡。同 Agent24 rust/apps/agent24d/tests/me4_model_blackbox.rs 的做法）
 #   PYTHON                      辅助脚本用的解释器（缺省自动挑 ≥3.9，只用标准库）
 #   KEEP=1                      失败/结束后保留临时目录便于排查
 # 退出码：0 全部通过；1 有断言失败（含「Agent24 侧还没有该能力」）；77 前置条件缺失（SKIP）。
@@ -117,17 +119,29 @@ say_ "  agent24d：${AGENT24_BIN}（$("${AGENT24_CLI}" --version 2>/dev/null || 
 if [ -f "${A24_BUILD}/SOURCE" ]; then say_ "  Agent24 源码：$(cat "${A24_BUILD}/SOURCE")"; fi
 say_ "  agentear：${AGENTEAR_BIN}"
 
-REMOTE_HOST="${REMOTE_HOST:-}"
-if [ -z "${REMOTE_HOST}" ]; then
-  REMOTE_HOST="$(ipconfig getifaddr en0 2>/dev/null || ipconfig getifaddr en1 2>/dev/null || true)"
+# IPv6 栈必须能把 [::ffff:127.0.0.1] 送到 IPv4 回环上的监听者，否则计数桩收不到任何东西，
+# 「计数 = 0」就成了假绿。用一个临时 127.0.0.1 监听者实测一次。
+if ! "${PY}" - <<'PYEOF' 2>/dev/null
+import socket, sys
+srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+srv.bind(("127.0.0.1", 0)); srv.listen(1)
+port = srv.getsockname()[1]
+c = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
+c.settimeout(2)
+try:
+    c.connect(("::ffff:127.0.0.1", port))
+except OSError:
+    sys.exit(1)
+srv.settimeout(2); srv.accept()
+PYEOF
+then
+  skip_all "IPv6 栈不可用：连 [::ffff:127.0.0.1] 不通（远端计数桩靠 v4-mapped 地址被判成 Remote 层）"
 fi
-[ -n "${REMOTE_HOST}" ] || skip_all "没有非回环 IPv4（外部计数桩需要它才会被 Agent24 判成 Remote 层）"
-case "${REMOTE_HOST}" in 127.*) skip_all "REMOTE_HOST=${REMOTE_HOST} 是回环，会被判成 Local" ;; esac
 
 if ! curl -s -m 3 -o /dev/null -w '%{http_code}' -H "Authorization: Bearer ${LOCAL_LLM_KEY}" "${LOCAL_LLM_URL}/v1/models" | grep -q 200; then
   skip_all "本地 provider ${LOCAL_LLM_URL} 不可用"
 fi
-ok "前置齐全（本地 provider ${LOCAL_LLM_URL}/${LOCAL_MODEL}；计数桩地址 ${REMOTE_HOST}）"
+ok "前置齐全（本地 provider ${LOCAL_LLM_URL}/${LOCAL_MODEL}；IPv6 v4-mapped 可达）"
 
 T="$(mktemp -d /private/tmp/claude-502/e2e-a24.XXXXXX 2>/dev/null || mktemp -d)"
 A24_HOME="${T}/a24home"
@@ -137,13 +151,13 @@ mkdir -p "${A24_HOME}" "${AE_DATA}"
 printf '%s\n' '{"talk_tts_engine": "say", "talk_lang": "zh"}' >"${AE_DATA}/config.json"
 
 # ---------- S1 外部计数桩 ----------
-step "S1 起外部计数桩（非回环 → Remote 层）"
-"${PY}" "${HERE}/e2e-agent24/count_stub.py" --host "${REMOTE_HOST}" \
+step "S1 起外部计数桩（监听 127.0.0.1，以 [::ffff:127.0.0.1] 交给 Agent24 → Remote 层）"
+"${PY}" "${HERE}/e2e-agent24/count_stub.py" --host 127.0.0.1 \
   --count-file "${T}/stub.count" --port-file "${T}/stub.port" >"${T}/stub.log" 2>&1 &
 PIDS="${PIDS} $!"
 for _ in $(seq 1 50); do [ -s "${T}/stub.port" ] && break; sleep 0.1; done
 [ -s "${T}/stub.port" ] || blocked "计数桩没起来：$(cat "${T}/stub.log")"
-STUB_URL="http://${REMOTE_HOST}:$(cat "${T}/stub.port")"
+STUB_URL="http://[::ffff:127.0.0.1]:$(cat "${T}/stub.port")"
 ok "计数桩 ${STUB_URL}"
 stub_count() { cat "${T}/stub.count" 2>/dev/null || echo "?"; }
 
