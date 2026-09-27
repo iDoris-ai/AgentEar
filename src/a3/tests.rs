@@ -664,3 +664,29 @@ fn old_connection_queue_never_reaches_the_new_connection() {
         assert_ne!(o["session_id"], new[0]["session_id"]);
     }
 }
+
+/// #97 评审：`strip_nulls` 要递归进数组元素里的对象；数组里的 null 值本身保留。
+#[test]
+fn strip_nulls_recurses_into_array_elements() {
+    let mut v = serde_json::json!({
+        "a": null,
+        "messages": [
+            {"role": "user", "content": "hi", "name": null},
+            [ {"x": null, "y": 1} ],
+            null
+        ],
+        "nested": {"b": null, "c": [ {"d": null} ]}
+    });
+    strip_nulls(&mut v);
+    assert_eq!(
+        v,
+        serde_json::json!({
+            "messages": [
+                {"role": "user", "content": "hi"},
+                [ {"y": 1} ],
+                null
+            ],
+            "nested": {"c": [ {} ]}
+        })
+    );
+}

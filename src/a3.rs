@@ -717,15 +717,24 @@ pub fn read_token_file(p: &Path) -> anyhow::Result<String> {
 }
 
 /// 把 JSON 对象里的可选字段为 `null` 的去掉（§4.2：可选字段不发 null）。
+///
+/// 递归进对象的值**和数组的元素**（数组里的对象同样要去掉 null 字段）。
+/// 但**数组元素本身是 null 时保留**：那是一个值，不是「省略的可选字段」，
+/// 删掉会改变数组长度与下标语义。
 pub fn strip_nulls(v: &mut Value) {
-    if let Some(o) = v.as_object_mut() {
-        let keys: Vec<String> = o.iter().filter(|(_, v)| v.is_null()).map(|(k, _)| k.clone()).collect();
-        for k in keys {
-            o.remove(&k);
+    match v {
+        Value::Object(o) => {
+            o.retain(|_, v| !v.is_null());
+            for (_, v) in o.iter_mut() {
+                strip_nulls(v);
+            }
         }
-        for (_, v) in o.iter_mut() {
-            strip_nulls(v);
+        Value::Array(a) => {
+            for v in a.iter_mut() {
+                strip_nulls(v);
+            }
         }
+        _ => {}
     }
 }
 
