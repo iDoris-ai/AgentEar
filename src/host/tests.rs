@@ -485,6 +485,9 @@ fn a_new_attachment_starts_a_new_session() {
     let fake = Arc::new(FakeHost::new());
     attach(fake.clone());
     emit("turn", turn_payload("idle", None));
+    // 换代前先等第一条投递完：换代会作废旧队列里**没发出去**的事件（#96 评审修复），
+    // 这条测的是「新附着 = 新 session」，不是「旧队列能跨代存活」。
+    assert!(flush(Duration::from_secs(2)));
     attach(fake.clone());
     emit("turn", turn_payload("idle", None));
     assert!(flush(Duration::from_secs(2)));
