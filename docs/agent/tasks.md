@@ -1227,7 +1227,12 @@
 
 ### T6.1.2b 附着时思考模型的独白被念出  `PR_OPEN`（2026-09-27，v0.25.2，分支 `fix/attached-thinking-model`）
 - jason 真机：Agent24 路由到 Qwen3-8B-4bit，输出无 `<think>` 开头标签、160 token 用完在思考里 → 独白被 TTS 念出。
-- 修：附着请求加 ` /no_think`；`strip_thinking` 认无开头标签的思考段；截断在思考里只念提示 + error{internal, reasoning_truncated}；附着上限 512。实测 136→22 tokens。
+- 修：附着请求加 ` /no_think`；**附着路径专属**（`host::judge_host_reply`，仅在加了 /no_think 的请求上）认无开头标签的思考段——全局 `strip_thinking` 不变（#101 评审：合法提到 `</think>` 的正文会被腰斩）；截断在思考里只念提示 + error{internal, reasoning_truncated}；附着上限 512。实测 136→22 tokens。
+
+### T6.1.2c 跟进：「用满上限」与「截断在思考里」分不开  `BACKLOG`（#101 评审非阻塞项）
+- 现判据：`completion_tokens >= max_tokens` 且没见到 `</think>` → 当作思考截断，只念提示。一段**不含思考、恰好用满 512** 的正常长答案也会被误判。
+- 实际触发概率极低：附着上限 512，而系统提示要求一两句话（≤40 字）、`/no_think` 实测 22 tokens。
+- 更稳的判据要等宿主回包里带 `finish_reason` 或把思考内容与正文分开返回（需 Agent24 的 `_a24/model/complete` 契约扩展）；本轮不改。
 
 ### T6.1.2a #97 评审跟进  `DONE`（2026-09-27，#98 合并，随 v0.25.1 发布）
 - `strip_nulls` 递归数组元素；`A24_BUSY` panic 兜底（drop guard）。验收：`cargo test -- strip_nulls_recurses busy_flag` 3 条绿，调用点变异红。

@@ -370,15 +370,9 @@ fn sse_delta(payload: &str) -> Result<Option<String>> {
 /// 所以在客户端再兜一层：这道防线不依赖任何模型的具体行为。
 pub fn strip_thinking(text: &str) -> String {
     let mut out = text.to_string();
-    // **没有开头标签的思考段**：Qwen3 这类模型的聊天模板把 `<think>` 放在 prompt 里，
-    // 输出直接从思考内部开始，只在结尾有 `</think>`（jason 2026-09-27 真机：附着 Agent24、
-    // 路由到 Qwen3-8B-4bit 时整段内心独白被念了出来）。第一个 `</think>` 之前若没有
-    // `<think`，它之前的全是思考 → 连同标签一起丢掉。
-    if let Some(end) = out.find(THINK_CLOSE) {
-        if !out[..end].contains("<think") {
-            out = out[end + THINK_CLOSE.len()..].to_string();
-        }
-    }
+    // ⚠️ 这里**只**处理成对的 `<think>…</think>`。「没有开头标签的思考段」（Qwen3 模板
+    // 把 `<think>` 放在 prompt 里）只在附着路径处理（`host::judge_host_reply`）：
+    // 它是全局共享函数，一句合法地提到 `</think>` 的正文会被腰斩（PR #101 评审反例）。
     while let (Some(start), Some(end)) = (out.find("<think"), out.find("</think>")) {
         if end < start {
             break;
@@ -2830,15 +2824,14 @@ mod tests {
             "今天天气不错。"
         );
         assert_eq!(strip_thinking("<think>half"), "<think>half", "没闭合时不要吞掉正文");
-        // 没有开头标签（Qwen3 模板把 <think> 放在 prompt 里）：结尾标签之前的全是思考
-        assert_eq!(
-            strip_thinking("好的，用户让我讲个笑话。我需要先确认……\n</think>\n\n为什么星星会笑？"),
-            "为什么星星会笑？"
-        );
         // /no_think 下 Qwen3 仍会吐一对空标签
         assert_eq!(strip_thinking("<think>\n\n</think>\n\n今天挺好。"), "今天挺好。");
-        // 结尾标签前已经有开头标签：走原规则，前面的正文保留
         assert_eq!(strip_thinking("你好。<think>想</think>再见。"), "你好。再见。");
+        // PR #101 评审反例：全局函数**不能**把「孤立的 </think>」之前的正文当思考吞掉——
+        // 那条规则只属于附着路径（host::judge_host_reply）。
+        for s in ["这个协议的思考段用 </think> 结尾，是标准写法。", "闭合标签是 </think>，仅此而已。"] {
+            assert_eq!(strip_thinking(s), s, "合法提到 </think> 的正文必须原样保留");
+        }
     }
 
     #[test]

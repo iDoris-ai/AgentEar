@@ -311,6 +311,11 @@ fn host_llm_success_failure_and_cancel() {
     );
 }
 
+/// 附着路径的调用方式（总是带 /no_think）。
+fn judge_host_reply_t(r: &ModelReply, max: u32) -> HostAnswer {
+    judge_host_reply(r, max, true)
+}
+
 fn reply_n(text: &str, completion_tokens: u64) -> ModelReply {
     ModelReply {
         text: text.into(),
@@ -328,26 +333,31 @@ fn judge_host_reply_never_speaks_the_monologue() {
     let max = HOST_MAX_TOKENS;
     // ① 无开头标签的思考 + </think> + 答案 → 只念答案
     assert_eq!(
-        judge_host_reply(&reply_n("好的，用户让我讲个笑话。我先想想……\n</think>\n\n为什么星星会笑？", 80), max),
+        judge_host_reply_t(&reply_n("好的，用户让我讲个笑话。我先想想……\n</think>\n\n为什么星星会笑？", 80), max),
         HostAnswer::Speak("为什么星星会笑？".into())
     );
     // ② 截断的纯思考（用满 max_tokens、没见到 </think>）→ 不念原文
     let monologue = "好的，用户让我讲个笑话。我需要先确认自己是否符合要求。用户之前提到过如果问天气";
-    assert_eq!(judge_host_reply(&reply_n(monologue, u64::from(max)), max), HostAnswer::ReasoningTruncated);
+    assert_eq!(judge_host_reply(&reply_n(monologue, u64::from(max)), max, true), HostAnswer::ReasoningTruncated);
     // ③ /no_think 下的空标签 + 答案
     assert_eq!(
-        judge_host_reply(&reply_n("<think>\n\n</think>\n\n今天挺好。", 12), max),
+        judge_host_reply_t(&reply_n("<think>\n\n</think>\n\n今天挺好。", 12), max),
         HostAnswer::Speak("今天挺好。".into())
     );
     // ④ 正常答案
-    assert_eq!(judge_host_reply(&reply_n("今天挺好。", 6), max), HostAnswer::Speak("今天挺好。".into()));
+    assert_eq!(judge_host_reply_t(&reply_n("今天挺好。", 6), max), HostAnswer::Speak("今天挺好。".into()));
     // 截断但已经想完（有 </think>）：答案可能被截短，但它是正文，照念
     assert_eq!(
-        judge_host_reply(&reply_n("想……</think>答案的前半句", u64::from(max)), max),
+        judge_host_reply_t(&reply_n("想……</think>答案的前半句", u64::from(max)), max),
         HostAnswer::Speak("答案的前半句".into())
     );
     // 没截断、剥完为空
-    assert_eq!(judge_host_reply(&reply_n("<think>只有思考</think>", 20), max), HostAnswer::Empty);
+    assert_eq!(judge_host_reply_t(&reply_n("<think>只有思考</think>", 20), max), HostAnswer::Empty);
+    // 适用边界：「无头思考」规则只在我们加了 /no_think 的附着请求上生效。
+    // 同一句评审反例——没要求关思考时原样念；要求了关思考时，孤立的 </think> 视为思考泄漏。
+    let legit = "闭合标签是 </think>，仅此而已。";
+    assert_eq!(judge_host_reply(&reply_n(legit, 12), max, false), HostAnswer::Speak(legit.into()));
+    assert_eq!(judge_host_reply(&reply_n(legit, 12), max, true), HostAnswer::Speak("，仅此而已。".into()));
 }
 
 #[test]
@@ -362,6 +372,9 @@ fn host_llm_asks_for_no_think_and_speaks_a_hint_when_reasoning_is_cut() {
     let sent = fake.requests.lock().unwrap()[0].clone();
     assert_eq!(sent["messages"][1]["content"], "讲个笑话 /no_think");
     assert_eq!(sent["max_tokens"], HOST_MAX_TOKENS);
+    // 无头思考（Qwen3：输出没有 <think> 开头标签）经真实调用点也只念答案
+    fake.push_reply(Ok(reply_n("好的，用户让我讲个笑话。我先想想……\n</think>\n\n为什么星星会笑？", 40)));
+    assert_eq!(llm.reply("系统", "讲个笑话", TalkLang::Zh).unwrap(), "为什么星星会笑？");
     // 截断在思考里：念提示，不念独白，并报一条 error
     fake.push_reply(Ok(reply_n("好的，用户让我讲个笑话。我需要先确认", u64::from(HOST_MAX_TOKENS))));
     let said = llm.reply("系统", "讲个笑话", TalkLang::Zh).unwrap();
@@ -381,8 +394,11 @@ fn host_llm_asks_for_no_think_and_speaks_a_hint_when_reasoning_is_cut() {
     for l in [TalkLang::Zh, TalkLang::En, TalkLang::Th] {
         assert!(!reasoning_truncated_hint(l).is_empty());
     }
-    // no_think 不重复加
+    // no_think 不重复加；判重与拼接同一套 trim 规则
     assert_eq!(no_think("你好 /no_think"), "你好 /no_think");
+    assert_eq!(no_think("你好 /no_think  \n"), "你好 /no_think");
+    assert_eq!(no_think("你好  "), "你好 /no_think");
+    assert_eq!(no_think(&no_think("你好\t")), "你好 /no_think");
 }
 
 #[test]

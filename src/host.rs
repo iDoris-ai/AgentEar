@@ -624,7 +624,9 @@ impl LlmEngine for HostLlm {
             reply.prompt_tokens,
             reply.completion_tokens
         );
-        match judge_host_reply(&reply, HOST_MAX_TOKENS) {
+        // 我们总是给宿主请求加了 /no_think（见 no_think），所以这里是「附着 + 已知在对付
+        // 会思考的模型」的场景，才允许「无头思考」规则生效。
+        match judge_host_reply(&reply, HOST_MAX_TOKENS, true) {
             HostAnswer::Speak(text) => Ok(text),
             HostAnswer::Empty => Err(HostError::new("internal", "宿主回了一段空回答", true).into()),
             HostAnswer::ReasoningTruncated => {
@@ -661,10 +663,12 @@ pub const NO_THINK_SUFFIX: &str = " /no_think";
 
 /// 给 user 消息加上 [`NO_THINK_SUFFIX`]（已经有了就不重复加）。
 pub fn no_think(user: &str) -> String {
-    if user.trim_end().ends_with(NO_THINK_SUFFIX.trim()) {
-        user.to_string()
+    // 判重与拼接用同一套规则：先去掉尾随空白，已经以开关结尾就不再加。
+    let base = user.trim_end();
+    if base.ends_with(NO_THINK_SUFFIX.trim_start()) {
+        base.to_string()
     } else {
-        format!("{user}{NO_THINK_SUFFIX}")
+        format!("{base}{NO_THINK_SUFFIX}")
     }
 }
 
@@ -690,16 +694,33 @@ pub enum HostAnswer {
 /// 纯函数判据。「被截断」用确定信号判断（`completion_tokens >= max_tokens`），
 /// 不靠关键词猜文字像不像思考：我们要的是一两句话（系统提示限 40 字），
 /// 用满 512 个 token 本身就说明这一轮不正常。
-pub fn judge_host_reply(reply: &ModelReply, max_tokens: u32) -> HostAnswer {
+///
+/// `asked_no_think` = 这一轮请求是我们加了 [`NO_THINK_SUFFIX`] 的宿主推理，也就是
+/// 「已知在对付会思考的模型」。**只有这时**才应用「无头思考」规则：第一个 `</think>`
+/// 之前没有 `<think` → 它之前的全是思考（Qwen3 模板把 `<think>` 放在 prompt 里，
+/// 输出没有开头标签）。这条规则**不进**全局的 `talk::strip_thinking`——那里一句合法
+/// 提到 `</think>` 的正文会被腰斩（PR #101 评审反例），边车/本机路径一个字节都不能变。
+/// 残余风险：附着路径上模型的正文**真的**以「……</think>……」开头时也会被截掉前半句——
+/// 但那一轮我们明确要求了关掉思考，出现孤立结束标签几乎只可能是思考泄漏。
+pub fn judge_host_reply(reply: &ModelReply, max_tokens: u32, asked_no_think: bool) -> HostAnswer {
     let truncated = reply.completion_tokens >= u64::from(max_tokens);
     if truncated && !reply.text.contains(talk::THINK_CLOSE) {
         return HostAnswer::ReasoningTruncated;
     }
-    let text = talk::strip_thinking(&reply.text);
+    let body = if asked_no_think { strip_headless_thinking(&reply.text) } else { reply.text.as_str() };
+    let text = talk::strip_thinking(body);
     if text.trim().is_empty() {
         return HostAnswer::Empty;
     }
     HostAnswer::Speak(text)
+}
+
+/// 附着路径专用：第一个 `</think>` 之前没有 `<think` 时，丢掉它及之前的全部。
+fn strip_headless_thinking(text: &str) -> &str {
+    match text.find(talk::THINK_CLOSE) {
+        Some(end) if !text[..end].contains("<think") => &text[end + talk::THINK_CLOSE.len()..],
+        _ => text,
+    }
 }
 
 /// 被截断在思考里时念的那一句（中/英/泰）。
