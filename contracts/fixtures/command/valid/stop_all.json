@@ -1,0 +1,6 @@
+{
+  "schema": "agentear.command/1",
+  "command_id": "cmd_3",
+  "type": "stop_playback",
+  "payload": {}
+}

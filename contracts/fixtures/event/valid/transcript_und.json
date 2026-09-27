@@ -1,0 +1,12 @@
+{
+  "schema": "agentear.event/1",
+  "event_id": "evt_0004",
+  "session_id": "ses_demo",
+  "seq": 4,
+  "type": "transcript",
+  "payload": {
+    "text": "这个，你给我讲个笑话。",
+    "lang": "und",
+    "final": true
+  }
+}

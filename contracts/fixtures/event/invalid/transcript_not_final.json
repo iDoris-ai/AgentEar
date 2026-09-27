@@ -1,0 +1,12 @@
+{
+  "schema": "agentear.event/1",
+  "event_id": "evt_0002",
+  "session_id": "ses_demo",
+  "seq": 2,
+  "type": "transcript",
+  "payload": {
+    "text": "今天天气怎么样？",
+    "lang": "zh-CN",
+    "final": false
+  }
+}

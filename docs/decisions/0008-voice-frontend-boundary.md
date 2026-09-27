@@ -157,3 +157,34 @@ scripts/agent24-standin.py "今天天气怎么样"              # 不命中 → 
 - `docs/agent/tasks.md` T3.4.12 记着「哪些功能在这条线上停止」
 - 代码：`src/commands.rs`（`needs_confirm` / `confirm_prompt` / `summarize_response`）、
   `src/main.rs` 的 `--match-command --json`、`scripts/agent24-standin.py`
+
+## 8. 后续：§5 的答复与嵌入形态（2026-09-26 / 09-27 追加）
+
+> 本节只追加，**不改 §3 已冻结的契约**。
+
+### 8.1 §5 六个问题的答复（jason 2026-09-26 / 09-27）
+
+| # | 问题 | 答复 |
+|---|---|---|
+| 1 | 事件怎么给宿主 | 用 A3 附着模式下 Agent24 SDK 的 `_a24/events/emit`，schema 为 `agentear.event/1`（`contracts/`） |
+| 2 | 热键归谁 | **AgentEar** |
+| 3 | 麦克风与播放归谁 | **AgentEar**：打断语义不变，宿主经 `speak` / `stop_playback` 命令请求播报或停播 |
+| 4 | 谁配置模型与音色 | **AgentEar 自管**，`~/.agentear/config.json` 仍是唯一真相，Agent24 只读展示 |
+| 5 | TCC | **留在 AgentEar**：拔掉 AgentEar 不影响 Agent24 原有的体验 |
+| 6 | 回执留档 | **归 Agent24** |
+
+jason 的原话：「你是可拔插的……配置也归你自己。基本上你相对独立吧。」
+
+### 8.2 嵌入形态 = A3 附着式模块
+
+AgentEar 由用户安装和启动，持有 TCC 权限和全局热键；可以独立运行，也可以向已经在跑的 Agent24 注册成语音模块。
+之所以不采用由内核拉起的方式（A1）：macOS 按「负责进程」归属 TCC 权限，A1 下麦克风和辅助功能权限很可能会算到 agent24d 头上，
+和第 5 条冲突。
+
+- 约定与分阶段：[`docs/agent24-embedding.md`](../agent24-embedding.md)
+- 契约与 fixtures：[`contracts/`](../../contracts/)（AgentEar 维护 event / proposal / command，Agent24 维护 callback / SDK）
+- Agent24 侧：`docs/design/INTEGRATION-AGENTEAR-IDORIS.md`、`docs/decision.md` ADR-032
+
+§3 的两条硬约束**在附着模式下照样成立**：proposal 只提出、不执行；显示的内容和执行的内容必须同源。
+附着模式下，§1 表里的「确认 UI」彻底交给宿主，AgentEar 关掉本地的语音二次确认，
+把用户的答复作为 `confirm_reply` 事件交出去（与 agent24-13 约定，2026-09-27）。

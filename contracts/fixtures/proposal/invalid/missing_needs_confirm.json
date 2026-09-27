@@ -1,0 +1,14 @@
+{
+  "schema": "agentear.proposal/1",
+  "text": "发邮件给 a@b.com 讨论 AEC",
+  "normalized": "发邮件给abcom讨论aec",
+  "matched": "发邮件给",
+  "rest": "a@b.com 讨论 AEC",
+  "action": {
+    "type": "open_url",
+    "url": "mailto:{rest}"
+  },
+  "prompt": "要打开邮件草稿：a@b.com 讨论 AEC。确认就按一下键，或者说「确认」。",
+  "command_count": 12,
+  "commands_path": "/Users/example/.agentear/commands.json"
+}

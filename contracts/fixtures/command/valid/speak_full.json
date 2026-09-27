@@ -1,0 +1,11 @@
+{
+  "schema": "agentear.command/1",
+  "command_id": "cmd_2",
+  "type": "speak",
+  "payload": {
+    "text": "好嘞",
+    "lang": "zh-CN",
+    "voice": "女声",
+    "style": "sichuan"
+  }
+}

@@ -1,0 +1,12 @@
+{
+  "schema": "agentear.event/1",
+  "event_id": "evt_0019",
+  "session_id": "ses_demo",
+  "seq": 19,
+  "type": "error",
+  "payload": {
+    "code": "asr_failed",
+    "message": "SenseVoice 子进程退出码 1",
+    "retryable": false
+  }
+}

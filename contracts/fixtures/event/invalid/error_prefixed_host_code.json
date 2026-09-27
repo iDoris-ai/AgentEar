@@ -1,0 +1,11 @@
+{
+  "schema": "agentear.event/1",
+  "event_id": "evt_0022",
+  "session_id": "ses_demo",
+  "seq": 22,
+  "type": "error",
+  "payload": {
+    "code": "a24_busy",
+    "message": "x"
+  }
+}

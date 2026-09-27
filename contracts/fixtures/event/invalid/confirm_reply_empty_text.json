@@ -1,0 +1,12 @@
+{
+  "schema": "agentear.event/1",
+  "event_id": "evt_0015",
+  "session_id": "ses_demo",
+  "seq": 15,
+  "type": "confirm_reply",
+  "payload": {
+    "proposal_event_id": "evt_0005",
+    "reply": "confirm",
+    "text": ""
+  }
+}

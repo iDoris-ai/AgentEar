@@ -1,0 +1,12 @@
+{
+  "schema": "agentear.proposal/1",
+  "text": "今天天气怎么样",
+  "normalized": "今天天气怎么样",
+  "matched": null,
+  "rest": null,
+  "action": null,
+  "needs_confirm": false,
+  "prompt": null,
+  "command_count": 12,
+  "commands_path": "/Users/example/.agentear/commands.json"
+}
