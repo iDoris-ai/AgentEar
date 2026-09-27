@@ -1,0 +1,40 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/iDoris-ai/AgentEar/contracts/schema/agentear.command.v1.schema.json",
+  "title": "agentear.command/1",
+  "description": "宿主（Agent24）→ AgentEar 的反向命令（docs/agent24-embedding.md §3）。**幂等**：同一个 command_id 重复送达只执行一次，重复请求返回首次的结果。stop_playback 在没有活动播放时也成功返回。执行结果经 speech/error 事件回报（带同一个 command_id）。具体传输/入口/认证由 Agent24 A3 附着协议冻结。",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "command_id", "type", "payload"],
+  "properties": {
+    "schema": { "const": "agentear.command/1" },
+    "command_id": { "type": "string", "minLength": 1, "maxLength": 128 },
+    "type": { "enum": ["speak", "stop_playback"] },
+    "payload": { "type": "object" }
+  },
+  "allOf": [
+    { "if": { "properties": { "type": { "const": "speak" } } }, "then": { "properties": { "payload": { "$ref": "#/$defs/speak" } } } },
+    { "if": { "properties": { "type": { "const": "stop_playback" } } }, "then": { "properties": { "payload": { "$ref": "#/$defs/stop_playback" } } } }
+  ],
+  "$defs": {
+    "speak": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["text", "lang"],
+      "description": "已与 agent24-13 约定（2026-09-27，B7）：若本轮回答正在播放，speak 排在其后播放；stop_playback 与用户按键打断都会清空排队。",
+      "properties": {
+        "text": { "type": "string", "minLength": 1, "maxLength": 2000 },
+        "lang": { "enum": ["zh-CN", "en-US", "th-TH"], "description": "TTS 支持的三种语系（BCP-47）。方言/口音走 style。" },
+        "voice": { "type": "string", "minLength": 1, "description": "音色名（AgentEar 音色库里的文件名）；不存在时 AgentEar 回退默认音色。" },
+        "style": { "type": "string", "minLength": 1, "description": "语系/方言键，同 AgentEar 的 tts_style（如 zh / yue / sichuan / en-gb）。" }
+      }
+    },
+    "stop_playback": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "session_id": { "type": "string", "minLength": 1, "maxLength": 128, "description": "给了就只停这个会话的播放；缺省 = 停所有。" }
+      }
+    }
+  }
+}

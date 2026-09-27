@@ -1,0 +1,9 @@
+{
+  "schema": "agentear.command/2",
+  "command_id": "cmd_1",
+  "type": "speak",
+  "payload": {
+    "text": "已经帮你记下了。",
+    "lang": "zh-CN"
+  }
+}

@@ -260,6 +260,18 @@ Silero VAD、Smart Turn、LocalVQE（AEC **候选，未验收**）、FunctionGem
 
 ---
 
+## M6 · 嵌入 Agent24（A3 附着模块）
+
+**2026-09-27 起。** AgentEar 负责听和说，也就是热键、麦克风、ASR、TTS、播放和配置，并且是可插拔的。
+Agent24 负责审批、执行、回执和记忆。模型准入归 iDoris，经 Agent24 调用。两个仓库只通过进程间协议配合，
+不互相导入源码。
+
+- 约定：[`agent24-embedding.md`](agent24-embedding.md)；契约与 fixtures：[`../contracts/`](../contracts/)。
+- 分阶段：P0 契约冻结 → P1 并行骨架 → P2 单轮端到端 → P3 提案闭环 → P4 流式。任务见 `docs/agent/tasks.md` 的 F6.1。
+- **阻塞项**：Agent24 的 A3 附着协议（注册、token、握手、generation、重连、反向命令入口）冻结之前，P2 不能开工。
+
+---
+
 ## 依赖关系
 
 ```

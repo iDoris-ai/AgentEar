@@ -1,0 +1,16 @@
+{
+  "schema": "agentear.proposal/1",
+  "text": "记到notion 明天要测 AEC",
+  "normalized": "记到notion明天要测aec",
+  "matched": "记到notion",
+  "rest": "明天要测 AEC",
+  "action": {
+    "type": "http_post",
+    "url": "https://example.com/hook",
+    "body": "{\"text\":\"{rest}\"}"
+  },
+  "needs_confirm": true,
+  "prompt": "要发送到 https://example.com/hook：明天要测 AEC。确认就按一下键，或者说「确认」。",
+  "command_count": 13,
+  "commands_path": "/Users/example/.agentear/commands.json"
+}

@@ -1,0 +1,6 @@
+{
+  "schema": "agentear.command/1",
+  "command_id": "cmd_7",
+  "type": "record",
+  "payload": {}
+}

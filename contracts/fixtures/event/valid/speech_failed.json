@@ -1,0 +1,11 @@
+{
+  "schema": "agentear.event/1",
+  "event_id": "evt_0008",
+  "session_id": "ses_demo",
+  "seq": 8,
+  "type": "speech",
+  "payload": {
+    "state": "failed",
+    "reason": "tts_unavailable"
+  }
+}

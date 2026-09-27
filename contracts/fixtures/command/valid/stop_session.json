@@ -1,0 +1,8 @@
+{
+  "schema": "agentear.command/1",
+  "command_id": "cmd_4",
+  "type": "stop_playback",
+  "payload": {
+    "session_id": "ses_demo"
+  }
+}

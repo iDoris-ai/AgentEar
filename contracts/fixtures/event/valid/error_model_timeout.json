@@ -1,0 +1,12 @@
+{
+  "schema": "agentear.event/1",
+  "event_id": "evt_0009",
+  "session_id": "ses_demo",
+  "seq": 9,
+  "type": "error",
+  "payload": {
+    "code": "model_timeout",
+    "message": "_a24/model/complete 120s 超时",
+    "retriable": true
+  }
+}

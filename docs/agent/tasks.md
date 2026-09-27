@@ -1021,7 +1021,7 @@
   逐次 1.8–2.5 s；内存 0.6B ≈ 816 MiB、1.7B ≈ 2.49 GiB。从零下载运行时 + 0.6B 共 137 s（本机网络）。
 - **没测**：设置窗口 / 菜单栏的真实点击；守护进程里的真按键链路；常驻形态的准确率（60×3 组没重跑）。
 
-### T3.5.8 PR #93 评审遗留  `PR_OPEN`（v0.23.1，2026-09-27）
+### T3.5.8 PR #93 评审遗留  `DONE`（PR #94 已合并，v0.23.1 已发布，2026-09-27）
 - **来源**：PR #93 的 clestons 评审（APPROVE，附 N1 / S1 / Nit）。
 - **N1**：`speech-server.pid` 被守护进程与命令行子命令共用 → 常驻开着时跑 `--transcribe` 等会杀掉守护进程的常驻服务、并改写/删除 pid 文件。
   修法：每个拥有者一份 `speech-server-<拥有者 pid>.pid`（内容 `<拥有者> <服务>`）；
@@ -1134,3 +1134,46 @@
   它是编辑器不是服务，对当前定位没有增量能力，**现阶段不做**。
 - 真要做的时候规则是：可以在文档里推荐，**不 fork、不 vendor、不进 bundle**
   （GPL-3.0 vs 我们的 Apache-2.0，单向不兼容）。
+
+---
+
+## F6.1 — 嵌入 Agent24（A3 附着模块）
+
+> 依据：[`docs/agent24-embedding.md`](../agent24-embedding.md)（jason 给的约定）＋ Agent24 `docs/design/INTEGRATION-AGENTEAR-IDORIS.md`（ADR-032）。
+> 背景：独立开发阶段到 v0.23.1 为止；jason 于 2026-09-27 宣布进入嵌入阶段。
+> **边界**：热键、麦克风、TCC、ASR、TTS、播放和配置都归 AgentEar，AgentEar 是可插拔的；
+> 审批、执行、回执留档、长期记忆归 Agent24；模型准入归 iDoris（经 Agent24）。
+> 本表只列 AgentEar 这一侧的责任，Agent24 侧的见 embedding.md §5。
+
+### T6.1.0 P0 契约冻结（AgentEar 侧）  `PR_OPEN`（2026-09-27）
+- **交付**：`contracts/` 目录。包括三份 schema（`agentear.proposal/1` 已冻结，`agentear.event/1`、`agentear.command/1`
+  是新增的）、52 个 fixtures（合法 / 非法 / 事件序列），以及两道测试守卫：
+  `tests/contracts.rs` 做 fixture 自检；`src/main.rs::contract_tests` 用真实代码路径检查 proposal 不漂移。
+  另外把 `docs/agent24-embedding.md` 收进仓库，ADR-0008 追加 §8。
+- **与 agent24-13 的约定**：B4、B6–B9、D 已同意（2026-09-27，见 `contracts/README.md`）。
+  **B5（断连后的默认行为）要等 jason 确认。**
+- **验收**：`cargo test --test contracts` 与 `cargo test contract_tests` 全部通过。
+  做过变异验证：把 schema 放宽 3 处、把代码改坏 2 处，每一处都会让测试变红。
+- **P0 的完成判据只算完成了一半**：embedding.md §5 要求「两边各有同一组 schema fixtures」，
+  Agent24 那一侧要按 commit hash 引用本目录，而且 A3 协议要冻结，这两件都还没做。
+
+### T6.1.1 P1 并行骨架  `READY`
+- **目标**：把 LLM transport 抽成可替换的一层，按配置分三档：自带边车 / 独立模式直连 iDoris / 附着模式走 `_a24/model/complete`，
+  满足 ADR-032 的 D3。再做 Agent24 SDK adapter 的骨架（按 A3 wire 规格自己实现，**不依赖** Agent24 的 crate，即 B4），
+  并用 fake host 做契约测试：注册、transcript/proposal 事件、模型成功/失败/取消、speak/stop、断连与重连。
+- **约束**：不开麦克风、**不启动守护进程**（它会截走 jason 的按键）；A3 规格冻结之前只用暂定的 transport。
+- **顺带修一个已知问题**：`--match-command --json` 是冻结的契约入口，但它排在 ASR 依赖检查之后。
+  于是在没有 vendor 的机器上它会直接失败（2026-09-27 实测：`缺少 ASR 依赖文件`）。宿主调用这个入口不该依赖 ASR 是否就绪。
+
+### T6.1.2 P2 单轮端到端  `BLOCKED`（等 Agent24 冻结 A3 附着协议；那边的设计要 jason 排期，**还没开始**）
+- 模块模式下推送最终 transcript（只推对话模式的，B6）；接收 speak/stop，speak 排在当前回答之后（B7）；
+  独立模式保持原样；断连行为按 B5 执行，等 jason 确认。
+- **验收**（embedding.md §5）：真机说一句 → Agent24 收到转写 → 本地模型回复 → AgentEar 播放；全程没有远端流量。
+
+### T6.1.3 P3 提案闭环  `BLOCKED`（等 T6.1.2）
+- 发 proposal，自己不执行；附着模式下关掉本地的语音确认，改发 `confirm_reply`（B8）。
+- **验收**：拒绝时零执行；确认的内容与执行载荷同源；超出支持范围的 action type 会被安全拒绝。
+
+### T6.1.4 P4 流式优化  `BLOCKED`（等 Agent24 的流式 model callback）
+- 支持取消、分句播报和背压，不改 P0 的语义。**验收**：首字起播中位数 ≤3.0 秒，n≥10，只报中位数和极值。
+

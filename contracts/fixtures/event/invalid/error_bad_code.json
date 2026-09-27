@@ -1,0 +1,11 @@
+{
+  "schema": "agentear.event/1",
+  "event_id": "evt_0009",
+  "session_id": "ses_demo",
+  "seq": 9,
+  "type": "error",
+  "payload": {
+    "code": "Model Timeout",
+    "message": "x"
+  }
+}

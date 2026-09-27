@@ -1,0 +1,9 @@
+{
+  "schema": "agentear.command/1",
+  "command_id": "cmd_5",
+  "type": "speak",
+  "payload": {
+    "text": "",
+    "lang": "zh-CN"
+  }
+}

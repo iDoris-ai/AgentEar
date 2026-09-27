@@ -1,0 +1,11 @@
+{
+  "schema": "agentear.event/1",
+  "event_id": "evt_0001",
+  "session_id": "ses_demo",
+  "seq": 1,
+  "type": "turn",
+  "payload": {
+    "phase": "listening",
+    "turn": 1
+  }
+}

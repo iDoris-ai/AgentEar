@@ -1,0 +1,13 @@
+{
+  "schema": "agentear.event/1",
+  "event_id": "evt_0003",
+  "session_id": "ses_demo",
+  "seq": 3,
+  "type": "transcript",
+  "payload": {
+    "text": "hello there",
+    "lang": "en-US",
+    "final": true,
+    "content_hash": "0000000000000000000000000000000000000000000000000000000000000000"
+  }
+}

@@ -1,0 +1,37 @@
+{
+  "description": "同一 (session_id, seq) 出现两个不同 event_id = 协议违规：宿主拒绝后到的那个并记录错误。",
+  "events": [
+    {
+      "schema": "agentear.event/1",
+      "event_id": "evt_a",
+      "session_id": "ses_demo",
+      "seq": 2,
+      "type": "transcript",
+      "payload": {
+        "text": "你好",
+        "lang": "zh-CN",
+        "final": true
+      }
+    },
+    {
+      "schema": "agentear.event/1",
+      "event_id": "evt_b",
+      "session_id": "ses_demo",
+      "seq": 2,
+      "type": "transcript",
+      "payload": {
+        "text": "再见",
+        "lang": "zh-CN",
+        "final": true
+      }
+    }
+  ],
+  "expect": {
+    "accepted_event_ids": [
+      "evt_a"
+    ],
+    "rejected_event_ids": [
+      "evt_b"
+    ]
+  }
+}

@@ -1,0 +1,16 @@
+{
+  "schema": "agentear.proposal/1",
+  "text": "说粤语",
+  "normalized": "说粤语",
+  "matched": "说粤语",
+  "rest": "",
+  "action": {
+    "type": "builtin",
+    "name": "style",
+    "value": "yue"
+  },
+  "needs_confirm": false,
+  "prompt": "要执行 style",
+  "command_count": 12,
+  "commands_path": "/Users/example/.agentear/commands.json"
+}

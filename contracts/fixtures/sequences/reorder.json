@@ -1,0 +1,44 @@
+{
+  "description": "乱序到达：宿主按 (session_id, seq) 排序后交付。",
+  "events": [
+    {
+      "schema": "agentear.event/1",
+      "event_id": "evt_0001",
+      "session_id": "ses_demo",
+      "seq": 1,
+      "type": "turn",
+      "payload": {
+        "phase": "listening"
+      }
+    },
+    {
+      "schema": "agentear.event/1",
+      "event_id": "evt_0003",
+      "session_id": "ses_demo",
+      "seq": 3,
+      "type": "turn",
+      "payload": {
+        "phase": "thinking"
+      }
+    },
+    {
+      "schema": "agentear.event/1",
+      "event_id": "evt_0002",
+      "session_id": "ses_demo",
+      "seq": 2,
+      "type": "transcript",
+      "payload": {
+        "text": "你好",
+        "lang": "zh-CN",
+        "final": true
+      }
+    }
+  ],
+  "expect": {
+    "delivered_seq": [
+      1,
+      2,
+      3
+    ]
+  }
+}

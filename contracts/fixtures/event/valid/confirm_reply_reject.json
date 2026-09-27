@@ -1,0 +1,12 @@
+{
+  "schema": "agentear.event/1",
+  "event_id": "evt_0012",
+  "session_id": "ses_demo",
+  "seq": 12,
+  "type": "confirm_reply",
+  "payload": {
+    "proposal_event_id": "evt_0005",
+    "reply": "reject",
+    "text": "不要发"
+  }
+}

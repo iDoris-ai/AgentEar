@@ -1,0 +1,74 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/iDoris-ai/AgentEar/contracts/schema/agentear.proposal.v1.schema.json",
+  "title": "agentear.proposal/1",
+  "description": "AgentEar 提出（绝不执行）的一个动作。已冻结（ADR-0008 §3）。字段与 `agentear --match-command <文本> --json` 的实际输出逐字段一致——src/main.rs 的 proposal_json() 有测试钉住两者不漂移。硬约束：① prompt 与将要执行的内容同源（显示与执行都用同一个对象的 rest/text）；② 这个对象只供宿主显示/审批/执行，AgentEar 不执行它。",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "text", "normalized", "matched", "rest", "action", "needs_confirm", "prompt", "command_count", "commands_path"],
+  "properties": {
+    "schema": { "const": "agentear.proposal/1" },
+    "text": { "type": "string", "description": "原句（转写结果）。" },
+    "normalized": { "type": "string", "description": "去标点/空白、归一大小写后的句子，只用于判断命中。" },
+    "matched": { "type": ["string", "null"], "description": "命中的短语；null = 没命中，宿主应走对话那条路。" },
+    "rest": { "type": ["string", "null"], "description": "槽位，取自**原文**（保留大小写与点号）。" },
+    "action": {
+      "description": "三种动作的封闭集合；null = 没命中。URL/body 模板里的 {rest}/{text} 由宿主填：填进 URL 要百分号转义，填进 JSON body 不转义。",
+      "oneOf": [
+        { "type": "null" },
+        { "$ref": "#/$defs/builtin" },
+        { "$ref": "#/$defs/open_url" },
+        { "$ref": "#/$defs/http_post" }
+      ]
+    },
+    "needs_confirm": { "type": "boolean", "description": "会不会把内容送出这台机器。为真时宿主必须先确认再执行。" },
+    "prompt": { "type": ["string", "null"], "description": "给人看/念的确认问句；**只有 needs_confirm 为真时才非 null**。" },
+    "command_count": { "type": "integer", "minimum": 0 },
+    "commands_path": { "type": "string", "description": "指令表文件路径（排错用）。" }
+  },
+  "allOf": [
+    {
+      "description": "没命中 ⇔ matched/rest/action 同时为 null，且不需要确认。",
+      "if": { "properties": { "matched": { "type": "null" } }, "required": ["matched"] },
+      "then": { "properties": { "rest": { "type": "null" }, "action": { "type": "null" }, "needs_confirm": { "const": false } } },
+      "else": { "properties": { "rest": { "type": "string" }, "action": { "type": "object" } } }
+    },
+    {
+      "description": "prompt 非 null ⇔ needs_confirm 为真。",
+      "if": { "properties": { "needs_confirm": { "const": true } }, "required": ["needs_confirm"] },
+      "then": { "properties": { "prompt": { "type": "string" } } },
+      "else": { "properties": { "prompt": { "type": "null" } } }
+    }
+  ],
+  "$defs": {
+    "builtin": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "name"],
+      "properties": {
+        "type": { "const": "builtin" },
+        "name": { "enum": ["style", "tone", "mode", "note"], "description": "本机可逆动作（src/commands.rs BuiltinAction 白名单）。" },
+        "value": { "type": "string" }
+      }
+    },
+    "open_url": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "url"],
+      "properties": {
+        "type": { "const": "open_url" },
+        "url": { "type": "string", "pattern": "^\\s*([Hh][Tt][Tt][Pp][Ss]?|[Mm][Aa][Ii][Ll][Tt][Oo]):", "description": "只允许 http / https / mailto。判据与 src/commands.rs::check_scheme 一致：先去首尾空白、scheme 不区分大小写。⚠️ 宿主执行前仍须自己校验 scheme（执行方不能只信提出方）。" }
+      }
+    },
+    "http_post": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "url", "body"],
+      "properties": {
+        "type": { "const": "http_post" },
+        "url": { "type": "string", "pattern": "^\\s*[Hh][Tt][Tt][Pp][Ss]?:", "description": "只允许 http / https（与 check_scheme 一致，不区分大小写）。" },
+        "body": { "type": "string", "description": "JSON 字符串模板。" }
+      }
+    }
+  }
+}

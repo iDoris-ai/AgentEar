@@ -1,0 +1,11 @@
+{
+  "schema": "agentear.event/1",
+  "event_id": "evt_0006",
+  "session_id": "ses_demo",
+  "seq": 6,
+  "type": "speech",
+  "payload": {
+    "state": "started",
+    "command_id": "cmd_1"
+  }
+}

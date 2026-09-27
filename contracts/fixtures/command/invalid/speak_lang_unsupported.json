@@ -1,0 +1,9 @@
+{
+  "schema": "agentear.command/1",
+  "command_id": "cmd_6",
+  "type": "speak",
+  "payload": {
+    "text": "hi",
+    "lang": "ja-JP"
+  }
+}

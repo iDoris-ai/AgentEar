@@ -832,35 +832,7 @@ fn main() -> Result<()> {
         // 全在宿主那一侧（jason 2026-09-15 拍板）——AgentEar 是推键式一问一答，
         // 没有界面，也**已经停止**在这条线上继续开发。
         if args.iter().any(|a| a == "--json") {
-            let hit = commands::match_text(&all, &text);
-            let opt_in = hit
-                .as_ref()
-                .and_then(|h| all.iter().find(|c| c.phrase == h.phrase))
-                .map(|c| c.confirm)
-                .unwrap_or(false);
-            let needs_confirm = hit
-                .as_ref()
-                .map(|h| commands::needs_confirm(&h.action, opt_in))
-                .unwrap_or(false);
-            let payload = serde_json::json!({
-                "schema": "agentear.proposal/1",
-                "text": text,
-                "normalized": commands::normalize(&text),
-                "matched": hit.as_ref().map(|h| h.phrase.clone()),
-                "rest": hit.as_ref().map(|h| h.rest.clone()),
-                "action": hit.as_ref().map(|h| &h.action),
-                "needs_confirm": needs_confirm,
-                // ⚠️ **只有真要确认时才有 prompt**：宿主不该拿到一句
-                // 「要执行 style」这种内部动作名去显示（那是写给人看的问句，
-                // 不是通用的动作描述）。契约收紧成「有确认才有问句」。
-                "prompt": if needs_confirm {
-                    hit.as_ref().map(|h| commands::confirm_prompt(&h.action, &h.rest, &text))
-                } else {
-                    None
-                },
-                "command_count": all.len(),
-                "commands_path": commands::path_in(&dir).display().to_string(),
-            });
+            let payload = proposal_json(&all, &text, &dir);
             println!("{}", serde_json::to_string_pretty(&payload)?);
             return Ok(());
         }
@@ -2491,6 +2463,44 @@ fn vendor_root() -> Result<PathBuf> {
 ///
 /// 修法：名字里再加一个**进程内单调递增的计数器**，它不依赖时钟分辨率。
 /// 时钟那一项保留，是为了不同进程（并行跑多份 `cargo test`）之间仍然不同。
+/// `agentear --match-command <文本> --json` 的输出：一个 `agentear.proposal/1` 对象。
+///
+/// ⚠️ **这是冻结契约**（ADR-0008 §3；schema 在 `contracts/schema/agentear.proposal.v1.schema.json`）。
+/// 抽成函数是为了让测试走**同一条代码路径**校验 schema（`contract_tests`），
+/// 不必跑二进制——二进制入口在没有 ASR vendor 的机器（CI）上跑不到这里。
+/// **绝不执行**任何东西，只把「命中了什么、要不要确认、对象是谁」结构化交出去。
+fn proposal_json(all: &[commands::Command], text: &str, dir: &std::path::Path) -> serde_json::Value {
+    let hit = commands::match_text(all, text);
+    let opt_in = hit
+        .as_ref()
+        .and_then(|h| all.iter().find(|c| c.phrase == h.phrase))
+        .map(|c| c.confirm)
+        .unwrap_or(false);
+    let needs_confirm = hit
+        .as_ref()
+        .map(|h| commands::needs_confirm(&h.action, opt_in))
+        .unwrap_or(false);
+    serde_json::json!({
+        "schema": "agentear.proposal/1",
+        "text": text,
+        "normalized": commands::normalize(text),
+        "matched": hit.as_ref().map(|h| h.phrase.clone()),
+        "rest": hit.as_ref().map(|h| h.rest.clone()),
+        "action": hit.as_ref().map(|h| &h.action),
+        "needs_confirm": needs_confirm,
+        // ⚠️ **只有真要确认时才有 prompt**：宿主不该拿到一句
+        // 「要执行 style」这种内部动作名去显示（那是写给人看的问句，
+        // 不是通用的动作描述）。契约收紧成「有确认才有问句」。
+        "prompt": if needs_confirm {
+            hit.as_ref().map(|h| commands::confirm_prompt(&h.action, &h.rest, text))
+        } else {
+            None
+        },
+        "command_count": all.len(),
+        "commands_path": commands::path_in(dir).display().to_string(),
+    })
+}
+
 #[cfg(test)]
 pub mod testutil {
     use std::path::PathBuf;
@@ -2552,5 +2562,68 @@ mod cli_tests {
         let a = args(&["agentear", "--transcribe"]);
         assert_eq!(flag_value(&a, "--transcribe"), None);
         assert_eq!(flag_value(&a, "--nonexistent"), None);
+    }
+}
+
+/// `agentear.proposal/1` 的实现与 `contracts/schema` 不许漂移。
+///
+/// 走的是 `--match-command --json` **同一个函数**（`proposal_json`），
+/// 覆盖四种形态：没命中、本机内置动作、mailto（要确认）、http_post（要确认）。
+#[cfg(test)]
+mod contract_tests {
+    use super::*;
+
+    const BASE: &str = "https://github.com/iDoris-ai/AgentEar/contracts/schema/";
+
+    fn validator() -> (boon::Schemas, boon::SchemaIndex) {
+        let mut schemas = boon::Schemas::new();
+        let mut c = boon::Compiler::new();
+        let v: serde_json::Value = serde_json::from_str(include_str!(
+            "../contracts/schema/agentear.proposal.v1.schema.json"
+        ))
+        .unwrap();
+        let url = format!("{BASE}agentear.proposal.v1.schema.json");
+        c.add_resource(&url, v).unwrap();
+        let idx = c.compile(&url, &mut schemas).unwrap();
+        (schemas, idx)
+    }
+
+    #[test]
+    fn real_proposals_match_the_frozen_schema() {
+        let (schemas, idx) = validator();
+        let mut all = commands::default_commands();
+        all.push(commands::Command {
+            phrase: "记到notion".into(),
+            action: commands::Action::HttpPost {
+                url: "https://example.com/hook".into(),
+                body: r#"{"text":"{rest}"}"#.into(),
+            },
+            ..all[0].clone()
+        });
+        // check_scheme 先 trim、不分大小写——schema 必须跟它一样宽，否则用户这么写的指令
+        // 会产出一个「实现认为合法、契约认为非法」的 proposal（自审时抓到的漂移）。
+        all.push(commands::Command {
+            phrase: "打开大写".into(),
+            action: commands::Action::OpenUrl { url: " HTTPS://Example.com/?q={rest}".into() },
+            ..all[0].clone()
+        });
+        let dir = std::path::Path::new("/tmp/agentear-contract-test");
+        let cases = [
+            ("今天天气怎么样", None, false),
+            ("说粤语", Some("builtin"), false),
+            ("发邮件给 a@b.com 讨论 AEC", Some("open_url"), true),
+            ("记到notion 明天要测 AEC", Some("http_post"), true),
+            ("搜索 Talk.rs", Some("open_url"), false),
+            ("打开大写 rust", Some("open_url"), false),
+        ];
+        for (text, kind, confirm) in cases {
+            let v = proposal_json(&all, text, dir);
+            if let Err(e) = schemas.validate(&v, idx) {
+                panic!("「{text}」的真实输出不符合 schema：{e:#}\n{v:#}");
+            }
+            // 防止「schema 放得太宽所以什么都过」：逐条核对确实走到了预期分支。
+            assert_eq!(v["action"]["type"].as_str(), kind, "「{text}」命中分支不对：{v:#}");
+            assert_eq!(v["needs_confirm"], confirm, "「{text}」needs_confirm 不对：{v:#}");
+        }
     }
 }

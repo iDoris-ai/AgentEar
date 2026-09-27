@@ -1,0 +1,56 @@
+{
+  "description": "同一事件重试复用 event_id 与 seq：宿主只接受一次。",
+  "events": [
+    {
+      "schema": "agentear.event/1",
+      "event_id": "evt_0001",
+      "session_id": "ses_demo",
+      "seq": 1,
+      "type": "turn",
+      "payload": {
+        "phase": "listening"
+      }
+    },
+    {
+      "schema": "agentear.event/1",
+      "event_id": "evt_0002",
+      "session_id": "ses_demo",
+      "seq": 2,
+      "type": "transcript",
+      "payload": {
+        "text": "你好",
+        "lang": "zh-CN",
+        "final": true
+      }
+    },
+    {
+      "schema": "agentear.event/1",
+      "event_id": "evt_0002",
+      "session_id": "ses_demo",
+      "seq": 2,
+      "type": "transcript",
+      "payload": {
+        "text": "你好",
+        "lang": "zh-CN",
+        "final": true
+      }
+    },
+    {
+      "schema": "agentear.event/1",
+      "event_id": "evt_0003",
+      "session_id": "ses_demo",
+      "seq": 3,
+      "type": "turn",
+      "payload": {
+        "phase": "thinking"
+      }
+    }
+  ],
+  "expect": {
+    "accepted_event_ids": [
+      "evt_0001",
+      "evt_0002",
+      "evt_0003"
+    ]
+  }
+}
