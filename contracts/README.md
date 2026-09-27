@@ -42,7 +42,7 @@ Schema 用 JSON Schema draft 2020-12。`event` 的 `proposal` payload 用相对 
 
 - `schema` 字段里的 `/1` 是**不兼容版本号**。删字段、改语义、收紧取值范围，都要升到 `/2`，
   并与 Agent24 同步发布。收到未知版本一律拒绝（`fixtures/*/invalid/unknown_version.json`）。
-- `/1` 之内**只允许增加可选字段**。schema 用 `additionalProperties: false`，这是**生产方**的约束：
+- `/1` 之内**只允许增加可选字段**（先例：v0.26.0 给 `turn` 加了可选的 `timings` 分段耗时对象，只在 `phase` 为 `idle` / `failed` 的收尾事件上出现，只有数字与枚举）。schema 用 `additionalProperties: false`，这是**生产方**的约束：
   AgentEar 发出的内容必须严格符合它。**消费方**应当忽略自己不认识的字段，这样增字段不会把对方弄坏。
 - 事件去重与顺序：同一事件重试时**复用** `event_id` 和 `seq`；`seq` 在同一个 `session_id` 内从 1 开始单调递增。
   宿主按 `(session_id, seq)` 去重并保持顺序。同一个 `(session_id, seq)` 出现两个不同的 `event_id` 属于协议违规

@@ -7,7 +7,7 @@
 //! ⚠️ **token 只在两处出现**：CLI 的 stdout（我们读完就写文件）与那个 0600 文件本身。
 //! 不进 config.json、不进日志、不进错误信息（错误里只放 `token_id`）、不进 argv、不进事件。
 //!
-//! ## 为什么不再用 macOS Keychain（v0.25.3，jason 2026-09-27 拍板）
+//! ## 为什么不再用 macOS Keychain（v0.26.1，jason 2026-09-27 拍板）
 //!
 //! v0.25.0–v0.25.2 存 Keychain。但我们用的是**自签证书**（没有 Apple Team ID），macOS 的
 //! 钥匙串「分区列表」对这种 app 按 **cdhash** 认人（实测该项 partition 里是 `cdhash:4935334a…`）；
@@ -523,7 +523,7 @@ pub fn execute_plan(
         }
         StartupPlan::Reissue => {
             log::info!(
-                "Agent24 token 改存本地文件（v0.25.3）：不读旧钥匙串项（读会弹密码框），\
+                "Agent24 token 改存本地文件（v0.26.1）：不读旧钥匙串项（读会弹密码框），\
                  代跑 `agent24 os attach add` 重新签发一次"
             );
             match reissue() {

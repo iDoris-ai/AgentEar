@@ -180,6 +180,87 @@
           "type": "integer",
           "minimum": 1,
           "description": "第几轮（同 session 内）。"
+        },
+        "timings": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "这一轮的分段耗时（v0.26.0 起，可选；只出现在 phase=idle / failed 那条）。**只有数字与枚举，不含任何内容**。所有 *_ms 是毫秒整数；缺了的段省略而不是填 0。t0 = 松开录音键（命令行 --talk-turn 为开始转写）。",
+          "properties": {
+            "record_ms": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "录音时长（按下→松开）"
+            },
+            "asr_ms": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "松键→转写完成（含 raw 落盘）"
+            },
+            "llm_first_ms": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "转写完成→模型第一个字（仅流式）"
+            },
+            "llm_ms": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "转写完成→模型全文返回"
+            },
+            "tts_first_ms": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "第一段 TTS 合成耗时"
+            },
+            "to_first_audio_ms": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "松键→第一声（端到端『说完到听到』）"
+            },
+            "play_ms": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "第一声→播完（被打断时为实际播出长度）"
+            },
+            "total_ms": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "松键→这一轮结束"
+            },
+            "llm_via": {
+              "type": "string",
+              "pattern": "^[a-z0-9_]{1,32}$",
+              "description": "推理路径：sidecar / idoris / agent24（或引擎名，如 mock）"
+            },
+            "model": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128,
+              "description": "实际回答的模型 id（拿不到就省略）"
+            },
+            "tier": {
+              "enum": [
+                "local",
+                "remote"
+              ]
+            },
+            "asr_backend": {
+              "type": "string",
+              "pattern": "^[a-z0-9_]{1,32}$",
+              "description": "builtin / speech_swift"
+            },
+            "prompt_tokens": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "completion_tokens": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "interrupted": {
+              "type": "boolean",
+              "description": "这一轮播放被按键打断过（未打断时省略）"
+            }
+          }
         }
       }
     },

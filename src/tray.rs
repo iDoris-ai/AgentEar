@@ -364,6 +364,11 @@ fn populate(menu: &NSMenu, mtm: MainThreadMarker, target: &MenuTarget) {
         -1,
         false,
     ));
+    // 上一轮「说完→出声」的分段耗时（只读）。本地模型的卖点是快，得让用户随手看得见；
+    // 慢在哪一段，比「感觉有点慢」有用得多。没出过声的轮次不显示（见 `timings::menu_line`）。
+    if let Some(line) = crate::timings::last().and_then(|t| crate::timings::menu_line(&t, lang)) {
+        menu.addItem(&item(mtm, target, &line, -1, false));
+    }
     menu.addItem(&NSMenuItem::separatorItem(mtm));
 
     // —— 模式（输入法 / 对话）——
