@@ -199,3 +199,5 @@ AgentEar 由用户安装和启动，持有 TCC 权限和全局热键；可以独
 - **实测**：AgentEar v0.25.x 对 Agent24 #532@`b111ac4` 分支端到端 **29/29 通过**
   （`docs/data/e2e-agent24-2026-09/`）。⚠️ 这是对**未合并分支**的预跑，Agent24 合并后需对其 main 复验。
 - **本 ADR §3 冻结的 `agentear.proposal/1` 与两条硬约束不变**；附着时 `builtin` 提案宿主只展示、不执行。
+- **凭证存储（v0.26.1，jason 2026-09-27）**：附着 token 从 macOS 钥匙串改存 `<数据目录>/agent24/token`（0600）。
+  原因：自签证书无 Team ID，钥匙串分区按 cdhash 认 app，每次升级首启都弹密码框；A3 威胁模型不防同 UID，两者等价。

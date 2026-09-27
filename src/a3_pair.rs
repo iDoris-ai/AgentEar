@@ -1,11 +1,21 @@
 //! 与 Agent24 配对（A3 §3.6，jason Q2=b：AgentEar 设置里一键，代跑 `agent24` CLI）。
 //!
 //! 流程：找 CLI → `agent24 --version` 版本闸 → 把 manifest **原始字节**落盘 →
-//! `agent24 os attach add <manifest> --json` → token 进 **macOS Keychain**，
+//! `agent24 os attach add <manifest> --json` → token 进 **`<数据目录>/agent24/token`（0600）**，
 //! `socket_path` / `token_id` / 注册时的 digest 进 config。
 //!
-//! ⚠️ **token 只在两处出现**：CLI 的 stdout（我们读完就进 Keychain）与 Keychain 本身。
-//! 不进 config.json、不进日志、不进错误信息（错误里只放 `token_id`）。
+//! ⚠️ **token 只在两处出现**：CLI 的 stdout（我们读完就写文件）与那个 0600 文件本身。
+//! 不进 config.json、不进日志、不进错误信息（错误里只放 `token_id`）、不进 argv、不进事件。
+//!
+//! ## 为什么不再用 macOS Keychain（v0.26.1，jason 2026-09-27 拍板）
+//!
+//! v0.25.0–v0.25.2 存 Keychain。但我们用的是**自签证书**（没有 Apple Team ID），macOS 的
+//! 钥匙串「分区列表」对这种 app 按 **cdhash** 认人（实测该项 partition 里是 `cdhash:4935334a…`）；
+//! 每次升级 cdhash 都变 → 升级后第一次启动弹「AgentEar wants to access key
+//! ai.idoris.agentear.agent24 … enter the login keychain password」。
+//! A3 的威胁模型本来就**不防同 UID**（SPEC-ME3 §0；A3 设计 §11 Q2 里也写了同 UID 下
+//! 两种方案一样安全），所以 0600 文件与钥匙串等价，却不会每次升级都要密码。
+//! 真想回到钥匙串，得先有 Team ID 签名（分区才会按 team 认）。
 //!
 //! ⚠️ **只做不放宽隐私的注册**（A3 §3.5）：我们的 manifest 恒为 `local_only`；
 //! CLI 在非 TTY 下永远不发 `allow_relax`，放宽必失败于 `relax_requires_confirmation`，
@@ -24,9 +34,10 @@ use std::process::Command;
 /// 能不能用只看能力探测（[`probe_attach`]）。
 pub const A3_RELEASE_VERSION: (u64, u64, u64) = (0, 5, 0);
 
-/// Keychain 里存 token 的 service / account。
-pub const KEYCHAIN_SERVICE: &str = "ai.idoris.agentear.agent24";
-pub const KEYCHAIN_ACCOUNT: &str = "agentear";
+/// token 文件名（在 `<数据目录>/agent24/` 下）。
+pub const TOKEN_FILE: &str = "token";
+/// v0.25.0–v0.25.2 用过的钥匙串项（只在日志里提示用户可以手动删，**不去读也不去删**，见 [`start_blocking`]）。
+pub const LEGACY_KEYCHAIN_SERVICE: &str = "ai.idoris.agentear.agent24";
 
 // ---------------------------------------------------------------- CLI 定位与版本
 
@@ -223,22 +234,103 @@ pub fn parse_add_output(success: bool, stdout: &str, expect_digest: &str) -> Res
     Ok(reg)
 }
 
-// ---------------------------------------------------------------- Keychain
+// ---------------------------------------------------------------- token 文件
 
-pub fn keychain_store(service: &str, token: &str) -> Result<()> {
-    security_framework::passwords::set_generic_password(service, KEYCHAIN_ACCOUNT, token.as_bytes())
-        .context("写 Keychain 失败")
+/// `<数据目录>/agent24/token`。
+pub fn token_path(data_root: &Path) -> PathBuf {
+    data_root.join("agent24").join(TOKEN_FILE)
 }
 
-pub fn keychain_load(service: &str) -> Option<String> {
-    security_framework::passwords::get_generic_password(service, KEYCHAIN_ACCOUNT)
-        .ok()
-        .and_then(|b| String::from_utf8(b).ok())
-        .filter(|s| !s.is_empty())
+/// token 文件的状态。`Debug` 打码（`Present` 永不打出 token）。
+#[derive(Clone, PartialEq, Eq)]
+pub enum TokenState {
+    /// 没有文件（没配对，或者从 Keychain 时代升级上来）。
+    Missing,
+    /// 权限合格（只有属主可读写）且非空。
+    Present(String),
+    /// 权限比 0600 宽（组或其他人有任何位）——**拒绝使用**，照 ssh 的做法（带实际 mode）。
+    TooOpen(u32),
+    /// 其它问题：是符号链接、不是普通文件、属主不是当前用户、读不了、是空的。
+    Unusable(String),
 }
 
-pub fn keychain_delete(service: &str) {
-    let _ = security_framework::passwords::delete_generic_password(service, KEYCHAIN_ACCOUNT);
+impl std::fmt::Debug for TokenState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            TokenState::Missing => write!(f, "Missing"),
+            TokenState::Present(_) => write!(f, "Present(<redacted>)"),
+            TokenState::TooOpen(m) => write!(f, "TooOpen({m:o})"),
+            TokenState::Unusable(why) => write!(f, "Unusable({why})"),
+        }
+    }
+}
+
+/// 读 token（不打日志、不回显内容）。
+pub fn load_token(data_root: &Path) -> TokenState {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    let p = token_path(data_root);
+    // symlink_metadata：不跟随链接——被人换成链接指到别处就不用。
+    let meta = match std::fs::symlink_metadata(&p) {
+        Ok(m) => m,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return TokenState::Missing,
+        Err(e) => return TokenState::Unusable(format!("读不了 {}：{e}", p.display())),
+    };
+    if !meta.file_type().is_file() {
+        return TokenState::Unusable(format!("{} 不是普通文件", p.display()));
+    }
+    // SAFETY: getuid 没有前置条件、不会失败。
+    if meta.uid() != unsafe { libc::getuid() } {
+        return TokenState::Unusable(format!("{} 的属主不是当前用户", p.display()));
+    }
+    let mode = meta.permissions().mode() & 0o777;
+    if mode & 0o077 != 0 {
+        return TokenState::TooOpen(mode);
+    }
+    match std::fs::read_to_string(&p) {
+        Ok(s) if !s.trim().is_empty() => TokenState::Present(s.trim().to_string()),
+        Ok(_) => TokenState::Unusable(format!("{} 是空的", p.display())),
+        Err(e) => TokenState::Unusable(format!("读不了 {}：{e}", p.display())),
+    }
+}
+
+/// 原子写 token：目录 0700 → 临时文件（0600 创建）→ 写 + fsync → rename → fsync 目录 → 校验权限。
+pub fn store_token(data_root: &Path, token: &str) -> Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+    anyhow::ensure!(!token.trim().is_empty(), "拿到的 token 是空的");
+    let dir = data_root.join("agent24");
+    std::fs::create_dir_all(&dir).with_context(|| format!("建不了 {}", dir.display()))?;
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))
+        .with_context(|| format!("改不了 {} 的权限", dir.display()))?;
+    let path = token_path(data_root);
+    let tmp = dir.join(format!("{TOKEN_FILE}.tmp"));
+    let _ = std::fs::remove_file(&tmp); // 上次崩在半路留下的
+    {
+        // mode(0o600) 在创建那一刻就生效，不存在「先 0644 再 chmod」的窗口。
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&tmp)
+            .with_context(|| format!("写不了 {}", tmp.display()))?;
+        f.write_all(token.trim().as_bytes())?;
+        f.sync_all()?;
+    }
+    std::fs::rename(&tmp, &path).with_context(|| format!("换不上 {}", path.display()))?;
+    if let Ok(d) = std::fs::File::open(&dir) {
+        let _ = d.sync_all();
+    }
+    // 写后校验：umask / 文件系统怪癖都不许把它变宽。
+    match load_token(data_root) {
+        TokenState::Present(_) => Ok(()),
+        TokenState::TooOpen(m) => bail!("token 文件权限是 {m:o}，不是 600"),
+        other => bail!("token 写完读不回来：{other:?}"),
+    }
+}
+
+/// 删 token 文件（撤销配对时）。没有就算了。
+pub fn delete_token(data_root: &Path) {
+    let _ = std::fs::remove_file(token_path(data_root));
 }
 
 // ---------------------------------------------------------------- 配对 / 撤销 / 轮换
@@ -275,7 +367,7 @@ pub fn pair(data_root: &Path) -> Result<(), AddError> {
         &String::from_utf8_lossy(&out.stdout),
         &a3::manifest_digest(),
     )?;
-    keychain_store(KEYCHAIN_SERVICE, &reg.token).map_err(|e| AddError::Failed(format!("{e:#}")))?;
+    store_token(data_root, &reg.token).map_err(|e| AddError::Failed(format!("{e:#}")))?;
     crate::config::update(|c| {
         c.agent24_socket_path = Some(reg.socket_path.clone());
         c.agent24_token_id = Some(reg.token_id.clone());
@@ -287,8 +379,8 @@ pub fn pair(data_root: &Path) -> Result<(), AddError> {
     Ok(())
 }
 
-/// 撤销配对：代跑 `attach revoke`（失败也继续清本地），删 Keychain、清 config、断开。
-pub fn revoke() -> Result<()> {
+/// 撤销配对：代跑 `attach revoke`（失败也继续清本地），删 token 文件、清 config、断开。
+pub fn revoke(data_root: &Path) -> Result<()> {
     let cfg = crate::config::get();
     let mut remote_err = None;
     match find_cli(cfg.agent24_cli_path.as_deref()) {
@@ -305,7 +397,7 @@ pub fn revoke() -> Result<()> {
         }
         None => remote_err = Some("找不到 agent24 命令".into()),
     }
-    keychain_delete(KEYCHAIN_SERVICE);
+    delete_token(data_root);
     crate::config::update(|c| {
         c.agent24_socket_path = None;
         c.agent24_token_id = None;
@@ -319,11 +411,18 @@ pub fn revoke() -> Result<()> {
     Ok(())
 }
 
-/// 当前凭据（config + Keychain）。任何一样缺就是没配对。
-pub fn current_creds() -> Option<a3::Creds> {
-    let cfg = crate::config::get();
-    let socket = cfg.agent24_socket_path.filter(|s| !s.is_empty())?;
-    let token = keychain_load(KEYCHAIN_SERVICE)?;
+/// 当前凭据（config + token 文件）。任何一样缺（或 token 文件权限不合格）就当没配对。
+pub fn current_creds(data_root: &Path) -> Option<a3::Creds> {
+    creds_from(crate::config::get().agent24_socket_path, data_root)
+}
+
+/// [`current_creds`] 的判据（不碰全局 config，便于测试）。
+pub fn creds_from(socket: Option<String>, data_root: &Path) -> Option<a3::Creds> {
+    let socket = socket.filter(|s| !s.is_empty())?;
+    let token = match load_token(data_root) {
+        TokenState::Present(t) => t,
+        _ => return None,
+    };
     Some(a3::Creds {
         socket: PathBuf::from(socket),
         token,
@@ -363,19 +462,110 @@ pub fn start(data_root: PathBuf) {
         .expect("起不了 Agent24 启动线程");
 }
 
-fn start_blocking(data_root: PathBuf) {
-    let cfg = crate::config::get();
-    if cfg.agent24_socket_path.is_none() {
-        a3::set_status(a3::LinkStatus::Unpaired);
-    } else if needs_rotation(cfg.agent24_registered_digest.as_deref(), &a3::manifest_digest()) {
-        log::info!("附着 manifest 变了：启动时自动重新注册");
-        if let Err(r) = rotate(&data_root) {
-            a3::set_status(a3::LinkStatus::NeedsAction(r));
+/// 启动时该做什么（纯函数，真值表测）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StartupPlan {
+    /// 没配对过。
+    Unpaired,
+    /// 凭据齐全，直接连。
+    Connect,
+    /// manifest 变了：代跑 `attach add` 轮换（顺带也会重写 token 文件）。
+    Rotate,
+    /// **从 Keychain 时代升级上来**（config 说配对过，token 文件却没有）：代跑 `attach add`
+    /// 重新签发一个 token 写进文件。**绝不去读旧钥匙串项**——读就会弹密码框，那正是要修的问题。
+    Reissue,
+    /// token 文件存在但不能用（权限太宽 / 不是普通文件 / 属主不对 / 空）：要用户重新配对。
+    Repair(String),
+}
+
+pub fn startup_plan(paired: bool, token: &TokenState, digest_changed: bool) -> StartupPlan {
+    if !paired {
+        return StartupPlan::Unpaired;
+    }
+    if digest_changed {
+        return StartupPlan::Rotate;
+    }
+    match token {
+        TokenState::Present(_) => StartupPlan::Connect,
+        TokenState::Missing => StartupPlan::Reissue,
+        TokenState::TooOpen(m) => StartupPlan::Repair(format!(
+            "token 文件权限是 {m:o}，比 600 宽，不用它（chmod 600 或在设置里重新连接 Agent24）"
+        )),
+        TokenState::Unusable(why) => StartupPlan::Repair(why.clone()),
+    }
+}
+
+/// 重新签发（迁移用）：结果映射同 [`rotate`]。
+fn reissue(data_root: &Path) -> Result<(), StopReason> {
+    match pair(data_root) {
+        Ok(()) => Ok(()),
+        Err(AddError::NeedsHostConfirm) => Err(StopReason::ConfirmOnHost),
+        Err(AddError::Failed(e)) => {
+            log::warn!("重新签发 Agent24 token 失败：{e}");
+            Err(StopReason::Repair)
         }
     }
+}
+
+/// 执行启动计划。返回要设的连接状态（`None` = 不动，交给连接守护线程）。
+/// 轮换 / 重新签发以闭包注入，好在测试里验证「迁移时真的去重新签发了」。
+pub fn execute_plan(
+    plan: StartupPlan,
+    rotate: impl FnOnce() -> Result<(), StopReason>,
+    reissue: impl FnOnce() -> Result<(), StopReason>,
+) -> Option<a3::LinkStatus> {
+    match plan {
+        StartupPlan::Unpaired => Some(a3::LinkStatus::Unpaired),
+        StartupPlan::Connect => None,
+        StartupPlan::Rotate => {
+            log::info!("附着 manifest 变了：启动时自动重新注册");
+            rotate().err().map(a3::LinkStatus::NeedsAction)
+        }
+        StartupPlan::Reissue => {
+            log::info!(
+                "Agent24 token 改存本地文件（v0.26.1）：不读旧钥匙串项（读会弹密码框），\
+                 代跑 `agent24 os attach add` 重新签发一次"
+            );
+            match reissue() {
+                Ok(()) => {
+                    log::info!(
+                        "已重新签发；旧钥匙串项「{LEGACY_KEYCHAIN_SERVICE}」里的 token 已随之作废，\
+                         可在「钥匙串访问」里手动删除（AgentEar 不去碰它，碰就会弹框）"
+                    );
+                    None
+                }
+                Err(r) => Some(a3::LinkStatus::NeedsAction(r)),
+            }
+        }
+        StartupPlan::Repair(why) => {
+            log::warn!("Agent24 token 文件不可用：{why}");
+            Some(a3::LinkStatus::NeedsAction(StopReason::Repair))
+        }
+    }
+}
+
+/// 启动时的判定 + 执行（不起连接守护线程）。守护进程与 `--agent24-startup` 共用这一段。
+pub fn run_startup(data_root: &Path) -> (StartupPlan, Option<a3::LinkStatus>) {
+    let cfg = crate::config::get();
+    let paired = cfg.agent24_socket_path.as_deref().is_some_and(|s| !s.is_empty());
+    let token = load_token(data_root);
+    let plan = startup_plan(
+        paired,
+        &token,
+        needs_rotation(cfg.agent24_registered_digest.as_deref(), &a3::manifest_digest()),
+    );
+    let st = execute_plan(plan.clone(), || rotate(data_root), || reissue(data_root));
+    (plan, st)
+}
+
+fn start_blocking(data_root: PathBuf) {
+    if let (_, Some(st)) = run_startup(&data_root) {
+        a3::set_status(st);
+    }
     let root = data_root.clone();
+    let creds_root = data_root.clone();
     a3::start_supervisor(a3::Supervisor {
-        creds: Box::new(current_creds),
+        creds: Box::new(move || current_creds(&creds_root)),
         rotate: Box::new(move || rotate(&root)),
         handler: a3::default_handler(),
     });
@@ -506,22 +696,161 @@ mod tests {
         assert!(needs_rotation(Some("sha256:old"), "sha256:a"));
     }
 
-    /// 用**独立的测试 service 名**，测完删掉，不碰用户真实的配对项。
+    fn tmp_root(tag: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!(
+            "a3tok-{tag}-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    fn mode_of(p: &Path) -> u32 {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::metadata(p).unwrap().permissions().mode() & 0o777
+    }
+
     #[test]
-    fn keychain_roundtrip_with_test_service() {
-        let svc = format!("ai.idoris.agentear.agent24.test.{}", std::process::id());
-        keychain_delete(&svc);
-        assert_eq!(keychain_load(&svc), None);
-        if keychain_store(&svc, "tok-value").is_err() {
-            // CI / 无 GUI 会话时 Keychain 可能锁着：如实跳过，别假绿。
-            eprintln!("Keychain 不可写（可能是无登录会话），跳过");
-            return;
+    fn token_file_roundtrip_is_0600_and_dir_0700() {
+        let root = tmp_root("rt");
+        assert_eq!(load_token(&root), TokenState::Missing);
+        store_token(&root, "tok-value\n").unwrap();
+        assert_eq!(load_token(&root), TokenState::Present("tok-value".into()));
+        assert_eq!(mode_of(&token_path(&root)), 0o600);
+        assert_eq!(mode_of(&root.join("agent24")), 0o700);
+        // 轮换：原子替换，不留临时文件。
+        store_token(&root, "tok-rotated").unwrap();
+        assert_eq!(load_token(&root), TokenState::Present("tok-rotated".into()));
+        assert!(!root.join("agent24").join("token.tmp").exists());
+        delete_token(&root);
+        assert_eq!(load_token(&root), TokenState::Missing);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn store_survives_a_stale_tmp_and_a_wide_umask() {
+        let root = tmp_root("stale");
+        std::fs::create_dir_all(root.join("agent24")).unwrap();
+        std::fs::write(root.join("agent24/token.tmp"), "half-written").unwrap();
+        // SAFETY: umask 只影响本进程随后新建的文件；测试完恢复。
+        let old = unsafe { libc::umask(0) };
+        let r = store_token(&root, "tok-x");
+        unsafe { libc::umask(old) };
+        r.unwrap();
+        assert_eq!(mode_of(&token_path(&root)), 0o600, "umask 0 也不能把它变宽");
+        assert_eq!(load_token(&root), TokenState::Present("tok-x".into()));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn wider_than_0600_is_refused() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tmp_root("wide");
+        store_token(&root, "tok-y").unwrap();
+        for m in [0o640, 0o604, 0o644, 0o660] {
+            std::fs::set_permissions(token_path(&root), std::fs::Permissions::from_mode(m)).unwrap();
+            assert_eq!(load_token(&root), TokenState::TooOpen(m), "mode {m:o}");
         }
-        assert_eq!(keychain_load(&svc).as_deref(), Some("tok-value"));
-        keychain_store(&svc, "tok-rotated").unwrap();
-        assert_eq!(keychain_load(&svc).as_deref(), Some("tok-rotated"));
-        keychain_delete(&svc);
-        assert_eq!(keychain_load(&svc), None);
+        std::fs::set_permissions(token_path(&root), std::fs::Permissions::from_mode(0o400)).unwrap();
+        assert_eq!(load_token(&root), TokenState::Present("tok-y".into()), "只读 0400 更严，照用");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn symlink_empty_and_non_file_are_unusable() {
+        let root = tmp_root("odd");
+        std::fs::create_dir_all(root.join("agent24")).unwrap();
+        let target = root.join("elsewhere");
+        std::fs::write(&target, "tok-z").unwrap();
+        std::os::unix::fs::symlink(&target, token_path(&root)).unwrap();
+        assert!(matches!(load_token(&root), TokenState::Unusable(_)), "符号链接不跟随");
+        std::fs::remove_file(token_path(&root)).unwrap();
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            std::fs::OpenOptions::new().write(true).create(true).mode(0o600).open(token_path(&root)).unwrap();
+        }
+        assert!(matches!(load_token(&root), TokenState::Unusable(_)), "空文件");
+        std::fs::remove_file(token_path(&root)).unwrap();
+        std::fs::create_dir(token_path(&root)).unwrap();
+        assert!(matches!(load_token(&root), TokenState::Unusable(_)), "目录");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn token_state_debug_never_prints_the_token() {
+        let s = format!("{:?}", TokenState::Present("SECRET-TOKEN-XYZ".into()));
+        assert!(!s.contains("SECRET-TOKEN-XYZ"), "{s}");
+    }
+
+    /// 调用点：每种计划真的调了该调的那一个（而且只调它），结果映射到对的状态。
+    #[test]
+    fn execute_plan_calls_the_right_path() {
+        use std::cell::Cell;
+        let (rot, re) = (Cell::new(0), Cell::new(0));
+        let run = |plan, r_ok: bool, i_ok: bool| {
+            execute_plan(
+                plan,
+                || {
+                    rot.set(rot.get() + 1);
+                    if r_ok { Ok(()) } else { Err(StopReason::ConfirmOnHost) }
+                },
+                || {
+                    re.set(re.get() + 1);
+                    if i_ok { Ok(()) } else { Err(StopReason::Repair) }
+                },
+            )
+        };
+        // 迁移：去重新签发，成功就交给守护线程连（不设状态）。
+        assert_eq!(run(StartupPlan::Reissue, true, true), None);
+        assert_eq!((rot.get(), re.get()), (0, 1));
+        // 迁移失败（Agent24 没开 / CLI 找不到）→ 需要重新配对。
+        assert_eq!(run(StartupPlan::Reissue, true, false), Some(a3::LinkStatus::NeedsAction(StopReason::Repair)));
+        assert_eq!((rot.get(), re.get()), (0, 2));
+        assert_eq!(run(StartupPlan::Rotate, false, true), Some(a3::LinkStatus::NeedsAction(StopReason::ConfirmOnHost)));
+        assert_eq!((rot.get(), re.get()), (1, 2));
+        assert_eq!(run(StartupPlan::Connect, true, true), None);
+        assert_eq!(run(StartupPlan::Unpaired, true, true), Some(a3::LinkStatus::Unpaired));
+        assert_eq!(
+            run(StartupPlan::Repair("x".into()), true, true),
+            Some(a3::LinkStatus::NeedsAction(StopReason::Repair))
+        );
+        assert_eq!((rot.get(), re.get()), (1, 2), "Connect/Unpaired/Repair 不许代跑 CLI");
+    }
+
+    /// current_creds 的判据：只有 socket 与合格的 token 文件都在才交出凭据。
+    #[test]
+    fn creds_need_socket_and_a_valid_token_file() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tmp_root("creds");
+        let sock = Some("/tmp/a24.sock".to_string());
+        assert!(creds_from(sock.clone(), &root).is_none(), "没 token 文件");
+        store_token(&root, "tok-c").unwrap();
+        let c = creds_from(sock.clone(), &root).expect("齐全");
+        assert_eq!(c.token, "tok-c");
+        assert!(creds_from(None, &root).is_none(), "没配对");
+        assert!(creds_from(Some(String::new()), &root).is_none(), "空 socket");
+        std::fs::set_permissions(token_path(&root), std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(creds_from(sock, &root).is_none(), "权限太宽的 token 不许交出去");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// 启动计划真值表：迁移（配对过、没文件）必须走重新签发，**不是读钥匙串、也不是当没配对**。
+    #[test]
+    fn startup_plan_truth_table() {
+        let present = TokenState::Present("t".into());
+        assert_eq!(startup_plan(false, &present, false), StartupPlan::Unpaired);
+        assert_eq!(startup_plan(false, &TokenState::Missing, true), StartupPlan::Unpaired);
+        assert_eq!(startup_plan(true, &present, false), StartupPlan::Connect);
+        assert_eq!(startup_plan(true, &TokenState::Missing, false), StartupPlan::Reissue);
+        assert_eq!(startup_plan(true, &present, true), StartupPlan::Rotate);
+        assert_eq!(startup_plan(true, &TokenState::Missing, true), StartupPlan::Rotate);
+        assert!(matches!(startup_plan(true, &TokenState::TooOpen(0o644), false), StartupPlan::Repair(_)));
+        assert!(matches!(
+            startup_plan(true, &TokenState::Unusable("x".into()), false),
+            StartupPlan::Repair(_)
+        ));
     }
 
     #[test]

@@ -871,6 +871,27 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
+    // ---- Agent24 配对诊断（无人值守验收用，不起守护进程、不碰按键）----
+    //
+    // `--agent24-pair`：跑一遍和设置里「连接 Agent24」**同一个** `a3_pair::pair`。
+    // `--agent24-startup`：只跑一遍守护进程启动时的判定与迁移（`a3_pair::run_startup`），
+    // 不起连接守护线程——用来验证「从钥匙串时代升级上来 → 自动重新签发写 token 文件」。
+    if args.iter().any(|a| a == "--agent24-pair") {
+        return match a3_pair::pair(&data_root) {
+            Ok(()) => {
+                println!("已配对；token 在 {}", a3_pair::token_path(&data_root).display());
+                Ok(())
+            }
+            Err(e) => anyhow::bail!("配对失败：{e:?}"),
+        };
+    }
+    if args.iter().any(|a| a == "--agent24-startup") {
+        let (plan, st) = a3_pair::run_startup(&data_root);
+        println!("启动计划：{plan:?}；设置状态：{st:?}");
+        println!("token 文件：{:?}", a3_pair::load_token(&data_root));
+        return Ok(());
+    }
+
     // ---- 语音指令表：**干跑**（只报命中，不执行）----
     //
     // 两个用处：① 用户改完 `commands.json` 可以先干跑一遍再上嘴；
@@ -2198,9 +2219,9 @@ fn parse_linger(v: Option<&str>) -> u64 {
 
 /// 解析 `--host fake|a3`。
 ///
-/// `a3` 默认读配对好的凭据（config 的 socket + Keychain 的 token）。
+/// `a3` 默认读配对好的凭据（config 的 socket + `<数据目录>/agent24/token`）。
 /// **仅供测试**的覆盖参数：`--a3-socket <path>` 与 `--a3-token-file <file>`——
-/// 让假内核 / 联调环境不必动用户的 Keychain。
+/// 让假内核 / 联调环境不必动用户已配对的凭据。
 fn attach_cli_host(args: &[String]) -> anyhow::Result<CliHost> {
     match flag_value(args, "--host") {
         None => Ok(CliHost::None),
@@ -2216,7 +2237,7 @@ fn attach_cli_host(args: &[String]) -> anyhow::Result<CliHost> {
                     token: a3::read_token_file(std::path::Path::new(tf))?,
                     digest: a3::manifest_digest(),
                 },
-                (None, None) => a3_pair::current_creds()
+                (None, None) => a3_pair::current_creds(&data_root()?)
                     .ok_or_else(|| anyhow::anyhow!("还没和 Agent24 配对（设置里「连接 Agent24」），或用 --a3-socket/--a3-token-file 测试"))?,
                 _ => anyhow::bail!("--a3-socket 与 --a3-token-file 要一起给"),
             };
