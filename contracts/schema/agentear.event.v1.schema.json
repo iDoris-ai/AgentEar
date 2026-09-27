@@ -5,84 +5,329 @@
   "description": "AgentEar 经 Agent24 SDK `_a24/events/emit` 发布的事件（docs/agent24-embedding.md §3）。本 schema 是**生产方契约**：AgentEar 发出的事件必须通过它（additionalProperties:false）；消费方应忽略未知字段以兼容 /1 内的增量字段。去重：同一事件重试必须复用 event_id；宿主按 (session_id, seq) 去重并保持顺序。音频字节与原始音频路径**永不**出现在任何事件里。",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schema", "event_id", "session_id", "seq", "type", "payload"],
+  "required": [
+    "schema",
+    "event_id",
+    "session_id",
+    "seq",
+    "type",
+    "payload"
+  ],
   "properties": {
-    "schema": { "const": "agentear.event/1" },
-    "event_id": { "type": "string", "minLength": 1, "maxLength": 128, "description": "全局唯一；重试复用同一个值。" },
-    "session_id": { "type": "string", "minLength": 1, "maxLength": 128, "description": "AgentEar 进程内一次会话（附着连接）的标识。" },
-    "seq": { "type": "integer", "minimum": 1, "description": "同一 session_id 内从 1 起单调递增，每个新事件 +1；重试不递增。" },
-    "type": { "enum": ["turn", "transcript", "proposal", "speech", "error", "confirm_reply"] },
-    "payload": { "type": "object" }
+    "schema": {
+      "const": "agentear.event/1"
+    },
+    "event_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "description": "全局唯一；重试复用同一个值。"
+    },
+    "session_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "description": "AgentEar 进程内一次会话（附着连接）的标识。"
+    },
+    "seq": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "同一 session_id 内从 1 起单调递增，每个新事件 +1；重试不递增。"
+    },
+    "type": {
+      "enum": [
+        "turn",
+        "transcript",
+        "proposal",
+        "speech",
+        "error",
+        "confirm_reply"
+      ]
+    },
+    "payload": {
+      "type": "object"
+    }
   },
   "allOf": [
-    { "if": { "properties": { "type": { "const": "turn" } } }, "then": { "properties": { "payload": { "$ref": "#/$defs/turn" } } } },
-    { "if": { "properties": { "type": { "const": "transcript" } } }, "then": { "properties": { "payload": { "$ref": "#/$defs/transcript" } } } },
-    { "if": { "properties": { "type": { "const": "proposal" } } }, "then": { "properties": { "payload": { "$ref": "agentear.proposal.v1.schema.json" } } } },
-    { "if": { "properties": { "type": { "const": "speech" } } }, "then": { "properties": { "payload": { "$ref": "#/$defs/speech" } } } },
-    { "if": { "properties": { "type": { "const": "error" } } }, "then": { "properties": { "payload": { "$ref": "#/$defs/error" } } } },
-    { "if": { "properties": { "type": { "const": "confirm_reply" } } }, "then": { "properties": { "payload": { "$ref": "#/$defs/confirm_reply" } } } }
+    {
+      "if": {
+        "properties": {
+          "type": {
+            "const": "turn"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "$ref": "#/$defs/turn"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": {
+            "const": "transcript"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "$ref": "#/$defs/transcript"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": {
+            "const": "proposal"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "$ref": "agentear.proposal.v1.schema.json"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": {
+            "const": "speech"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "$ref": "#/$defs/speech"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": {
+            "const": "error"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "$ref": "#/$defs/error"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": {
+            "const": "confirm_reply"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "$ref": "#/$defs/confirm_reply"
+          }
+        }
+      }
+    }
   ],
   "$defs": {
     "lang": {
       "description": "BCP-47（已与 agent24-13 约定，2026-09-27，B9）：映射 SenseVoice/whisper/Qwen3 的语种 → zh-CN/en-US/th-TH/zh-HK(粤)/ja-JP/ko-KR；识别不出 → und。",
-      "enum": ["zh-CN", "en-US", "th-TH", "zh-HK", "ja-JP", "ko-KR", "und"]
+      "enum": [
+        "zh-CN",
+        "en-US",
+        "th-TH",
+        "zh-HK",
+        "ja-JP",
+        "ko-KR",
+        "und"
+      ]
     },
     "turn": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["phase"],
+      "required": [
+        "phase"
+      ],
       "description": "会话相位变化（src/session.rs 的 Phase）。",
       "properties": {
-        "phase": { "enum": ["listening", "thinking", "speaking", "idle", "failed"] },
-        "turn": { "type": "integer", "minimum": 1, "description": "第几轮（同 session 内）。" }
+        "phase": {
+          "enum": [
+            "listening",
+            "thinking",
+            "speaking",
+            "idle",
+            "failed"
+          ]
+        },
+        "turn": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "第几轮（同 session 内）。"
+        }
       }
     },
     "transcript": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["text", "lang", "final"],
+      "required": [
+        "text",
+        "lang",
+        "final"
+      ],
       "description": "最终转写。已约定（B6）：只发对话模式的轮次；输入法模式（只上屏）不发——但输入法模式下命中指令表的 proposal 照发。当前只发 final，不伪造 partial/timestamp。",
       "properties": {
-        "text": { "type": "string", "minLength": 1 },
-        "lang": { "$ref": "#/$defs/lang" },
-        "final": { "const": true },
-        "content_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$", "description": "已约定（B9）：raw 音频的 sha256（不是音频本身），用于溯源/去重。可选。" }
+        "text": {
+          "type": "string",
+          "minLength": 1
+        },
+        "lang": {
+          "$ref": "#/$defs/lang"
+        },
+        "final": {
+          "const": true
+        },
+        "content_hash": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$",
+          "description": "已约定（B9）：raw 音频的 sha256（不是音频本身），用于溯源/去重。可选。"
+        }
       }
     },
     "speech": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["state"],
+      "required": [
+        "state"
+      ],
       "description": "播报状态。由宿主 speak 命令触发时带 command_id；本轮回答的播报不带。",
       "properties": {
-        "state": { "enum": ["started", "completed", "stopped", "failed"] },
-        "command_id": { "type": "string", "minLength": 1, "maxLength": 128 },
-        "reason": { "type": "string", "description": "stopped/failed 的原因（例如 barge_in、stop_command、tts_unavailable）。" }
+        "state": {
+          "enum": [
+            "started",
+            "completed",
+            "stopped",
+            "failed"
+          ]
+        },
+        "command_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "reason": {
+          "type": "string",
+          "description": "自由字符串。已知值：barge_in / stop_command / tts_unavailable / superseded（见 contracts/README.md）。宿主只能拿它做展示，不得据此做分支判断。"
+        }
       },
       "allOf": [
-        { "if": { "properties": { "state": { "const": "failed" } } }, "then": { "required": ["reason"] } }
+        {
+          "if": {
+            "properties": {
+              "state": {
+                "const": "failed"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "reason"
+            ]
+          }
+        }
       ]
     },
     "error": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["code", "message"],
+      "required": [
+        "code",
+        "message"
+      ],
       "properties": {
-        "code": { "type": "string", "pattern": "^[a-z][a-z0-9_]*$", "description": "机器可读错误码，例如 model_timeout / model_unavailable / privacy_denied / busy / cancelled / tts_unavailable / asr_failed / internal。宿主 SDK 的错误类型原样映射进来。" },
-        "message": { "type": "string" },
-        "command_id": { "type": "string", "minLength": 1, "maxLength": 128 },
-        "retriable": { "type": "boolean" }
+        "code": {
+          "enum": [
+            "forbidden",
+            "busy",
+            "cancelled",
+            "timeout",
+            "quota_exceeded",
+            "invalid_lease",
+            "unknown_capability",
+            "version_mismatch",
+            "auth_failed",
+            "manifest_mismatch",
+            "not_ready",
+            "draining",
+            "revoked",
+            "rate_limited",
+            "payload_too_large",
+            "token_invalid",
+            "not_found",
+            "unavailable",
+            "asr_failed",
+            "tts_unavailable",
+            "privacy_denied",
+            "internal"
+          ],
+          "description": "封闭集合（与 agent24-13 约定，2026-09-27）。前 18 个 = 宿主来源，严格等于 Agent24 `agent24_os_proto::rpc::ErrorKind::ALL` 的 wire 字符串（as_str），原样透传、不加前缀；来源 commit 见 contracts/README.md。后 4 个 = AgentEar 自有：asr_failed / tts_unavailable / privacy_denied / internal。模型超时/不可用直接用宿主的 timeout / unavailable。新增 code 要升 schema 版本或双方同步。"
+        },
+        "message": {
+          "type": "string"
+        },
+        "command_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "retryable": {
+          "type": "boolean",
+          "description": "同一调用稍后重试是否可能成功；对齐 Agent24 内核 ErrorKind 的 data.retryable 与 SDK ClientError。"
+        }
       }
     },
     "confirm_reply": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["proposal_event_id", "reply"],
+      "required": [
+        "proposal_event_id",
+        "reply"
+      ],
       "description": "已与 agent24-13 约定（2026-09-27，B8）：附着模式下 AgentEar 关掉本地的语音二次确认（v0.12.0 那套不再自己执行），改为把用户对某个 proposal 的答复作为本事件交给宿主。reply 由 AgentEar 按既有规则判定：否定先判；肯定只认短答复（≤7 字）；其余话一律当 reject（作废，不偷偷执行）；短按录音键 = confirm（此时没有 text）。宿主只在 reply=confirm 时执行，并且要自己再核一遍这个 proposal 仍在等待确认、没过期，执行载荷必须来自 proposal_event_id 指向的那个 proposal 对象（同源）。",
       "properties": {
-        "proposal_event_id": { "type": "string", "minLength": 1, "maxLength": 128, "description": "被答复的那条 proposal 事件的 event_id。" },
-        "reply": { "enum": ["confirm", "reject"] },
-        "text": { "type": "string", "minLength": 1, "description": "用户说的原话（留档/审计用）；按键确认时没有。" }
+        "proposal_event_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "description": "被答复的那条 proposal 事件的 event_id。"
+        },
+        "reply": {
+          "enum": [
+            "confirm",
+            "reject"
+          ]
+        },
+        "text": {
+          "type": "string",
+          "minLength": 1,
+          "description": "用户说的原话（留档/审计用）；按键确认时没有。"
+        }
       }
     }
   }

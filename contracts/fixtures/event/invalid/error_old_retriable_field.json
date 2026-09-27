@@ -1,0 +1,12 @@
+{
+  "schema": "agentear.event/1",
+  "event_id": "evt_0020",
+  "session_id": "ses_demo",
+  "seq": 20,
+  "type": "error",
+  "payload": {
+    "code": "timeout",
+    "message": "x",
+    "retriable": true
+  }
+}

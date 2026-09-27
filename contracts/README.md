@@ -63,10 +63,33 @@ Schema 用 JSON Schema draft 2020-12。`event` 的 `proposal` payload 用相对 
 | B9 | `transcript.content_hash`（raw 音频的 sha256，可选）；`lang` 用 BCP-47，识别不出时填 `und` | `event` → `$defs.lang`、`transcript` |
 | D | schema 归属按本文件「谁维护」一节；fixtures 就放在 `contracts/` | — |
 
+### 错误码与播报原因（与 agent24-13 约定，2026-09-27 第二轮）
+
+- `turn.phase`（listening / thinking / speaking / idle / failed）和 `speech.state`：已同意，没有改动。
+- **`speech.reason` 是自由字符串**，目前已知的取值：
+
+  | reason | 含义 |
+  |---|---|
+  | `barge_in` | 用户按录音键打断 |
+  | `stop_command` | 宿主发来的 `stop_playback` |
+  | `tts_unavailable` | TTS 边车不可用 |
+  | `superseded` | 被后面的播报顶掉（例如清空队列） |
+
+  **宿主只能拿 reason 做展示，不能按它做分支判断。**
+- **`error.retryable`**（原来叫 `retriable`，已改名）：和 Agent24 内核 `ErrorKind` 的 `data.retryable`、SDK 的 `ClientError` 对齐。
+- **`error.code` 是封闭集合**：
+
+  | 来源 | code |
+  |---|---|
+  | **宿主**：原样使用 SDK 的 kind，**不加前缀** | `forbidden` `busy` `cancelled` `timeout` `quota_exceeded` `invalid_lease` `unknown_capability` `version_mismatch` `auth_failed` `manifest_mismatch` `not_ready` `draining` `revoked` `rate_limited` `payload_too_large` `token_invalid` `not_found` `unavailable` |
+  | **AgentEar 自有** | `asr_failed` `tts_unavailable` `privacy_denied` `internal` |
+
+  宿主那 18 个值直接取自 Agent24 源码 `rust/crates/agent24-os-proto/src/rpc.rs` 中的 `ErrorKind::ALL` 以及 `as_str()`，
+  **来源 commit 是 Agent24 `f504ae02e31dacb80591e5307d90dd267b08c792`**。Agent24 以后增删 `ErrorKind` 时，两边要同步改 enum。
+  模型超时和模型不可用直接用宿主的 `timeout` / `unavailable`，**不再另设** `model_timeout` / `model_unavailable`。
+
 **⚠️ 还没定的（待 jason 确认）**
 - **B5 断连后的默认行为**：提案是「独立模式的推理走本机边车时，自动回到独立模式；否则停止监听并提示」。
   Agent24 会在它的 PR 里把这一条标出来请 jason 过目。这一条不影响任何 schema。
-- `turn.phase`、`speech.state/reason`、`error.code` 的具体取值是 AgentEar 先定的，agent24-13 没有逐项评论。
-  有异议就在 `/1` 冻结前提出来。
 - **A3 附着协议本身**（注册、token、握手、generation、重连、反向命令入口）由 Agent24 冻结，这是 P2 的阻塞项。
   这件事要 jason 排期，**目前还没开始**。
