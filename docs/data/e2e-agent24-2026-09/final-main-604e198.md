@@ -20,6 +20,8 @@ AgentEar 在 S6 之前已断开）。**推测**是本地 oMLX 在长时间空闲
 后 4 次连续全过（其中 1 次 `KEEP=1` 的日志显示宿主推理 0.83 s、tier Local）。
 把它记为已知的偶发不稳，不写成「稳定通过」。复现时请用 `KEEP=1` 保留现场。
 
+**Agent24 侧已登记跟进**（agent24-13，2026-09-27）：复现「刚构建完第一次跑」并保留 daemon 日志定根因。Agent24 确认 daemon 侧**没有**「启动后首个 model/complete 被拒 / 健康表未就绪」这类已知行为；已知事实只有：内核 model/complete 超时 120 s、oMLX 8B 冷加载实测约 5 s、AgentEar talk_timeout 60 s。若那一轮拿到的是 `unavailable` 而非 `timeout`，更像 provider 探活失败而非超时——但那次没有日志，**无法区分**。
+
 ## 通过时各步（第 2–5 次相同）
 
 S0 前置 ✅ · S1 计数桩（v4-mapped → Remote 层）✅ · S2 隔离 HOME 起 agent24d ✅ ·
