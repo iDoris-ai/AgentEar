@@ -190,6 +190,14 @@ pub fn set_pending(on: bool) {
     PENDING.store(on, Ordering::Relaxed);
 }
 
+/// 与 Agent24 断开且停听（B5）。**必须在菜单栏可见**：停听时按键不录，
+/// 界面上没痕迹的话用户只会觉得「坏了」。
+static HOST_DISCONNECTED: AtomicBool = AtomicBool::new(false);
+
+pub fn set_host_disconnected(on: bool) {
+    HOST_DISCONNECTED.store(on, Ordering::Relaxed);
+}
+
 fn title(lang: Lang) -> String {
     let base = match STATUS.load(Ordering::Relaxed) {
         1 => format!("● {}s", SECS.load(Ordering::Relaxed)),
@@ -210,6 +218,13 @@ fn title(lang: Lang) -> String {
     };
     // **待确认标记**：比模式标记更急（它有时限），所以放最后、
     // 而且和模式标记用的是不同的符号，一眼能分辨是「等问题」还是「等确认」。
+    // **停听标记**：与宿主断开、没回独立模式（B5）。它意味着「按键也不录」，
+    // 比模式标记更要紧，所以放在模式标记之后、待确认标记之前。
+    let base = if HOST_DISCONNECTED.load(Ordering::Relaxed) {
+        format!("{base}🔌")
+    } else {
+        base
+    };
     if PENDING.load(Ordering::Relaxed) {
         format!("{base}❓")
     } else {

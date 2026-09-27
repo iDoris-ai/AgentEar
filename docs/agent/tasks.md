@@ -1157,13 +1157,35 @@
 - **P0 的完成判据只算完成了一半**：embedding.md §5 要求「两边各有同一组 schema fixtures」，
   Agent24 那一侧要按 commit hash 引用本目录，而且 A3 协议要冻结，这两件都还没做。
 
-### T6.1.1 P1 并行骨架  `READY`
-- **目标**：把 LLM transport 抽成可替换的一层，按配置分三档：自带边车 / 独立模式直连 iDoris / 附着模式走 `_a24/model/complete`，
-  满足 ADR-032 的 D3。再做 Agent24 SDK adapter 的骨架（按 A3 wire 规格自己实现，**不依赖** Agent24 的 crate，即 B4），
-  并用 fake host 做契约测试：注册、transcript/proposal 事件、模型成功/失败/取消、speak/stop、断连与重连。
-- **约束**：不开麦克风、**不启动守护进程**（它会截走 jason 的按键）；A3 规格冻结之前只用暂定的 transport。
-- **顺带修一个已知问题**：`--match-command --json` 是冻结的契约入口，但它排在 ASR 依赖检查之后。
-  于是在没有 vendor 的机器上它会直接失败（2026-09-27 实测：`缺少 ASR 依赖文件`）。宿主调用这个入口不该依赖 ASR 是否就绪。
+### T6.1.1 P1 并行骨架  `PR_OPEN`（2026-09-27，v0.24.0，分支 `feat/a24-p1-host-adapter`）
+- **交付**：`src/host.rs`（+ `src/host/tests.rs`）——
+  - LLM transport 三档 `talk_llm_transport`：`sidecar`（默认，原样）/ `idoris`（`CurlWith` 带
+    `X-iDoris-Privacy`，默认 `local_only`；请求体补 `model`）/ `agent24`（`HostLlm` 经 `_a24/model/complete`，
+    非流式；params 只含 messages/complexity/request_id/max_tokens，**不带 privacy/model/tools**；
+    模块侧超时 `talk_timeout_secs` → 取消；`tier=remote` 而 `agent24_model_access=local_only` → `privacy_denied`、不念）。
+  - `HostLink`（出站：emit / model_complete）+ `NoHost` + `FakeHost`；入站命令与传输无关：
+    `handle_rpc_request("_a24/command/invoke", {name, body})` → `{accepted:true}` / `-32601` / `-32602`
+    （name 必须等于 body.type），`CommandCenter` 负责 speak 排队（排在当前轮之后）、stop 与按键打断清队、
+    command_id 去重（记最近 512 个及首次应答）。
+  - 事件：`Emitter`（单调 seq、重试复用 event_id）+ **后台串行投递队列**（不阻塞 worker / 按键）；
+    `emit_params` = `{kind:"agentear.event", payload:<envelope>}`；单个字符串 >8 KiB 截断并标注；
+    lang → BCP-47；content_hash 只收 64 位小写十六进制（音频路径塞不进去）。
+  - 附着状态机 Standalone / Attached / Disconnected，`after_disconnect` 按 B5（`attach_fallback`）；
+    Disconnected 时按键不录、菜单栏 🔌、say 提示（节流）。
+  - 守护进程接线（附着时才生效）：对话模式的 transcript + turn/error 事件；指令轮次**只提出不执行**
+    （builtin 本地执行、向外动作交宿主）；本地语音二次确认改发 `confirm_reply`（短按 = confirm）；
+    proposal 的 `commands_path` 去用户名（`tilde_path`）；宿主错误不再念「语音服务没启动」。
+  - 顺带修：`--match-command --json` 等纯文字子命令跳过 ASR 依赖检查（没有 vendor 也能用）。
+  - 可测入口：`--talk-turn <wav> --host fake`、`--run-command <文本> --host fake`；
+    `AGENTEAR_EVENTS_FILE=… cargo test --test contracts -- --ignored recorded_events` 校验实测事件。
+- **对齐的形态**：Agent24 `origin/main@f504ae0` 的 `_a24/model/complete` / ErrorKind 闭集，
+  以及 agent24-13 的 A3 草稿（`Agent24-a3@7fe6de1` `docs/design/A3-ATTACHED-MODULE.md`）：
+  反向命令走同一条 UDS 连接的 `_a24/command/invoke`、emit 同 session 串行、8 KiB、`$/cancelRequest`。
+  **A3 冻结后若有出入，P2 按冻结版改。**
+- **验收**：`cargo test` 413 + 4 + 8 通过、0 失败；调用点变异 14 处全部变红；
+  假宿主命令行实测的事件经 schema 逐条校验通过。
+- **没做**：真实 `A3Host`（UDS 注册 / token / 握手 / 重连 / 入站帧读写）——P2；
+  菜单「恢复独立模式」入口——P2。
 
 ### T6.1.2 P2 单轮端到端  `BLOCKED`（等 Agent24 冻结 A3 附着协议；那边的设计要 jason 排期，**还没开始**）
 - 模块模式下推送最终 transcript（只推对话模式的，B6）；接收 speak/stop，speak 排在当前回答之后（B7）；

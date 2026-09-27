@@ -291,6 +291,46 @@ pub struct Config {
     /// `AGENTEAR_TALK_LLM_MODEL`），Rust 侧不关心对面是 2B 还是 9B。
     #[serde(deserialize_with = "lenient")]
     pub talk_llm_url: Option<String>,
+    /// **独立模式**下对话 LLM 走哪条路（jason 2026-09-26 D3，全部可配置）：
+    ///
+    /// - `sidecar`（默认）= 上面那个本机 OpenAI 兼容边车（`talk_llm_url`）；
+    /// - `idoris` = 直连 iDoris 网关（`idoris_url`），带 `X-iDoris-Privacy` 头；
+    /// - `agent24` = 经 Agent24 宿主的 `_a24/model/complete`（非流式）。
+    ///   没附着到宿主时这一档不可用，这一轮会如实失败，不会偷偷退回边车。
+    ///
+    /// ⚠️ **附着到 Agent24 时不看这一项**：附着模式一律经宿主推理
+    /// （隐私由宿主按 manifest 的 `model_access` 管）。这一项只决定
+    /// 「没附着 / 断开之后」用什么——断连默认行为也据此判断（见 `attach_fallback`）。
+    #[serde(deserialize_with = "lenient")]
+    pub talk_llm_transport: String,
+    /// iDoris 网关地址（`talk_llm_transport = "idoris"` 时用），如 `http://127.0.0.1:8800`。
+    #[serde(deserialize_with = "lenient")]
+    pub idoris_url: Option<String>,
+    /// 请求体里的 `model`（iDoris 是网关，得告诉它要哪个模型）。空 = 不写，由网关按策略选。
+    #[serde(deserialize_with = "lenient")]
+    pub idoris_model: Option<String>,
+    /// 发给 iDoris 的 `X-iDoris-Privacy`：`local_only`（默认）或 `any`。
+    ///
+    /// **`any` 必须显式写**：它允许请求离开这台电脑（交给外部 API），
+    /// 默认值只能是最保守的那一档。取值不认识时按 `local_only` 处理。
+    #[serde(deserialize_with = "lenient")]
+    pub idoris_privacy: String,
+    /// 附着到 Agent24 时，本模块 manifest 声明的 `model_access`：
+    /// `local_only`（默认）或 `remote_allowed`。
+    ///
+    /// AgentEar 这边**不能用它提高隐私档**（那由宿主按已注册的 manifest 定）；
+    /// 它的作用是**自检**：声明 local_only 却收到 `tier: remote` 的回答，
+    /// 视为隐私违例——记 `privacy_denied`、不念出来。
+    #[serde(deserialize_with = "lenient")]
+    pub agent24_model_access: String,
+    /// 与 Agent24 断开后怎么办（B5，jason 2026-09-27 拍板）：
+    ///
+    /// - `auto_local`（默认）= **独立模式的推理是本机的**（本机边车 / mock）→
+    ///   自动回到独立模式继续用；否则（直连 iDoris 等可能出本机的路径）→ 停听并提示。
+    ///   这样既「可插拔」，又不会让隐私边界在用户不知情时悄悄变化。
+    /// - `stop` = 一律停听并提示，要用户自己处理。
+    #[serde(deserialize_with = "lenient")]
+    pub attach_fallback: String,
     /// 通话 TTS 引擎：`http`（默认，指 `services/tts` 的 VoxCPM2 边车）
     /// 或 `say`（零依赖兜底）。
     #[serde(deserialize_with = "lenient")]
@@ -385,6 +425,22 @@ fn lenient_u64<'de, D: Deserializer<'de>>(d: D) -> Result<u64, D::Error> {
 
 fn default_talk_city() -> String {
     "清迈".to_string()
+}
+
+fn default_talk_llm_transport() -> String {
+    "sidecar".into()
+}
+
+fn default_idoris_privacy() -> String {
+    "local_only".into()
+}
+
+fn default_agent24_model_access() -> String {
+    "local_only".into()
+}
+
+fn default_attach_fallback() -> String {
+    "auto_local".into()
 }
 
 fn default_talk_llm_engine() -> String {
@@ -527,6 +583,12 @@ impl Default for Config {
             talk_lang: TalkLang::default(),
             talk_llm_engine: default_talk_llm_engine(),
             talk_llm_url: None,
+            talk_llm_transport: default_talk_llm_transport(),
+            idoris_url: None,
+            idoris_model: None,
+            idoris_privacy: default_idoris_privacy(),
+            agent24_model_access: default_agent24_model_access(),
+            attach_fallback: default_attach_fallback(),
             talk_tts_engine: default_talk_tts_engine(),
             commands_enabled: default_commands_enabled(),
             command_confirm_secs: default_command_confirm_secs(),

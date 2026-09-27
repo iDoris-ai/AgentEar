@@ -14,6 +14,7 @@ mod commands;
 mod correct;
 mod cue;
 mod deliver;
+mod host;
 mod hotkey;
 mod i18n;
 mod index;
@@ -210,9 +211,17 @@ fn main() -> Result<()> {
     // speech_swift 甚至根本不碰 vendor——不跑 preflight 的话，
     // `speech` 没装也能把守护进程起起来，直到第一次录完音才失败，
     // 而那时候用户已经对着麦克风说完话了。
-    asr.preflight(cfg.asr_lang)
-        .with_context(|| format!("ASR 后端 {} 依赖检查失败", asr.name()))?;
-    log::debug!("ASR 后端 = {}，依赖检查通过", asr.name());
+    //
+    // ⚠️ **只处理文字、不碰音频的子命令跳过这一步**（T6.1.1）：`--match-command --json`
+    // 是给宿主（Agent24）的冻结契约入口，宿主调它不该取决于 ASR 装没装好——
+    // 早先它排在这里之后，没有 vendor 的机器上直接报「缺少 ASR 依赖文件」退出。
+    if needs_asr_preflight(&args) {
+        asr.preflight(cfg.asr_lang)
+            .with_context(|| format!("ASR 后端 {} 依赖检查失败", asr.name()))?;
+        log::debug!("ASR 后端 = {}，依赖检查通过", asr.name());
+    } else {
+        log::debug!("这个子命令不需要 ASR，跳过依赖检查");
+    }
 
     // 离线转写一个已有的 wav，不占麦克风，用于验证 ASR 链路。
     //
@@ -527,6 +536,18 @@ fn main() -> Result<()> {
             Some(v) => talk::TalkLang::parse(v)?,
             None => cfg.talk_lang,
         };
+        // `--host fake`：附着到进程内的假宿主跑这一轮——推理经「宿主」、
+        // 事件报给「宿主」，跑完把宿主收到的事件逐行打出来。
+        // 这是 P2 用真实宿主跑 `--talk-turn --host a3` 之前的可测入口。
+        let fake_host = match flag_value(&args, "--host") {
+            None => None,
+            Some("fake") => {
+                let fake = std::sync::Arc::new(host::FakeHost::new());
+                host::attach(fake.clone());
+                Some(fake)
+            }
+            Some(other) => anyhow::bail!("--host 只认 fake（真实宿主 a3 在 P2 接入），收到 {other}"),
+        };
         // 会话状态机要么已经开着，要么按这次的语言现开一个。
         // 命令行要能独立跑完整一轮，所以不能依赖 `talk_enabled`——
         // 那个开关管的是**守护进程**要不要在录音后自动接话。
@@ -564,10 +585,20 @@ fn main() -> Result<()> {
             with_session(|s| s.finish_listening());
             with_session(|s| s.turn_ready("", None));
             println!("（这段音频没有语音，轮次结束）");
+            if let Some(fake) = &fake_host {
+                print_fake_host_events(fake);
+            }
             return Ok(());
         }
         // ②③④ 与守护进程一模一样：会话推进 → LLM → TTS → 播放
-        answer_out_loud(&cfg, &heard, lang);
+        let meta = TurnMeta {
+            content_hash: None,
+            asr_lang: transcript.lang.clone(),
+        };
+        answer_out_loud(&cfg, &heard, lang, Some(&meta));
+        if let Some(fake) = &fake_host {
+            print_fake_host_events(fake);
+        }
         return Ok(());
     }
 
@@ -775,15 +806,33 @@ fn main() -> Result<()> {
         // CLI 路径上还没有 store（守护进程那条在 636 行才建），这里自己开一个：
         // 只用来读指令表，不写任何东西。
         let store = store::Store::open(&data_root)?;
+        // `--host fake`：附着到进程内假宿主——验「附着时只提出、确认归宿主」这条规则。
+        // 跑完把宿主收到的事件打出来。
+        let fake_host = match flag_value(&args, "--host") {
+            None => None,
+            Some("fake") => {
+                let fake = std::sync::Arc::new(host::FakeHost::new());
+                host::attach(fake.clone());
+                Some(fake)
+            }
+            Some(other) => anyhow::bail!("--host 只认 fake（真实宿主 a3 在 P2 接入），收到 {other}"),
+        };
+        let done = |fake: &Option<std::sync::Arc<host::FakeHost>>| {
+            if let Some(f) = fake {
+                print_fake_host_events(f);
+            }
+        };
         println!("① 用户说：{text}");
         let first = run_command_turn(&store, &cfg, &text, &hash);
         match first {
             CommandTurn::NotMine => {
                 println!("   → 没命中指令表（正常路径会走对话）");
+                done(&fake_host);
                 return Ok(());
             }
             CommandTurn::Handled => {
-                println!("   → 已执行（这个动作不需要二次确认）");
+                println!("   → 已处理（这个动作不需要二次确认）");
+                done(&fake_host);
                 return Ok(());
             }
             CommandTurn::Asked => println!("   → 等确认，**什么都没执行**"),
@@ -793,6 +842,7 @@ fn main() -> Result<()> {
             println!("\n（要接着测确认，加 --reply \"确认\" / --reply \"取消\"）");
             // 进程要退出了，把待确认丢掉，别留下一个「挂着」的假状态
             drop_pending("命令行干跑结束");
+            done(&fake_host);
             return Ok(());
         };
         println!("\n② 用户回答：{reply}");
@@ -805,6 +855,7 @@ fn main() -> Result<()> {
             CommandTurn::NotMine => println!("   → 待确认已作废，这一轮按普通输入处理"),
         }
         drop_pending("命令行干跑结束");
+        done(&fake_host);
         return Ok(());
     }
 
@@ -1132,6 +1183,9 @@ fn worker(
                     if talk::stop_playback() {
                         log::info!("对话被打断，开始听下一句");
                     }
+                    // 宿主排队的播报也一并作废（B7：按键打断清空队列）。
+                    // 独立模式下队列恒空，这一步是空操作。
+                    host::on_barge_in();
                     // 还在等边车的上一轮回答靠这个序号知道「用户已经开口了」，
                     // 从而作废自己，不在用户说话时开始播（见 talk::await_sidecars_for_turn）。
                     talk::note_recording_started();
@@ -1151,6 +1205,13 @@ fn worker(
                     // `begin_turn` 会落在一个还不存在的会话上。
                     if config::get().talk_mode == config::TalkMode::Conversation {
                         ensure_session_listening(config::get().talk_lang);
+                    }
+                    // 与 Agent24 断开且没回独立模式（B5）：**停听**。
+                    // 播放照样已经掐掉（上面），只是不开麦克风，并提示一句。
+                    // 独立版永远在 Standalone，这个分支走不到。
+                    if !host::listening_allowed(host::state()) {
+                        host::notice_disconnected(config::get().talk_lang);
+                        continue;
                     }
                     state = match begin(&store) {
                         Ok(s) => {
@@ -1246,6 +1307,10 @@ fn finish(state: State, store: &store::Store, asr: &dyn engine::AsrEngine) -> Re
         //   · 按键后说话 → 有转写 → 交给 `classify_confirmation` 判词
         // 这也正是原来「录音过短（<0.3s）丢弃」那条路的复用——
         // 那个长度里本来就不可能有话。
+        if attached_keypress_confirm() {
+            tray::set(tray::Status::Idle);
+            return Ok(State::Idle);
+        }
         if has_pending() {
             let cfg = config::get();
             if let Some(pending) = take_pending() {
@@ -1480,9 +1545,13 @@ fn finish(state: State, store: &store::Store, asr: &dyn engine::AsrEngine) -> Re
                 let text_owned = text.clone();
                 let talk_lang = cfg.talk_lang;
                 let seq = talk::recording_seq();
+                let meta = TurnMeta {
+                    content_hash: Some(committed.content_hash.clone()),
+                    asr_lang: t.lang.clone(),
+                };
                 std::thread::spawn(move || {
                     if talk::await_sidecars_for_turn(seq) {
-                        answer_out_loud(&cfg_owned, &text_owned, talk_lang);
+                        answer_out_loud(&cfg_owned, &text_owned, talk_lang, Some(&meta));
                     }
                 });
             }
@@ -1524,6 +1593,10 @@ fn run_command_turn(
     text: &str,
     content_hash: &str,
 ) -> CommandTurn {
+    // 附着到 Agent24：执行与确认都归宿主（ADR-0008、B6/B8），走另一套规则。
+    if host::attached() {
+        return run_command_turn_attached(store, cfg, text, content_hash);
+    }
     // ① 有待确认的动作吗？这一轮可能是在回答它
     if has_pending() {
         match commands::classify_confirmation(text) {
@@ -1567,6 +1640,94 @@ fn run_command_turn(
                 // 失败**不挡上屏**：文字已经在剪贴板里了
                 Err(e) => log::error!("指令执行失败（不影响上屏）: {e:#}"),
             }
+            CommandTurn::Handled
+        }
+    }
+}
+
+/// 附着模式：确认归宿主（B8）。短按录音键 = 对那条待确认的 proposal 答「confirm」，
+/// **AgentEar 自己不执行**——执行方只有宿主。返回是否消费了这次短按。
+fn attached_keypress_confirm() -> bool {
+    if !host::attached() {
+        return false;
+    }
+    let Some(proposal) = host::take_awaiting() else {
+        return false;
+    };
+    log::info!("短按录音键 → 向宿主确认 proposal {proposal}");
+    println!("✔ 已确认（按键，交给 Agent24 执行）");
+    host::emit("confirm_reply", host::confirm_reply_payload(&proposal, true, None));
+    true
+}
+
+/// 附着模式下的指令轮次（ADR-0008：**AgentEar 只提出，执行归宿主**）。
+///
+/// - 有等宿主答复的 proposal：这一轮先判是不是在答复它——
+///   确认 / 取消 → 发 `confirm_reply`，这一轮到此为止；
+///   **别的话 → 发 `reject`**（作废，不偷偷执行），然后照常当新一轮处理；
+/// - 命中指令：**无论哪种模式都发 `proposal`**（B6：输入法模式不发转写，但提案照发）；
+///   - `builtin`（切语系 / 语气 / 模式、记一条）是本机可逆动作，ADR-0008 表里归
+///     AgentEar，**照样在本地执行**——提案对宿主只是告知；
+///   - 向外动作（`open_url` / `http_post`）**本地一律不执行**；要确认的记下 event_id
+///     等宿主那边的答复。
+fn run_command_turn_attached(
+    store: &store::Store,
+    cfg: &config::Config,
+    text: &str,
+    content_hash: &str,
+) -> CommandTurn {
+    if let Some(proposal) = host::take_awaiting() {
+        let judged = commands::classify_confirmation(text);
+        let confirm = host::confirm_reply_for(Some(text));
+        host::emit("confirm_reply", host::confirm_reply_payload(&proposal, confirm, Some(text)));
+        match judged {
+            commands::Reply::Confirm => {
+                println!("✔ 已确认，交给 Agent24 执行");
+                return CommandTurn::Handled;
+            }
+            commands::Reply::Cancel => {
+                println!("⛔ 已取消（已告诉 Agent24）");
+                return CommandTurn::Handled;
+            }
+            commands::Reply::Other => {
+                println!("（刚才那条待确认已作废，已告诉 Agent24）");
+            }
+        }
+    }
+    let all = match commands::load(store.root()) {
+        Ok(list) => list,
+        Err(e) => {
+            log::error!("读指令表失败，这一轮按普通对话处理: {e:#}");
+            return CommandTurn::NotMine;
+        }
+    };
+    let Some(hit) = commands::match_text(&all, text) else {
+        return CommandTurn::NotMine;
+    };
+    let mut proposal = proposal_json(&all, text, store.root());
+    // 给宿主看的路径不带用户名（A3 设计）。
+    if let Some(p) = proposal["commands_path"].as_str() {
+        proposal["commands_path"] = serde_json::Value::String(host::tilde_path(p));
+    }
+    let needs_confirm = proposal["needs_confirm"].as_bool().unwrap_or(false);
+    let event_id = host::emit("proposal", proposal);
+    match (&hit.action, event_id) {
+        (commands::Action::Builtin { .. }, _) => {
+            let rest = hit.rest.clone();
+            match execute_command(store, cfg, &hit, &rest, content_hash) {
+                Ok(msg) => println!("⚡ {msg}"),
+                Err(e) => log::error!("本地指令执行失败: {e:#}"),
+            }
+            CommandTurn::Handled
+        }
+        (_, Some(id)) if needs_confirm => {
+            let ttl = Duration::from_secs(cfg.command_confirm_secs.max(5));
+            host::await_confirm(id, ttl);
+            println!("❓ 已交给 Agent24 确认（{}）", hit.phrase);
+            CommandTurn::Asked
+        }
+        _ => {
+            println!("→ 已交给 Agent24（{}）", hit.phrase);
             CommandTurn::Handled
         }
     }
@@ -1935,7 +2096,63 @@ fn ensure_session_listening(lang: talk::TalkLang) {
 /// 任何一步失败都只记日志：文字已经上屏了，用户这一轮不算白说。
 /// 但**不许静默**——边车没起时日志里必须能看出是「谁没起」，
 /// 否则用户只会觉得「按了没反应」。
-fn answer_out_loud(cfg: &config::Config, heard: &str, lang: talk::TalkLang) {
+/// 把假宿主收到的事件与模型请求逐行打出来（JSON Lines），给人看、也给脚本 grep。
+fn print_fake_host_events(fake: &host::FakeHost) {
+    // 事件在后台线程里投递，打印前先等队列清空。
+    if !host::flush(Duration::from_secs(5)) {
+        println!("（还有事件没投递完，下面的列表可能不全）");
+    }
+    println!("\n== 假宿主收到的事件（agentear.event/1）==");
+    for e in fake.events() {
+        println!("{e}");
+    }
+    let reqs = fake.requests.lock().unwrap_or_else(|p| p.into_inner()).clone();
+    println!("== 假宿主收到的模型请求（_a24/model/complete params）==");
+    for r in reqs {
+        println!("{r}");
+    }
+}
+
+/// 这一轮转写的来历：附着时要随 `transcript` 事件一起报给宿主。
+/// **只有文字的元数据**——raw 音频的 sha256 与 ASR 报的语种，没有音频本身。
+#[derive(Clone, Default)]
+struct TurnMeta {
+    content_hash: Option<String>,
+    asr_lang: Option<String>,
+}
+
+/// 附着时这一轮失败要报的错误码：宿主来的错误原样用它的 kind，
+/// 其余按「是不是 TTS 的锅」分。独立模式下不会用到（不发事件）。
+fn turn_error(e: &anyhow::Error) -> host::HostError {
+    if let Some(h) = e.chain().find_map(|c| c.downcast_ref::<host::HostError>()) {
+        return h.clone();
+    }
+    let msg = format!("{e:#}");
+    let code = if msg.contains("TTS") { "tts_unavailable" } else { "internal" };
+    host::HostError::new(code, msg, true)
+}
+
+fn answer_out_loud(cfg: &config::Config, heard: &str, lang: talk::TalkLang, meta: Option<&TurnMeta>) {
+    // 附着时：这一轮开始了（宿主排队的播报等它说完再放，B7），并把转写报给宿主。
+    // **只有对话模式会走到这里**——输入法模式不发转写（B6）。独立模式下这些都是空操作。
+    host::set_turn_active(true);
+    let turn_no = with_session(|s| s.turns().len() as u64 + 1);
+    host::emit(
+        "transcript",
+        host::transcript_payload(
+            heard,
+            meta.and_then(|m| m.asr_lang.as_deref())
+                .map(|l| host::bcp47(Some(l)))
+                .unwrap_or(host::talk_lang_bcp47(lang)),
+            meta.and_then(|m| m.content_hash.as_deref()),
+        ),
+    );
+    host::emit("turn", host::turn_payload("thinking", turn_no));
+    answer_out_loud_inner(cfg, heard, lang, turn_no);
+    host::set_turn_active(false);
+}
+
+fn answer_out_loud_inner(cfg: &config::Config, heard: &str, lang: talk::TalkLang, turn_no: Option<u64>) {
     use crate::talk;
     // 会话可能还不存在：启动时是输入法模式、用户中途从菜单切到对话模式
     // 就是这种情况。**这里懒创建**，而不是要求菜单切换时必须成功创建——
@@ -1968,14 +2185,24 @@ fn answer_out_loud(cfg: &config::Config, heard: &str, lang: talk::TalkLang) {
         if let Some(Err(e)) = with_session(|s| s.speaking_started(heard)) {
             log::warn!("通话会话记录失败: {e}");
         }
+        host::emit("turn", host::turn_payload("speaking", turn_no));
     });
     let (reply, played) = match piped {
         Ok(v) => v,
         Err(e) => {
             log::error!("通话没拿到回答（LLM 或 TTS 边车起了吗？）: {e:#}");
             println!("（这一轮没说出来，详见日志）");
+            let err = turn_error(&e);
+            host::emit("error", host::error_payload(&err, None));
+            host::emit("turn", host::turn_payload("failed", turn_no));
             // 原因是边车不可用时，用 `say` 念一句（带节流），别让用户以为「按了没反应」。
-            talk::notice_if_sidecars_down(cfg, lang);
+            // **宿主那边的错误（超时 / 无本地模型 / 隐私拒绝……）不念这一句**：
+            // 那不是本机边车的问题，「语音服务没启动」会把用户引到错的地方；
+            // 宿主已经收到 error 事件，由它展示。
+            let from_host = e.chain().any(|c| c.downcast_ref::<host::HostError>().is_some());
+            if !from_host {
+                talk::notice_if_sidecars_down(cfg, lang);
+            }
             // ⚠️ **转写照样记一轮**：用户说了什么是有价值的记录，
             // 不能因为边车挂了就当这一轮不存在（session.rs 的用例钉住这条）。
             // 记完再把相标成 Failed——通话本身还活着，下一轮照常能开。
@@ -1998,6 +2225,7 @@ fn answer_out_loud(cfg: &config::Config, heard: &str, lang: talk::TalkLang) {
     };
     println!("🔊 {reply}");
     talk::note_turn_ok();
+    host::emit("turn", host::turn_payload("idle", turn_no));
     // 全文补进这一轮（进 Speaking 相时还没有它）。
     if let Some(Err(e)) = with_session(|s| s.note_reply(reply.clone())) {
         log::warn!("补记回答失败: {e}");
@@ -2430,6 +2658,26 @@ pub(crate) fn data_root() -> Result<PathBuf> {
 /// 查找顺序：环境变量 → .app bundle 内的 Resources → 源码树。
 /// 打包后可执行文件在 `AgentEar.app/Contents/MacOS/`，
 /// vendor 在 `AgentEar.app/Contents/Resources/vendor`。
+/// 只处理文字、不碰音频的子命令：它们不需要 ASR，也就不该被 ASR 依赖检查挡住。
+const TEXT_ONLY_SUBCOMMANDS: &[&str] = &[
+    "--match-command",
+    "--commands",
+    "--run-command",
+    "--say",
+    "--ask",
+    "--cue",
+    "--cue-wav",
+];
+
+/// 这次运行要不要先做 ASR 依赖检查。守护进程（无子命令）和一切会转写的子命令都要；
+/// 只有纯文字的子命令不要。**同时带了会转写的子命令时仍然要**（保守方向）。
+fn needs_asr_preflight(args: &[String]) -> bool {
+    const NEEDS_AUDIO: &[&str] = &["--transcribe", "--talk-turn", "--add-command-wav", "--asr-bench"];
+    let text_only = args.iter().any(|a| TEXT_ONLY_SUBCOMMANDS.contains(&a.as_str()));
+    let audio = args.iter().any(|a| NEEDS_AUDIO.contains(&a.as_str()));
+    !text_only || audio
+}
+
 fn vendor_root() -> Result<PathBuf> {
     if let Ok(p) = std::env::var("AGENTEAR_VENDOR") {
         return Ok(PathBuf::from(p));
@@ -2625,5 +2873,163 @@ mod contract_tests {
             assert_eq!(v["action"]["type"].as_str(), kind, "「{text}」命中分支不对：{v:#}");
             assert_eq!(v["needs_confirm"], confirm, "「{text}」needs_confirm 不对：{v:#}");
         }
+    }
+}
+
+/// 守护进程里「附着到宿主」那几处接线（指令轮次、确认答复、路径去用户名）。
+/// 默认配置是输入法模式：确认问句不会念出来，测试不出声；不起守护进程。
+#[cfg(test)]
+mod host_wiring_tests {
+    use super::*;
+    use std::sync::Arc;
+
+    const HASH: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+    fn setup() -> (std::sync::MutexGuard<'static, ()>, store::Store, config::Config) {
+        let g = host::test_guard();
+        let dir = testutil::tmpdir("agentear-host-wiring");
+        let store = store::Store::open(&dir).unwrap();
+        drop_pending("测试开始");
+        (g, store, config::Config::default())
+    }
+
+    fn events_of(fake: &host::FakeHost, ty: &str) -> Vec<serde_json::Value> {
+        assert!(host::flush(Duration::from_secs(2)));
+        fake.events_of(ty)
+    }
+
+    #[test]
+    fn attached_outbound_command_is_proposed_not_run_or_stashed() {
+        let (_g, store, cfg) = setup();
+        let fake = Arc::new(host::FakeHost::new());
+        host::attach(fake.clone());
+        let turn = run_command_turn(&store, &cfg, "发邮件给 a@b.com 讨论 AEC", HASH);
+        assert!(matches!(turn, CommandTurn::Asked));
+        assert!(!has_pending(), "附着时不许走本地待确认（确认归宿主）");
+        assert!(host::has_awaiting());
+        let props = events_of(&fake, "proposal");
+        assert_eq!(props.len(), 1);
+        let p = &props[0]["payload"];
+        assert_eq!(p["matched"], "发邮件给");
+        assert_eq!(p["needs_confirm"], true);
+        assert!(!p["commands_path"].as_str().unwrap().contains('/'), "临时目录不在家目录下：只给文件名");
+
+        // 用户说「确认」→ confirm_reply 指向同一条 proposal，本地仍不执行
+        let turn = run_command_turn(&store, &cfg, "确认", HASH);
+        assert!(matches!(turn, CommandTurn::Handled));
+        let replies = events_of(&fake, "confirm_reply");
+        assert_eq!(replies.len(), 1);
+        assert_eq!(replies[0]["payload"]["reply"], "confirm");
+        assert_eq!(replies[0]["payload"]["proposal_event_id"], props[0]["event_id"]);
+        assert!(!host::has_awaiting());
+        assert!(!has_pending());
+        host::detach(&cfg);
+    }
+
+    #[test]
+    fn attached_other_words_reject_and_fall_through() {
+        let (_g, store, cfg) = setup();
+        let fake = Arc::new(host::FakeHost::new());
+        host::attach(fake.clone());
+        run_command_turn(&store, &cfg, "发邮件给 a@b.com 讨论 AEC", HASH);
+        let turn = run_command_turn(&store, &cfg, "今天天气怎么样", HASH);
+        assert!(matches!(turn, CommandTurn::NotMine), "别的话：作废待确认，照常当新一轮");
+        let replies = events_of(&fake, "confirm_reply");
+        assert_eq!(replies[0]["payload"]["reply"], "reject");
+        assert_eq!(replies[0]["payload"]["text"], "今天天气怎么样");
+        // 否定
+        run_command_turn(&store, &cfg, "发邮件给 a@b.com 讨论 AEC", HASH);
+        assert!(matches!(run_command_turn(&store, &cfg, "不要发", HASH), CommandTurn::Handled));
+        assert_eq!(events_of(&fake, "confirm_reply")[1]["payload"]["reply"], "reject");
+        host::detach(&cfg);
+    }
+
+    #[test]
+    fn attached_keypress_confirms_the_awaiting_proposal() {
+        let (_g, store, cfg) = setup();
+        assert!(!attached_keypress_confirm(), "独立模式：短按不归宿主");
+        let fake = Arc::new(host::FakeHost::new());
+        host::attach(fake.clone());
+        assert!(!attached_keypress_confirm(), "没有待确认时不消费短按");
+        run_command_turn(&store, &cfg, "发邮件给 a@b.com 讨论 AEC", HASH);
+        assert!(attached_keypress_confirm());
+        let r = &events_of(&fake, "confirm_reply")[0]["payload"];
+        assert_eq!(r["reply"], "confirm");
+        assert!(r.get("text").is_none(), "按键确认没有原话");
+        assert!(!attached_keypress_confirm(), "只确认一次");
+        // 连接已经掉了、还没走 detach：短按**不能**被当成宿主确认悄悄吞掉
+        // （宿主收不到，用户以为确认了）。交回本地路径处理。
+        run_command_turn(&store, &cfg, "发邮件给 a@b.com 讨论 AEC", HASH);
+        fake.set_attached(false);
+        assert!(!attached_keypress_confirm(), "连接断了：不消费这次短按");
+        host::detach(&cfg);
+    }
+
+    /// 独立版对照：同一句话走原来的本地待确认，宿主一个事件都收不到。
+    #[test]
+    fn standalone_keeps_the_local_confirmation() {
+        let (_g, store, cfg) = setup();
+        let turn = run_command_turn(&store, &cfg, "发邮件给 a@b.com 讨论 AEC", HASH);
+        assert!(matches!(turn, CommandTurn::Asked));
+        assert!(has_pending(), "独立版行为不变：本地待确认");
+        assert!(!host::has_awaiting());
+        drop_pending("测试结束");
+    }
+
+    /// 附着时一轮对话报给宿主的事件：转写 → 想 → 失败（宿主超时），全部合法。
+    /// 宿主错误不走本机的 say 提示，所以这条测试不出声。
+    #[test]
+    fn a_failed_attached_turn_reports_transcript_error_and_failed() {
+        let (_g, _store, mut cfg) = setup();
+        cfg.talk_mode = config::TalkMode::Conversation;
+        let fake = Arc::new(host::FakeHost::new());
+        fake.push_reply(Err(host::HostError::new("timeout", "宿主太慢", true)));
+        host::attach(fake.clone());
+        let meta = TurnMeta {
+            content_hash: Some(HASH.into()),
+            asr_lang: Some("zh".into()),
+        };
+        answer_out_loud(&cfg, "今天天气怎么样？", talk::TalkLang::Zh, Some(&meta));
+        assert!(host::flush(Duration::from_secs(2)));
+        let evs = fake.events();
+        let kinds: Vec<String> = evs
+            .iter()
+            .map(|e| {
+                let p = &e["payload"];
+                match e["type"].as_str().unwrap() {
+                    "turn" => format!("turn:{}", p["phase"].as_str().unwrap()),
+                    "error" => format!("error:{}", p["code"].as_str().unwrap()),
+                    t => t.to_string(),
+                }
+            })
+            .collect();
+        assert_eq!(kinds, ["transcript", "turn:thinking", "error:timeout", "turn:failed"]);
+        let t = &evs[0]["payload"];
+        assert_eq!(t["lang"], "zh-CN");
+        assert_eq!(t["content_hash"], HASH);
+        assert_eq!(fake.requests.lock().unwrap().len(), 1, "推理经宿主");
+        host::detach(&cfg);
+    }
+
+    #[test]
+    fn text_only_subcommands_skip_the_asr_check() {
+        let a = |v: &[&str]| std::iter::once("agentear").chain(v.iter().copied()).map(String::from).collect::<Vec<_>>();
+        assert!(needs_asr_preflight(&a(&[])), "守护进程必须先检查");
+        assert!(needs_asr_preflight(&a(&["--transcribe", "x.wav"])));
+        assert!(needs_asr_preflight(&a(&["--talk-turn", "x.wav", "--host", "fake"])));
+        assert!(!needs_asr_preflight(&a(&["--match-command", "搜索 x", "--json"])), "宿主契约入口不依赖 ASR");
+        assert!(!needs_asr_preflight(&a(&["--run-command", "x", "--host", "fake"])));
+        assert!(!needs_asr_preflight(&a(&["--say", "你好"])));
+        assert!(needs_asr_preflight(&a(&["--commands", "--add-command-wav", "x.wav"])), "混了会转写的：保守，照样检查");
+    }
+
+    #[test]
+    fn turn_errors_map_to_the_closed_set() {
+        let host_err = anyhow::Error::new(host::HostError::new("timeout", "慢", true));
+        assert_eq!(turn_error(&host_err).kind, "timeout");
+        let wrapped = anyhow::Error::new(host::HostError::new("privacy_denied", "x", false)).context("通话失败");
+        assert_eq!(turn_error(&wrapped).kind, "privacy_denied", "被 context 包一层也认得出");
+        assert_eq!(turn_error(&anyhow::anyhow!("TTS 边车请求失败")).kind, "tts_unavailable");
+        assert_eq!(turn_error(&anyhow::anyhow!("别的")).kind, "internal");
     }
 }

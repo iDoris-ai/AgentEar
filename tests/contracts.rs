@@ -102,3 +102,30 @@ fn sequence_events_are_each_valid() {
         }
     }
 }
+
+/// 手动校验：把一批实测事件（每行一个 `agentear.event/1` JSON，非 JSON 行忽略）
+/// 用 schema 过一遍。给 `--talk-turn --host fake` / `--run-command --host fake`
+/// 的输出用，P2 接真实宿主后同样可用：
+///
+///   AGENTEAR_EVENTS_FILE=/path/events.txt cargo test --test contracts -- --ignored recorded_events
+#[test]
+#[ignore = "需要 AGENTEAR_EVENTS_FILE 指向一份实测事件"]
+fn recorded_events_match_schema() {
+    let path = std::env::var("AGENTEAR_EVENTS_FILE").expect("设 AGENTEAR_EVENTS_FILE");
+    let (schemas, idx) = compile("agentear.event.v1.schema.json");
+    let mut n = 0;
+    for line in std::fs::read_to_string(&path).unwrap().lines() {
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(line.trim()) else {
+            continue;
+        };
+        if v["schema"] != "agentear.event/1" {
+            continue;
+        }
+        if let Err(e) = schemas.validate(&v, idx) {
+            panic!("实测事件不符合 schema：{line}\n{e:#}");
+        }
+        n += 1;
+    }
+    assert!(n > 0, "{path} 里一个事件都没有——空文件会让校验假绿");
+    println!("{n} 个实测事件全部符合 agentear.event/1");
+}

@@ -182,6 +182,10 @@ pub struct OpenAiCompat {
     url: String,
     transport: Arc<dyn Transport>,
     timeout_secs: u64,
+    /// 请求体里的 `model` 字段。**本机边车不需要**（`mlx_lm.server` 只跑一个模型），
+    /// 所以默认 `None` = 不写这个键——独立版默认那条路的请求体一个字节都不变。
+    /// 直连 iDoris 时要写：它是网关，得知道要哪个模型。
+    model: Option<String>,
 }
 
 impl OpenAiCompat {
@@ -190,7 +194,32 @@ impl OpenAiCompat {
             url: url.into(),
             transport,
             timeout_secs,
+            model: None,
         }
+    }
+
+    pub fn with_model(mut self, model: Option<String>) -> Self {
+        self.model = model.filter(|m| !m.trim().is_empty());
+        self
+    }
+
+    /// 请求体。`stream` 为真时多一个 `"stream": true`；有 `model` 时多一个 `"model"`。
+    pub(crate) fn body(&self, system: &str, user: &str, stream: bool) -> String {
+        let mut v = serde_json::json!({
+            "messages": [
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ],
+            "max_tokens": 160,
+            "temperature": 0.3,
+        });
+        if stream {
+            v["stream"] = serde_json::Value::Bool(true);
+        }
+        if let Some(m) = &self.model {
+            v["model"] = serde_json::Value::String(m.clone());
+        }
+        v.to_string()
     }
 }
 
@@ -200,15 +229,7 @@ impl LlmEngine for OpenAiCompat {
     }
 
     fn reply(&self, system: &str, user: &str, _lang: TalkLang) -> Result<String> {
-        let body = serde_json::json!({
-            "messages": [
-                {"role": "system", "content": system},
-                {"role": "user", "content": user},
-            ],
-            "max_tokens": 160,
-            "temperature": 0.3,
-        })
-        .to_string();
+        let body = self.body(system, user, false);
         let raw = self
             .transport
             .post_json(&self.url, &body, self.timeout_secs)
@@ -235,16 +256,7 @@ impl LlmEngine for OpenAiCompat {
         lang: TalkLang,
         on_delta: &mut (dyn FnMut(&str) + Send),
     ) -> Result<String> {
-        let body = serde_json::json!({
-            "messages": [
-                {"role": "system", "content": system},
-                {"role": "user", "content": user},
-            ],
-            "max_tokens": 160,
-            "temperature": 0.3,
-            "stream": true,
-        })
-        .to_string();
+        let body = self.body(system, user, true);
 
         let mut acc = String::new();
         // 回调里要区分「正文」和「思考」：先在本地按未闭合思考段截断，
@@ -775,8 +787,17 @@ impl Engines {
     /// （`talk_llm_engine: "mock"`）——否则用户会以为「模型在跑」，
     /// 实际听到的是写死的句子。
     pub fn from_config(cfg: &crate::config::Config) -> Self {
-        let llm: Arc<dyn LlmEngine> = match cfg.talk_llm_engine.as_str() {
-            "mock" => Arc::new(WeatherMock::new(cfg.weather_fact())),
+        // 附着到宿主、或配置成直连 iDoris / 经宿主时，由 `host` 决定引擎；
+        // 它返回 None = 独立版默认那条路（本机边车），**下面那段原样不动**。
+        // ⚠️ 附着时连 mock 也让位给宿主：「附着模式一律经宿主推理」没有例外。
+        let hosted = if cfg.talk_llm_engine == "mock" && !crate::host::attached() {
+            None
+        } else {
+            crate::host::llm_engine(cfg)
+        };
+        let llm: Arc<dyn LlmEngine> = match (cfg.talk_llm_engine.as_str(), hosted) {
+            (_, Some(engine)) => engine,
+            ("mock", _) => Arc::new(WeatherMock::new(cfg.weather_fact())),
             _ => Arc::new(OpenAiCompat::new(
                 effective_url(
                     "LLM",
