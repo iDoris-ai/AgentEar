@@ -1112,3 +1112,40 @@ fn turn_event_with_real_timings_matches_schema() {
     assert!(p.get("timings").is_none());
     assert_event_valid(&envelope("ses_x", 2, "evt_y", "turn", p));
 }
+
+/// 全部 event fixtures（不只 timings 那几个）：`valid/*` 必须过 schema、`invalid/*` 必须被拒，
+/// `sequences/*` 里每条事件本身都合法。
+///
+/// `tests/contracts.rs::event_fixtures_match_schema` 已经做了同样的遍历——但它是**集成测试**，
+/// `cargo test --bin agentear` 跑不到它（#102 评审就是这样得出「删掉约束仍全绿」的）。
+/// 放一份在单元测试里，不管用哪种方式跑测试，fixtures 都有人守着。
+#[test]
+fn event_fixtures_agree_with_the_schema() {
+    let dir = contracts().join("fixtures/event");
+    let (schemas, idx) = compile("agentear.event.v1.schema.json");
+    let mut seen = [0usize; 2];
+    for (i, sub) in ["valid", "invalid"].iter().enumerate() {
+        for e in std::fs::read_dir(dir.join(sub)).unwrap() {
+            let p = e.unwrap().path();
+            if p.extension().is_none_or(|x| x != "json") {
+                continue;
+            }
+            let ok = schemas.validate(&read_json(&p), idx).is_ok();
+            assert_eq!(ok, *sub == "valid", "event fixture 与 schema 不一致：{}", p.display());
+            seen[i] += 1;
+        }
+    }
+    assert!(seen[0] > 0 && seen[1] > 0, "fixtures 目录是空的——空目录会让测试假绿：{seen:?}");
+    let mut seq_events = 0;
+    for e in std::fs::read_dir(contracts().join("fixtures/sequences")).unwrap() {
+        let p = e.unwrap().path();
+        if p.extension().is_none_or(|x| x != "json") {
+            continue;
+        }
+        for ev in read_json(&p)["events"].as_array().unwrap() {
+            assert!(schemas.validate(ev, idx).is_ok(), "sequences 里有非法事件：{}", p.display());
+            seq_events += 1;
+        }
+    }
+    assert!(seq_events > 0, "sequences 里一条事件都没有");
+}
