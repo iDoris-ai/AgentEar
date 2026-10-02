@@ -802,6 +802,17 @@ static SERVER: Mutex<Option<Server>> = Mutex::new(None);
 /// 同一个 pid 的无锁副本，给信号处理函数用（async-signal-safe：只能 `kill(2)`）。
 static SERVER_PID: AtomicI32 = AtomicI32::new(0);
 static REAPER_STARTED: AtomicBool = AtomicBool::new(false);
+/// 内存回收放到后台去「等退出 / 硬杀」的线程。`stop_server` 会 join 它们，
+/// 一次性命令退出前因此仍有「2 s 不退就硬杀」的兜底（PR #104 评审）。
+static TERMINATORS: Mutex<Vec<std::thread::JoinHandle<()>>> = Mutex::new(Vec::new());
+/// 内存回收后要不要马上在后台起一个新的。**只有守护进程打开**（`enable_rewarm`）：
+/// 一次性命令马上就退出了，多起一个约 2 GiB 的服务只会拖慢退出（PR #104 评审）。
+static REWARM: AtomicBool = AtomicBool::new(false);
+
+/// 守护进程启动时调用：内存回收之后在后台预热一个新的常驻服务。
+pub fn enable_rewarm() {
+    REWARM.store(true, Ordering::SeqCst);
+}
 
 /// 常驻服务的就绪等待上限。实测起进程约 2 s；首个请求才加载模型。
 const SERVER_READY_TIMEOUT: Duration = Duration::from_secs(30);
@@ -969,24 +980,28 @@ fn is_our_server_cmdline(cmdline: &str, our_bin: &Path) -> bool {
 }
 
 fn kill_server(s: &mut Server, why: &str) {
-    deregister_server(s, why);
-    terminate_server(s);
+    retire_server(s, why);
+    await_exit(s);
 }
 
-/// 撤登记（`SERVER_PID` + pid 文件）。**必须在持 `SERVER` 锁时、同步做**：
-/// 放到后台线程里的话，新服务可能已经登记过了，这里会把**新服务**的 `SERVER_PID`
-/// 清成 0——之后 Ctrl+C 就收不掉它，留下一个 GB 级的孤儿。
-fn deregister_server(s: &Server, why: &str) {
+/// 撤登记（`SERVER_PID` + pid 文件）**并发出 SIGTERM**。**必须在持 `SERVER` 锁时、同步做**：
+/// - 撤登记放后台线程的话，新服务可能已经登记过了，这里会把**新服务**的 `SERVER_PID`
+///   清成 0——之后 Ctrl+C 就收不掉它。
+/// - SIGTERM 放后台线程的话（PR #104 评审阻塞项）：一次性命令（`--transcribe`）在唯一一次
+///   请求就触发回收、`main` 随即返回，没被 join 的线程若还没被调度到，信号就**发不出去**
+///   （竞态窗口很短，旧代码实测 3 次没触发，但读代码成立）；
+///   而 pid 文件已经删了，下次启动也找不到这个 >4 GiB 的孤儿。`kill(2)` 不阻塞，同步发没有代价。
+fn retire_server(s: &Server, why: &str) {
     log::info!("停掉 Qwen3-ASR 常驻服务（{}，端口 {}）：{why}", s.model.label(), s.port);
     let pid = s.child.id() as i32;
     let _ = SERVER_PID.compare_exchange(pid, 0, Ordering::SeqCst, Ordering::SeqCst);
     remove_own_pid_file(pid);
+    unsafe { libc::kill(pid, libc::SIGTERM) };
 }
 
-/// 发 SIGTERM，等 2 s，不退就硬杀。可以放后台线程（只碰这个 `Child` 自己）。
-fn terminate_server(s: &mut Server) {
-    unsafe { libc::kill(s.child.id() as i32, libc::SIGTERM) };
-    // 给它 2 s 自己退，不退就硬杀——别让一个卡住的进程攥着 2 GB 内存
+/// 已经发过 SIGTERM 之后：等 2 s，不退就硬杀并回收。可以放后台线程（只碰这个 `Child` 自己）。
+fn await_exit(s: &mut Server) {
+    // 给它 2 s 自己退，不退就硬杀——别让一个卡住的进程攥着几个 GB 内存
     let start = Instant::now();
     while start.elapsed() < Duration::from_secs(2) {
         if matches!(s.child.try_wait(), Ok(Some(_))) {
@@ -1002,7 +1017,9 @@ fn terminate_server(s: &mut Server) {
 ///
 /// 已有服务但**模型不同**：先停掉旧的再起新的——两个模型同时在一个进程里
 /// 实测占 3.1 GiB，「换模型」不该让内存叠加。
-fn ensure_server_locked(slot: &mut Option<Server>, m: Qwen3Model) -> Result<u16> {
+/// 返回 `(端口, 服务 pid)`。pid 用来认「回来时还是不是同一个服务」——端口会被系统复用，pid 在
+/// `Child` 被回收前不会。
+fn ensure_server_locked(slot: &mut Option<Server>, m: Qwen3Model) -> Result<(u16, u32)> {
     if let Some(s) = slot.as_mut() {
         let alive = matches!(s.child.try_wait(), Ok(None));
         if alive && s.model == m {
@@ -1010,9 +1027,11 @@ fn ensure_server_locked(slot: &mut Option<Server>, m: Qwen3Model) -> Result<u16>
             // 开始的请求不该在半路被回收。
             s.last_used = Instant::now();
             s.inflight += 1;
-            return Ok(s.port);
+            return Ok((s.port, s.child.id()));
         }
         if alive {
+            // 不看 inflight：用户刚在设置里换了模型，旧模型上还没跑完的那个请求失败后会退回逐次调用
+            //（`SpeechSwiftEngine`），不丢转写；等它跑完再换会让新模型的第一轮白等。
             kill_server(s, "换了模型");
         } else {
             log::warn!("Qwen3-ASR 常驻服务已经退出了，重新拉起");
@@ -1071,9 +1090,10 @@ fn ensure_server_locked(slot: &mut Option<Server>, m: Qwen3Model) -> Result<u16>
         m.label(),
         start.elapsed().as_secs_f64()
     );
+    let pid = child.id();
     *slot = Some(Server { child, port, model: m, last_used: Instant::now(), inflight: 1 });
     start_reaper();
-    Ok(port)
+    Ok((port, pid))
 }
 
 /// 用常驻服务转写。**调用方负责失败时退回逐次调用**（见 `SpeechSwiftEngine`）。
@@ -1095,7 +1115,7 @@ fn transcribe_on_server(
     context: &str,
     rewarm: bool,
 ) -> Result<crate::asr::Transcript> {
-    let port = {
+    let (port, server) = {
         let mut slot = SERVER.lock().unwrap_or_else(|e| e.into_inner());
         ensure_server_locked(&mut slot, m)?
     };
@@ -1118,9 +1138,9 @@ fn transcribe_on_server(
     let out = cmd.output();
     let recycled = {
         let mut slot = SERVER.lock().unwrap_or_else(|e| e.into_inner());
-        // 只认「这次用的那个」：期间换过端口（模型变了、被重启过）就不是它了
+        // 只认「这次用的那个」：期间换过服务（模型变了、被重启过）就不是它了
         let mut last_one = false;
-        if let Some(s) = slot.as_mut().filter(|s| s.port == port) {
+        if let Some(s) = slot.as_mut().filter(|s| s.child.id() == server) {
             s.last_used = Instant::now();
             s.inflight = s.inflight.saturating_sub(1);
             last_one = s.inflight == 0;
@@ -1130,15 +1150,18 @@ fn transcribe_on_server(
         match recycle_reason(footprint, SERVER_FOOTPRINT_BUDGET) {
             Some(why) => {
                 let mut s = slot.take().expect("last_one 已确认是 Some");
-                deregister_server(&s, &why);
-                // 杀进程最多等 2 s，放到后台，别把这一轮的上屏拖慢
-                std::thread::spawn(move || terminate_server(&mut s));
+                retire_server(&s, &why);
+                // 等它退出最多 2 s，放到后台，别把这一轮的上屏拖慢；句柄交给 stop_server 去 join
+                let h = std::thread::spawn(move || await_exit(&mut s));
+                let mut t = TERMINATORS.lock().unwrap_or_else(|e| e.into_inner());
+                t.retain(|h| !h.is_finished());
+                t.push(h);
                 true
             }
             None => false,
         }
     };
-    if recycled && rewarm {
+    if recycled && rewarm && REWARM.load(Ordering::SeqCst) {
         // 下一轮别去付那 2 s 冷启动：后台马上起一个干净的（热态约 2 GiB）
         let cfg = crate::config::get();
         if reap_reason(
@@ -1186,9 +1209,16 @@ pub fn warm_async(m: Qwen3Model) {
 
 /// 停掉常驻服务（关掉常驻开关、换回 SenseVoice、菜单退出时调用）。
 pub fn stop_server(why: &str) {
-    let mut slot = SERVER.lock().unwrap_or_else(|e| e.into_inner());
-    if let Some(mut s) = slot.take() {
-        kill_server(&mut s, why);
+    {
+        let mut slot = SERVER.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(mut s) = slot.take() {
+            kill_server(&mut s, why);
+        }
+    }
+    // 内存回收留在后台的那些也等完（SIGTERM 早就同步发过了，这里补「2 s 不退就硬杀」）
+    let pending = std::mem::take(&mut *TERMINATORS.lock().unwrap_or_else(|e| e.into_inner()));
+    for h in pending {
+        let _ = h.join();
     }
 }
 
@@ -1198,7 +1228,8 @@ pub fn server_pid() -> Option<i32> {
 }
 
 /// 命令行子命令（`--transcribe` / `--talk-turn` …）用：`main` 返回时停掉
-/// 这次拉起的常驻服务。不然一条一次性命令会留下一个占 1–2.5 GiB 的孤儿进程。
+/// 这次拉起的常驻服务，并等完内存回收留在后台的那些。不然一条一次性命令会留下
+/// 一个占 2 GiB 起（按 `phys_footprint` 算）的孤儿进程。
 /// 守护进程走不到这里（`tray::run` 不返回），它的常驻服务由空闲回收 / 退出菜单 / 信号收掉。
 pub struct ServerGuard;
 
@@ -1227,6 +1258,10 @@ fn start_reaper() {
         let cfg = crate::config::get();
         let mut slot = SERVER.lock().unwrap_or_else(|e| e.into_inner());
         let Some(s) = slot.as_mut() else { continue };
+        // 正在转写就不回收：空闲上限最短 60 s，而一次请求的超时是 120 s，「空闲」可能在请求中途到点
+        if s.inflight > 0 {
+            continue;
+        }
         let reason = reap_reason(
             cfg.qwen3_resident,
             cfg.asr_backend == crate::engine::AsrBackend::SpeechSwift,

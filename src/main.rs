@@ -1130,6 +1130,8 @@ fn main() -> Result<()> {
             qwen3::warm_async(c.qwen3_model);
         }
     }
+    // 守护进程才在内存回收后预热新的常驻服务（一次性命令马上退出，不需要）
+    qwen3::enable_rewarm();
     let _tray = tray::install(mtm);
     log::debug!("菜单栏图标已安装");
 
