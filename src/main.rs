@@ -295,9 +295,13 @@ fn main() -> Result<()> {
     // ② 给高资源档的准入条件提供实测数（`docs/benchmarks-asr-zh-en.md` 的 T3.5.6 一节）。
     // ⚠️ 会改写 config.json（结束时恢复原值）——请配 `AGENTEAR_DATA` 指向临时目录跑。
     if args.iter().any(|a| a == "--asr-bench") {
-        let wav = flag_value(&args, "--asr-bench")
+        // 可以给逗号分隔的多段 wav，第 N 轮用第 N 段（循环）。**长度各不相同**才复现得出
+        // 常驻服务的内存累积（v0.26.2）——同一段反复转，Metal 缓存会被复用、看不出涨。
+        let wavs: Vec<String> = flag_value(&args, "--asr-bench")
             .ok_or_else(|| anyhow::anyhow!("--asr-bench 后面要跟 wav 路径"))?
-            .to_string();
+            .split(',')
+            .map(str::to_string)
+            .collect();
         let runs: usize = flag_value(&args, "--runs").and_then(|v| v.parse().ok()).unwrap_or(5);
         let saved = config::get();
         let combos: Vec<(&str, engine::AsrBackend, qwen3::Qwen3Model, bool)> = vec![
@@ -307,7 +311,7 @@ fn main() -> Result<()> {
             ("qwen3-1.7b-cli", engine::AsrBackend::SpeechSwift, qwen3::Qwen3Model::Large, false),
             ("qwen3-1.7b-resident", engine::AsrBackend::SpeechSwift, qwen3::Qwen3Model::Large, true),
         ];
-        println!("combo\trun\tsecs\tchild_maxrss_mb\tserver_rss_mb\ttext");
+        println!("combo\trun\tsecs\tchild_maxrss_mb\tserver_footprint_mb\ttext");
         let only = flag_value(&args, "--only").map(str::to_string);
         // 跑的过程出错也要先把 config.json 恢复了再报错（PR #93 评审 Nit：
         // 原来 `?` 直接返回，配置会停在最后一个 combo 上）。
@@ -330,7 +334,8 @@ fn main() -> Result<()> {
                 }
                 for run in 1..=runs {
                     let t0 = Instant::now();
-                    let t = asr.transcribe(std::path::Path::new(&wav), asr::AsrLang::Auto)?;
+                    let wav = &wavs[(run - 1) % wavs.len()];
+                    let t = asr.transcribe(std::path::Path::new(wav), asr::AsrLang::Auto)?;
                     let secs = t0.elapsed().as_secs_f64();
                     // 逐次调用的峰值：子进程的 ru_maxrss（macOS 单位是字节）。
                     // 它是「所有已回收子进程里最大的那个」，所以 combo 按内存从小到大排。
@@ -339,15 +344,11 @@ fn main() -> Result<()> {
                         libc::getrusage(libc::RUSAGE_CHILDREN, &mut ru);
                         ru.ru_maxrss as f64 / 1048576.0
                     };
+                    // 常驻服务看 phys_footprint，不看 RSS：它的大头在 Metal 缓冲区，
+                    // `ps` 的 RSS 只报几十 MB（v0.26.2 之前这一列就是这么少算的）。
                     let server = qwen3::server_pid()
-                        .and_then(|pid| {
-                            std::process::Command::new("/bin/ps")
-                                .args(["-o", "rss=", "-p", &pid.to_string()])
-                                .output()
-                                .ok()
-                        })
-                        .and_then(|o| String::from_utf8_lossy(&o.stdout).trim().parse::<f64>().ok())
-                        .map(|kb| format!("{:.0}", kb / 1024.0))
+                        .and_then(qwen3::footprint_bytes)
+                        .map(|b| format!("{:.0}", b as f64 / 1048576.0))
                         .unwrap_or_else(|| "-".into());
                     println!("{name}\t{run}\t{secs:.3}\t{child:.0}\t{server}\t{}", t.text.replace('\t', " "));
                 }
@@ -1129,6 +1130,8 @@ fn main() -> Result<()> {
             qwen3::warm_async(c.qwen3_model);
         }
     }
+    // 守护进程才在内存回收后预热新的常驻服务（一次性命令马上退出，不需要）
+    qwen3::enable_rewarm();
     let _tray = tray::install(mtm);
     log::debug!("菜单栏图标已安装");
 
