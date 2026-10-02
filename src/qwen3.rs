@@ -793,6 +793,9 @@ struct Server {
     port: u16,
     model: Qwen3Model,
     last_used: Instant,
+    /// 正在这个服务上跑的请求数（持 `SERVER` 锁增减）。内存回收只在**最后一个**请求结束时判断，
+    /// 不然预热和真实请求叠在一起时，先结束的那个会把另一个正在用的服务杀掉。
+    inflight: u32,
 }
 
 static SERVER: Mutex<Option<Server>> = Mutex::new(None);
@@ -966,9 +969,22 @@ fn is_our_server_cmdline(cmdline: &str, our_bin: &Path) -> bool {
 }
 
 fn kill_server(s: &mut Server, why: &str) {
+    deregister_server(s, why);
+    terminate_server(s);
+}
+
+/// 撤登记（`SERVER_PID` + pid 文件）。**必须在持 `SERVER` 锁时、同步做**：
+/// 放到后台线程里的话，新服务可能已经登记过了，这里会把**新服务**的 `SERVER_PID`
+/// 清成 0——之后 Ctrl+C 就收不掉它，留下一个 GB 级的孤儿。
+fn deregister_server(s: &Server, why: &str) {
     log::info!("停掉 Qwen3-ASR 常驻服务（{}，端口 {}）：{why}", s.model.label(), s.port);
-    SERVER_PID.store(0, Ordering::SeqCst);
-    remove_own_pid_file(s.child.id() as i32);
+    let pid = s.child.id() as i32;
+    let _ = SERVER_PID.compare_exchange(pid, 0, Ordering::SeqCst, Ordering::SeqCst);
+    remove_own_pid_file(pid);
+}
+
+/// 发 SIGTERM，等 2 s，不退就硬杀。可以放后台线程（只碰这个 `Child` 自己）。
+fn terminate_server(s: &mut Server) {
     unsafe { libc::kill(s.child.id() as i32, libc::SIGTERM) };
     // 给它 2 s 自己退，不退就硬杀——别让一个卡住的进程攥着 2 GB 内存
     let start = Instant::now();
@@ -993,6 +1009,7 @@ fn ensure_server_locked(slot: &mut Option<Server>, m: Qwen3Model) -> Result<u16>
             // 请求开始时就刷新：空闲回收按「最后一次使用」算，一个正好在超时边上
             // 开始的请求不该在半路被回收。
             s.last_used = Instant::now();
+            s.inflight += 1;
             return Ok(s.port);
         }
         if alive {
@@ -1054,7 +1071,7 @@ fn ensure_server_locked(slot: &mut Option<Server>, m: Qwen3Model) -> Result<u16>
         m.label(),
         start.elapsed().as_secs_f64()
     );
-    *slot = Some(Server { child, port, model: m, last_used: Instant::now() });
+    *slot = Some(Server { child, port, model: m, last_used: Instant::now(), inflight: 1 });
     start_reaper();
     Ok(port)
 }
@@ -1097,20 +1114,25 @@ fn transcribe_on_server(
         cmd.arg("--form-string").arg(format!("context={context}"));
     }
     cmd.arg(format!("http://127.0.0.1:{port}/v1/audio/transcriptions"));
-    let out = cmd.output().context("调用 speech-server 失败")?;
+    // 先别 `?`：不管成败都要先把 inflight 减回去，否则这个服务再也不会被回收
+    let out = cmd.output();
     let recycled = {
         let mut slot = SERVER.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(s) = slot.as_mut() {
+        // 只认「这次用的那个」：期间换过端口（模型变了、被重启过）就不是它了
+        let mut last_one = false;
+        if let Some(s) = slot.as_mut().filter(|s| s.port == port) {
             s.last_used = Instant::now();
+            s.inflight = s.inflight.saturating_sub(1);
+            last_one = s.inflight == 0;
         }
-        // 只回收「这次用的那个」：期间换过端口（模型变了、被重启过）就不是它了
-        let ours = slot.as_ref().is_some_and(|s| s.port == port);
-        let footprint = slot.as_ref().filter(|_| ours).and_then(|s| footprint_bytes(s.child.id() as i32));
+        // 还有别的请求在用就先不判，留给最后结束的那个
+        let footprint = slot.as_ref().filter(|_| last_one).and_then(|s| footprint_bytes(s.child.id() as i32));
         match recycle_reason(footprint, SERVER_FOOTPRINT_BUDGET) {
             Some(why) => {
-                let mut s = slot.take().expect("ours 已确认是 Some");
+                let mut s = slot.take().expect("last_one 已确认是 Some");
+                deregister_server(&s, &why);
                 // 杀进程最多等 2 s，放到后台，别把这一轮的上屏拖慢
-                std::thread::spawn(move || kill_server(&mut s, &why));
+                std::thread::spawn(move || terminate_server(&mut s));
                 true
             }
             None => false,
@@ -1130,6 +1152,7 @@ fn transcribe_on_server(
             warm_async(m);
         }
     }
+    let out = out.context("调用 speech-server 失败")?;
     if !out.status.success() {
         bail!(
             "speech-server 请求失败（curl {:?}）：{}{}",
