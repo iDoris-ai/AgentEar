@@ -1,0 +1,37 @@
+diff --git a/Package.swift b/Package.swift
+index c16593e..7fa17dd 100644
+--- a/Package.swift
++++ b/Package.swift
+@@ -847,6 +847,7 @@ let package = Package(
+                 "MAGNeTMusicGen",
+                 "StableAudio3MusicGen",
+                 "AudioCommon",
++                .product(name: "MLX", package: "mlx-swift"),
+                 .product(name: "Hummingbird", package: "hummingbird"),
+                 .product(name: "HummingbirdWebSocket", package: "hummingbird-websocket"),
+                 // Pulled in via hummingbird-websocket but we keep the explicit
+diff --git a/Sources/AudioServer/AudioServer.swift b/Sources/AudioServer/AudioServer.swift
+index c841518..fe7de2b 100644
+--- a/Sources/AudioServer/AudioServer.swift
++++ b/Sources/AudioServer/AudioServer.swift
+@@ -4,6 +4,7 @@ import HummingbirdCore
+ import HummingbirdWebSocket
+ import NIOCore
+ import Qwen3ASR
++import MLX
+ import Qwen3TTS
+ import Qwen3TTSCoreML
+ import CosyVoiceTTS
+@@ -1686,6 +1687,12 @@ func dispatchTranscribe(
+         return (try? model.transcribeAudio(audio16k, sampleRate: 16000, language: language)) ?? ""
+     case "qwen3-asr":
+         let model = try await state.loadQwen3ASR(modelId: variant.modelId)
++        // AgentEar T3.5.9 实验补丁：AGENTEAR_MLX_CACHE_MB 设了才生效；不设 = 原版行为
++        if let mb = ProcessInfo.processInfo.environment["AGENTEAR_MLX_CACHE_MB"], let n = Int(mb) {
++            MLX.Memory.cacheLimit = n * 1024 * 1024
++            defer { MLX.Memory.clearCache() }
++            return try model.transcribeCheckingCancellation(audio: audio16k, sampleRate: 16000)
++        }
+         return try model.transcribeCheckingCancellation(audio: audio16k, sampleRate: 16000)
+     default:
+         throw RealtimeDispatchError.engineNotEnabled(kind: "ASR", engine: variant.engine)
