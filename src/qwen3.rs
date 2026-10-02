@@ -11,7 +11,8 @@
 //!    按 speech 认的布局 `$QWEN3_ASR_CACHE_DIR/qwen3-speech/models/<org>/<repo>/`
 //!    摆好。之后 speech **不再联网**（它的下载器永远不会被触发）。
 //! 3. **常驻服务**（可选，菜单栏开关）：`speech-server` 热态约 0.1–0.2 s 一轮，
-//!    代价是常驻 1–2.5 GiB；空闲超时自动退出，退出/信号时收掉。
+//!    代价是常驻约 2 GiB 起（含 Metal 缓冲区）；空闲超时自动退出，退出/信号时收掉；
+//!    **每轮转完超过 4 GiB 就重启**（上游不释放 Metal 缓存，见 [`SERVER_FOOTPRINT_BUDGET`]）。
 //!
 //! ## 为什么所有 speech 进程都套一层「断网沙箱」
 //!
@@ -1065,6 +1066,18 @@ pub fn server_transcribe(
     language: Option<&str>,
     context: &str,
 ) -> Result<crate::asr::Transcript> {
+    transcribe_on_server(m, wav, language, context, true)
+}
+
+/// `rewarm`：因内存回收之后要不要马上在后台起一个新的。**预热自己传 `false`**——
+/// 不然「预热完就超上限」会变成回收→预热→回收的死循环。
+fn transcribe_on_server(
+    m: Qwen3Model,
+    wav: &Path,
+    language: Option<&str>,
+    context: &str,
+    rewarm: bool,
+) -> Result<crate::asr::Transcript> {
     let port = {
         let mut slot = SERVER.lock().unwrap_or_else(|e| e.into_inner());
         ensure_server_locked(&mut slot, m)?
@@ -1085,10 +1098,36 @@ pub fn server_transcribe(
     }
     cmd.arg(format!("http://127.0.0.1:{port}/v1/audio/transcriptions"));
     let out = cmd.output().context("调用 speech-server 失败")?;
-    {
+    let recycled = {
         let mut slot = SERVER.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(s) = slot.as_mut() {
             s.last_used = Instant::now();
+        }
+        // 只回收「这次用的那个」：期间换过端口（模型变了、被重启过）就不是它了
+        let ours = slot.as_ref().is_some_and(|s| s.port == port);
+        let footprint = slot.as_ref().filter(|_| ours).and_then(|s| footprint_bytes(s.child.id() as i32));
+        match recycle_reason(footprint, SERVER_FOOTPRINT_BUDGET) {
+            Some(why) => {
+                let mut s = slot.take().expect("ours 已确认是 Some");
+                // 杀进程最多等 2 s，放到后台，别把这一轮的上屏拖慢
+                std::thread::spawn(move || kill_server(&mut s, &why));
+                true
+            }
+            None => false,
+        }
+    };
+    if recycled && rewarm {
+        // 下一轮别去付那 2 s 冷启动：后台马上起一个干净的（热态约 2 GiB）
+        let cfg = crate::config::get();
+        if reap_reason(
+            cfg.qwen3_resident,
+            cfg.asr_backend == crate::engine::AsrBackend::SpeechSwift,
+            Duration::ZERO,
+            Duration::from_secs(cfg.qwen3_idle_secs),
+        )
+        .is_none()
+        {
+            warm_async(m);
         }
     }
     if !out.status.success() {
@@ -1115,7 +1154,7 @@ fn parse_server_json(body: &str) -> Result<crate::asr::Transcript> {
 pub fn warm_async(m: Qwen3Model) {
     std::thread::spawn(move || {
         let t = Instant::now();
-        match smoke_wav().and_then(|w| server_transcribe(m, &w, None, "")) {
+        match smoke_wav().and_then(|w| transcribe_on_server(m, &w, None, "", false)) {
             Ok(_) => log::info!("Qwen3-ASR 常驻服务预热完成（{}，{:.1}s）", m.label(), t.elapsed().as_secs_f64()),
             Err(e) => log::warn!("Qwen3-ASR 常驻服务预热失败（下一轮会退回逐次调用）：{e:#}"),
         }
@@ -1176,6 +1215,45 @@ fn start_reaper() {
             kill_server(&mut s, why);
         }
     });
+}
+
+/// 常驻服务的内存上限 = ASR 高资源档的预算（CLAUDE.md「ASR 侧分档」：≤4 GiB）。
+///
+/// ## 为什么要它（v0.26.2，jason 2026-10-02：「开始很快，越用越慢，一句话要好几分钟」）
+///
+/// speech-server（speech-swift v0.0.28）**每次请求用过的 Metal 缓冲区都不还给系统**，
+/// 而它没有任何限制缓存的参数。实测（25 段 jason 当天的真实录音，0.6B，同一个进程）：
+/// 3.4 GB → **48 GB**；单段 112 s 的录音在全新进程里就到 15 GB。
+/// 空闲回收（`qwen3_idle_secs`，600 s）管不住——只要每隔几分钟说一句就永远不触发。
+/// jason 那台机器上它涨到 **30 GB**，把系统推进 26.8 GB swap，
+/// 于是 30 s 的录音要转 97–237 s。
+///
+/// 所以每轮转完看一眼它的 `phys_footprint`，超了就重启。
+/// ⚠️ **看的是 footprint 不是 RSS**：这块内存记在 IOAccelerator（Metal）名下，
+/// `ps` 的 RSS 只报了几十 MB——`--asr-bench` 以前记的「0.6B ≈ 816 MiB」就是这么少算的。
+/// ⚠️ **它管的是「累积」，管不住单次峰值**：一段很长的录音在那一次请求里照样会冲到
+/// 十几 GB（上游行为），只是转完马上还回去。
+const SERVER_FOOTPRINT_BUDGET: u64 = 4 << 30;
+
+/// 进程的 `phys_footprint`（活动监视器「内存」那一列；含 Metal 缓冲区）。读不到给 `None`。
+pub fn footprint_bytes(pid: i32) -> Option<u64> {
+    if pid <= 0 {
+        return None;
+    }
+    let mut info: libc::rusage_info_v2 = unsafe { std::mem::zeroed() };
+    let rc = unsafe {
+        libc::proc_pid_rusage(pid, libc::RUSAGE_INFO_V2, &mut info as *mut _ as *mut libc::rusage_info_t)
+    };
+    (rc == 0).then_some(info.ri_phys_footprint)
+}
+
+/// 转完一轮后该不该因为内存重启常驻服务。纯函数，见测试。
+/// 读不到 footprint 时**不重启**：宁可漏一次，不因为读数失败让每轮都冷启动。
+fn recycle_reason(footprint: Option<u64>, budget: u64) -> Option<String> {
+    let f = footprint?;
+    (f > budget).then(|| {
+        format!("内存 {:.1} GiB 超过上限 {:.0} GiB（Metal 缓存不释放）", f as f64 / (1u64 << 30) as f64, budget as f64 / (1u64 << 30) as f64)
+    })
 }
 
 /// 该不该回收常驻服务。纯函数，真值表见测试。
@@ -1382,6 +1460,25 @@ mod tests {
         assert!(reap_reason(true, true, s(600), s(600)).is_some(), "到点就回收");
         assert!(reap_reason(false, true, s(1), s(600)).is_some(), "关了常驻立刻回收");
         assert!(reap_reason(true, false, s(1), s(600)).is_some(), "换回 SenseVoice 立刻回收");
+    }
+
+    #[test]
+    fn recycle_when_the_server_outgrows_the_budget() {
+        let gib = 1u64 << 30;
+        assert_eq!(recycle_reason(None, 4 * gib), None, "读不到就不动");
+        assert_eq!(recycle_reason(Some(2 * gib), 4 * gib), None, "热态约 2 GiB：留着");
+        assert_eq!(recycle_reason(Some(4 * gib), 4 * gib), None, "正好在线上：留着");
+        // jason 机器上实测的 30 GB
+        let why = recycle_reason(Some(30 * gib), 4 * gib).expect("超了要重启");
+        assert!(why.contains("30.0 GiB"), "{why}");
+        assert_eq!(SERVER_FOOTPRINT_BUDGET, 4 * gib, "= ASR 高资源档预算");
+    }
+
+    #[test]
+    fn footprint_reads_this_process() {
+        let me = std::process::id() as i32;
+        assert!(footprint_bytes(me).is_some_and(|b| b > 0));
+        assert_eq!(footprint_bytes(0), None);
     }
 
     #[test]
