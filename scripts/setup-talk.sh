@@ -113,7 +113,7 @@ else
         PY="$candidate"
         break
       fi
-      echo "   跳过 $candidate（$("$candidate" -V 2>&1) 低于 3.11）"
+      echo "   跳过 ${candidate}（$("$candidate" -V 2>&1) 低于 3.11）"
     done
     [ -n "$PY" ] || die "找不到 Python 3.11+（mlx-lm / mlx-audio 的最低要求）；
    注意 pyenv 之类只在交互式 shell 里生效——非交互环境下先 export PATH，或直接用绝对路径"
@@ -177,7 +177,7 @@ case "$QUANT" in
   4bit) TTS_MIN_MB=1500 ;;
   8bit) TTS_MIN_MB=2400 ;;
 esac
-[ "$TTS_MB" -ge "$TTS_MIN_MB" ] || die "TTS（$QUANT）目录只有 ${TTS_MB} MB（应 ≥ ${TTS_MIN_MB}），没下完"
+[ "$TTS_MB" -ge "$TTS_MIN_MB" ] || die "TTS（${QUANT}）目录只有 ${TTS_MB} MB（应 ≥ ${TTS_MIN_MB}），没下完"
 
 # ------------------------------------------------------------ 默认音色库
 #

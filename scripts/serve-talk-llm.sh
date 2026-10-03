@@ -21,7 +21,7 @@ PORT="${AGENTEAR_TALK_LLM_PORT:-8794}"
 
 [ -x "$VENV/bin/mlx_lm.server" ] || { echo "!! 环境没备好，先跑 scripts/setup-talk.sh" >&2; exit 1; }
 if [ ! -f "$MODEL/config.json" ] && [ ! -d "$MODEL" ]; then
-  echo "!! 找不到模型 $MODEL，先跑 scripts/setup-talk.sh" >&2; exit 1
+  echo "!! 找不到模型 ${MODEL}，先跑 scripts/setup-talk.sh" >&2; exit 1
 fi
 
 # 端口被占就**明确失败**：悄悄换端口会让客户端连不上却以为边车没起；
