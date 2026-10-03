@@ -76,9 +76,9 @@ else
   echo "   -> $ASK"
 fi
 
-step "2. ASR（走现有引擎，语言显式指定 $LANG）"
+step "2. ASR（走现有引擎，语言显式指定 ${LANG}）"
 if [ ! -x "$AGENTEAR_BIN" ]; then
-  echo "!! 找不到 $AGENTEAR_BIN，先 cargo build --release" >&2
+  echo "!! 找不到 ${AGENTEAR_BIN}，先 cargo build --release" >&2
   exit 1
 fi
 # ⚠️ `--lang` 只认 th / auto：中英走 SenseVoice 的默认路径，传 `zh` 会被
@@ -95,7 +95,7 @@ HEARD="$(printf '%s\n' "$ASR_RAW" | grep -v '^\[[0-9]' | grep -v '^（' | tail -
 [ -n "$HEARD" ] || { echo "!! ASR 没出文字：" >&2; printf '%s\n' "$ASR_RAW" >&2; exit 1; }
 echo "   听到：$HEARD"
 
-step "3. LLM（$LLM_URL，模型可换）"
+step "3. LLM（${LLM_URL}，模型可换）"
 SYS="你是 AgentEar 的语音助手，正在打电话。回答必须短：一到两句、不超过 40 个字，直接给结论，不要 markdown，不要列举。已知本地事实：$WEATHER_NOTE 用户问天气时就用这条事实回答。"
 BODY="$(LANG="$LANG" SYS="$SYS" HEARD="$HEARD" python3 -c '
 import json, os

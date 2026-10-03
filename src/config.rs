@@ -830,7 +830,10 @@ mod tests {
             TalkMode::InputMethod,
             "配置里没这个字段时也要落到输入法模式"
         );
-        assert!(Config::default().talk_enabled_legacy == false || true);
+        assert!(
+            !Config::default().talk_enabled_legacy,
+            "全新安装不带旧字段，默认值必须是 false——否则会被误判成「老配置里开过对话模式」而迁移"
+        );
     }
 
     /// v0.6.0 的用户是**手改 `talk_enabled`** 开的通话。升级到带模式字段的

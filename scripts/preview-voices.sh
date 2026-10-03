@@ -41,7 +41,7 @@ declare -a CASES=(
   "08_no_voice_baseline||zh|warm"
 )
 
-echo "== 生成候选（文本：$TEXT）=="
+echo "== 生成候选（文本：${TEXT}）=="
 for spec in "${CASES[@]}"; do
   IFS='|' read -r name voice style tone <<<"$spec"
   body=$(NAME="$name" VOICE="$voice" STYLE="$style" TONE="$tone" TEXT="$TEXT" python3 - <<'PY'
