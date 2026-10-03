@@ -162,6 +162,30 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
+    // T3.5.9 方案 B-lite 的升级空档：模型权重还在（用户确实装过），只是
+    // speech-swift 运行时的版本号变了（`qwen3::SPEECH_VERSION` 现在带
+    // `-agentear.<修订号>` 后缀），所以 `runtime_installed()` 判「没装」。
+    // 这**不是**「用户从没装过」——那种情况下面的退回仍然要发生（不能让
+    // 升级直接把守护进程卡死），但额外在后台静默补下运行时（只有 99 MB 量级，
+    // 模型不会重新下），装好后自动换回 speech_swift，不需要用户再去设置里点一次。
+    // 只在真的要用 ASR 的调用路径上做（守护进程 / `--transcribe` 之类）：
+    // `--match-command --json` 这种不碰音频的宿主契约入口不该因为这个顺带
+    // 发起一次后台下载。
+    let qwen3_runtime_recovering = needs_asr_preflight(&args)
+        && cfg.asr_backend == engine::AsrBackend::SpeechSwift
+        && !qwen3::is_ready(cfg.qwen3_model)
+        && qwen3::model_installed(cfg.qwen3_model)
+        && !qwen3::runtime_installed();
+    if qwen3_runtime_recovering {
+        log::info!(
+            "{} 的模型权重还在，但 speech-swift 运行时版本已更新到 {}：后台补下运行时……",
+            cfg.qwen3_model.label(),
+            qwen3::SPEECH_VERSION
+        );
+        tray::note_qwen3_runtime_recovering(cfg.qwen3_model);
+        qwen3::start(cfg.qwen3_model, tray::on_qwen3_runtime_recovered);
+    }
+
     // 配置里选着 Qwen3-ASR，但它现在用不了（没下载、被删了、或者下到一半），
     // 而 PATH 上也没有老的 brew 版 speech：不对账的话下面的 preflight 会让
     // **整个守护进程起不来**。宁可退回随包的 SenseVoice 并把原因写清楚——
@@ -171,11 +195,18 @@ fn main() -> Result<()> {
         && !qwen3::is_ready(cfg.qwen3_model)
         && std::process::Command::new("speech").arg("--help").output().is_err()
     {
-        log::warn!(
-            "配置里选的是 {}，但它还没装好，PATH 上也没有 speech",
-            cfg.qwen3_model.label()
-        );
-        log::warn!("  已退回随包的 SenseVoice。要用它：菜单「设置…→ 语音识别」选它就会下载");
+        if qwen3_runtime_recovering {
+            log::warn!(
+                "  运行时还没下完，这次启动先用随包的 SenseVoice；装好后下一轮自动换回 {}",
+                cfg.qwen3_model.label()
+            );
+        } else {
+            log::warn!(
+                "配置里选的是 {}，但它还没装好，PATH 上也没有 speech",
+                cfg.qwen3_model.label()
+            );
+            log::warn!("  已退回随包的 SenseVoice。要用它：菜单「设置…→ 语音识别」选它就会下载");
+        }
         config::update(|c| c.asr_backend = engine::AsrBackend::Builtin);
         engine::AsrBackend::Builtin
     } else {
@@ -1075,10 +1106,14 @@ fn main() -> Result<()> {
     std::thread::spawn(move || {
         if let Err(e) = worker(rx, store, asr) {
             log::error!("工作线程退出: {e:#}");
-            // 这条路径也要收拾边车，否则它会活过 AgentEar
+            // 这条路径也要收拾边车，否则它会活过 AgentEar。
+            // T3.5.9 方案 B-lite 顺手补的：Qwen3-ASR 常驻服务（如果开着）同理——
+            // 这条路径绕过了正常的 Drop（`std::process::exit` 之前没人调
+            // `qwen3::stop_server`），孤儿此前只能靠下次启动的
+            // `reap_stale_server` 按 pid 文件事后收，这里改成当场收。
             sidecar::shutdown();
-    talk::shutdown_spawned();
             talk::shutdown_spawned();
+            qwen3::stop_server("工作线程异常退出");
             std::process::exit(1);
         }
     });
@@ -2552,9 +2587,10 @@ fn diagnose(vendor: &std::path::Path) -> Result<()> {
         );
         let rt = qwen3::runtime_installed();
         println!(
-            "  {} speech-swift {} 运行时: {}",
+            "  {} speech-swift {} 运行时（上游基线 {}，T3.5.9 方案 B-lite 自编 + 打补丁）: {}",
             if rt { "✅" } else { "⚪" },
             qwen3::SPEECH_VERSION,
+            qwen3::UPSTREAM_TAG,
             qwen3::speech_bin().map(|p| p.display().to_string()).unwrap_or_default()
         );
         if rt {

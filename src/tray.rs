@@ -100,6 +100,34 @@ pub fn on_qwen3_installed(m: crate::qwen3::Qwen3Model) {
     }
 }
 
+/// T3.5.9 方案 B-lite：升级空档里，`main.rs` 启动时发现「模型还在、运行时版本
+/// 换了」会后台静默补下运行时，并把配置临时降级成 SenseVoice（同「没装好」那条
+/// 老路径）。这个 flag 记住「补完之后要不要自动换回去」——和 `QWEN3_INTENT`
+/// 同一个理由：下载要几十秒，期间用户可能已经在设置里手动选了别的引擎，
+/// 那种情况下不该在用户选完之后又被这次恢复强行换回去。
+static QWEN3_RECOVERING: Mutex<Option<crate::qwen3::Qwen3Model>> = Mutex::new(None);
+
+/// 记一下「正在因为升级空档补运行时，补完要换回 {m}」。`main.rs` 发起后台
+/// 下载之前调用。
+pub fn note_qwen3_runtime_recovering(m: crate::qwen3::Qwen3Model) {
+    *QWEN3_RECOVERING.lock().unwrap_or_else(|e| e.into_inner()) = Some(m);
+}
+
+/// 升级空档的运行时补完之后调用。**不经过 `QWEN3_INTENT`**——这不是用户在
+/// 设置里的新选择，是恢复升级前就有的配置；但如果用户在这段时间手动选了
+/// 别的引擎（或者干脆把这个 flag 清掉了），就不强行换回去。
+pub fn on_qwen3_runtime_recovered(m: crate::qwen3::Qwen3Model) {
+    let mut r = QWEN3_RECOVERING.lock().unwrap_or_else(|e| e.into_inner());
+    if *r == Some(m) {
+        *r = None;
+        drop(r);
+        log::info!("{} 运行时补完，换回 speech_swift", m.label());
+        switch_to_qwen3(m);
+    } else {
+        log::info!("{} 运行时补完；用户已经手动选了别的引擎，不强行换回", m.label());
+    }
+}
+
 /// 把识别引擎切到某一档 Qwen3（已确认装好）。常驻开着就顺手预热。
 fn switch_to_qwen3(m: crate::qwen3::Qwen3Model) {
     config::update(|c| {
@@ -1006,6 +1034,8 @@ fn handle_qwen3(tag: isize) -> bool {
     }
     if tag == TAG_ASR_ENGINE_BASE {
         *QWEN3_INTENT.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        // 用户自己选了 SenseVoice：升级空档的后台恢复不该在这之后又把引擎换回去。
+        *QWEN3_RECOVERING.lock().unwrap_or_else(|e| e.into_inner()) = None;
         config::update(|c| c.asr_backend = crate::engine::AsrBackend::Builtin);
         log::info!("识别引擎改为 SenseVoice（随包，下次录音生效）");
         std::thread::spawn(|| qwen3::stop_server("识别引擎换回 SenseVoice"));
@@ -1013,6 +1043,8 @@ fn handle_qwen3(tag: isize) -> bool {
     }
     if let Some(m) = qwen3_model_for_tag(tag, TAG_ASR_ENGINE_BASE + 1) {
         let mut intent = QWEN3_INTENT.lock().unwrap_or_else(|e| e.into_inner());
+        // 同上：用户自己在下拉框里选了一档，这是用户的新选择，不是升级后台恢复。
+        *QWEN3_RECOVERING.lock().unwrap_or_else(|e| e.into_inner()) = None;
         if qwen3::is_ready(m) {
             *intent = None;
             drop(intent);

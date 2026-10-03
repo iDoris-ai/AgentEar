@@ -3,16 +3,30 @@
 //! ## 这个模块管什么
 //!
 //! 1. **运行时**：speech-swift 的预编译包（`speech` / `speech-server`），
-//!    **版本钉死**（[`SPEECH_VERSION`] + tarball 的 sha256），从上游 GitHub release
-//!    下载、校验、解包到 `~/.agentear/models/qwen3/runtime/speech-<版本>/`。
-//!    **不走 brew、不随包分发**（jason 2026-09-26 拍板）。
+//!    **版本钉死**（[`SPEECH_VERSION`] + tarball 的 sha256）、校验、解包到
+//!    `~/.agentear/models/qwen3/runtime/speech-<版本>/`。**不走 brew、不随包分发**
+//!    （jason 2026-09-26 拍板）。
+//!    ⚠️ **T3.5.9 方案 B-lite（2026-10 起）：这个 tarball 不再是上游官方发布的那份**。
+//!    上游 speech-server 每次请求后不释放 MLX 用过的 Metal 缓冲区，常驻服务会越用
+//!    越涨（见 [`SERVER_FOOTPRINT_BUDGET`] 上的实测数字）。我们改成**自己从上游
+//!    pinned 源码 + 一个小补丁编译 `speech-server`**（补丁见
+//!    `patches/speech-swift-v0.0.28-agentear.patch`，构建脚本见
+//!    `scripts/build-speech-runtime.sh`），**只换这一个二进制**，`speech` CLI /
+//!    `mlx.metallib` / 各个 bundle 仍是官方发布包里原样那份（省掉自己装 Metal
+//!    Toolchain 现编 `.metallib` 的麻烦）。产物发布在 AgentEar 自己的 GitHub
+//!    release 上（`speech-runtime-<版本>` 这个 tag），`RUNTIME_URL` 指向那里，
+//!    不再指向 `soniqo/speech-swift` 的 release。
 //! 2. **模型权重**：0.6B / 1.7B 两档，**直接从 Hugging Face 下载**，
 //!    钉在某个 commit（`resolve/<revision>/`），逐文件 sha256 校验，
 //!    按 speech 认的布局 `$QWEN3_ASR_CACHE_DIR/qwen3-speech/models/<org>/<repo>/`
 //!    摆好。之后 speech **不再联网**（它的下载器永远不会被触发）。
+//!    **升级运行时不影响模型**——模型安装判据（[`model_installed`]）与
+//!    [`SPEECH_VERSION`] 无关，不会因为换了运行时版本就被判定成「没装」。
 //! 3. **常驻服务**（可选，菜单栏开关）：`speech-server` 热态约 0.1–0.2 s 一轮，
 //!    代价是常驻约 2 GiB 起（含 Metal 缓冲区）；空闲超时自动退出，退出/信号时收掉；
-//!    **每轮转完超过 4 GiB 就重启**（上游不释放 Metal 缓存，见 [`SERVER_FOOTPRINT_BUDGET`]）。
+//!    **每轮转完仍保留「超过 4 GiB 就重启」的最后一道保险**（见
+//!    [`SERVER_FOOTPRINT_BUDGET`] 上的注释——方案 B-lite 修的是常态下的累积，
+//!    不是单次超长录音的峰值，也不假设补丁在所有情况下都生效）。
 //!
 //! ## 为什么所有 speech 进程都套一层「断网沙箱」
 //!
@@ -47,18 +61,41 @@ use std::time::{Duration, Instant};
 
 use crate::download::{self, Fail, FileLock, State};
 
-/// speech-swift 的版本。**升级 = 改这里 + 下面三个常量 + 本机实测一遍**。
+/// speech-swift 的版本。**升级 = 改这里 + 下面几个常量 + 本机实测一遍**。
 ///
 /// 钉死而不是跟最新（jason 2026-09-26 拍板）：上游约一个多月出了 5 版，
 /// CLI 参数变过；`SpeechSwiftEngine::preflight` 的契约探测只能挡住一部分。
-pub const SPEECH_VERSION: &str = "v0.0.28";
-const RUNTIME_URL: &str =
-    "https://github.com/soniqo/speech-swift/releases/download/v0.0.28/speech-macos-arm64.tar.gz";
-/// 2026-09-26 实测（`shasum -a 256`），与 ADR-0010 RAW §1 一致。
-const RUNTIME_SHA256: &str = "cc144cac7985884f026a76281fdb504ce6e0fe2ad11a9b0a7901cf8b617b930a";
-const RUNTIME_BYTES: u64 = 99_089_736;
-/// 解包后体积（实测 `du -sh` = 364M），磁盘预检用，往上取整留余量。
-const RUNTIME_UNPACKED_BYTES: u64 = 400_000_000;
+///
+/// ⚠️ **T3.5.9 方案 B-lite（2026-10-03）起，这个字符串不再是「照抄上游的 tag」**：
+/// 上游基线仍是 [`UPSTREAM_TAG`]，但我们发布的是自己编译 + 打了补丁的运行时
+/// （修「常驻越用越涨」那个内存泄漏，见 [`SERVER_FOOTPRINT_BUDGET`]），
+/// 版本号里带 `-agentear.<修订号>` 以便跟官方未修改的包区分。
+/// **目录名 / 安装记录都从这个字符串派生**（[`runtime_dir`]/[`runtime_marker`]），
+/// 所以改它会让所有现有安装（不管是不是真的换了上游版本）都判定为「没装」、
+/// 重新下载——升级时这正是想要的效果：旧版本号对应的运行时有那个内存泄漏，
+/// 不该被新代码当成「已经装好」。
+pub const SPEECH_VERSION: &str = "v0.0.28-agentear.1";
+/// 上游 pinned 的基线 tag/commit（`patches/speech-swift-v0.0.28-agentear.patch`
+/// 打在这个 tag 上）。只用于日志和文档，不参与安装判据。
+pub const UPSTREAM_TAG: &str = "v0.0.28";
+/// 我们自己发布的运行时 tarball——**不是**上游 `soniqo/speech-swift` 的 release。
+/// 由 `scripts/build-speech-runtime.sh` 产出，发布在 AgentEar 自己的 GitHub
+/// release 上（tag `speech-runtime-v0.0.28-agentear.1`）。
+const RUNTIME_URL: &str = "https://github.com/iDoris-ai/AgentEar/releases/download/speech-runtime-v0.0.28-agentear.1/speech-macos-arm64-v0.0.28-agentear.1.tar.gz";
+/// 2026-10-03 实测（`scripts/build-speech-runtime.sh` 的输出，`shasum -a 256`）。
+const RUNTIME_SHA256: &str = "58f3701e663b157d1da427af8257d4cb44ac51f839b0401f3380f92c8e28f2d1";
+const RUNTIME_BYTES: u64 = 99_502_348;
+/// 解包后体积（实测 `du -sk` ≈ 382.9 MB），磁盘预检用，往上取整留余量。
+const RUNTIME_UNPACKED_BYTES: u64 = 420_000_000;
+/// 常驻服务的 Metal 缓存上限（MB），传给打了补丁的 `speech-server`
+/// （`AGENTEAR_MLX_CACHE_MB` 环境变量，见 `patches/speech-swift-v0.0.28-agentear.patch`）。
+/// 不设这个变量时补丁版行为与官方版一致（即不限）——**AgentEar 自己起
+/// speech-server 时必须显式传它**，取值依据与 TTS 边车 v0.17.0 一致（256 MB 折中：
+/// 留一点够复用、又不会无限长；设成 0 反而更慢）。
+///
+/// 实测依据：`docs/data/qwen3-memory-2026-10/README.md`——25 段真实录音 ×3 轮，
+/// 设了这个变量后末态 ≈ 865 MB（不设时 47–49 GB）。
+pub const AGENTEAR_MLX_CACHE_MB: u32 = 256;
 
 /// 一个要下载的文件。
 pub struct FileSpec {
@@ -188,6 +225,18 @@ pub fn root() -> Option<PathBuf> {
 fn runtime_dir() -> Option<PathBuf> {
     root().map(|r| r.join("runtime").join(format!("speech-{SPEECH_VERSION}")))
 }
+
+// ⚠️ **升级后旧版本号对应的目录（比如方案 B-lite 之前的 `speech-v0.0.28/`）
+// 不会被自动删**——这是刻意的，不是漏做：
+// ① 按版本号字符串拼目录名、再拿这个名字去删一个目录，删错的代价
+//    （删掉用户机器上一个我们不知道内容的路径）比它省下的磁盘
+//    （运行时解包后约 370 MB）大得多；
+// ② 这个模块从没写过「删除某个版本目录」的代码路径，第一次写就让它
+//    在生产环境删文件，风险收益不对称；
+// ③ 用户确认新版本能用之后，想清的话自己删
+//    `~/.agentear/models/qwen3/runtime/speech-<旧版本号>/` 就行。
+// 真要自动清理，应该是一个单独评估的任务（枚举 runtime/ 下的目录、
+// 排除当前 SPEECH_VERSION、确认不是正在用的那个再删），不是升级逻辑的一部分。
 
 /// 传给 speech 的 `QWEN3_ASR_CACHE_DIR`。
 pub fn cache_dir() -> Option<PathBuf> {
@@ -688,6 +737,13 @@ pub fn speech_command(bin: &Path) -> Command {
     if let Some(c) = cache_dir() {
         cmd.env("QWEN3_ASR_CACHE_DIR", c);
     }
+    // T3.5.9 方案 B-lite：只有我们自己编译 + 打了补丁的 speech-server 认这个
+    // 环境变量（见 patches/speech-swift-v0.0.28-agentear.patch）；
+    // 官方未修改的 `speech` CLI / 旧版 speech-server 不会读它，设了也无害。
+    // 设在这个共用的构造函数里而不是只在起常驻服务那处设，是因为一次性调用
+    // （`--transcribe` 走的那条 CLI 路径）如果有一天也走到打了补丁的二进制，
+    // 不该因为少设了这个变量而表现不一致。
+    cmd.env("AGENTEAR_MLX_CACHE_MB", AGENTEAR_MLX_CACHE_MB.to_string());
     cmd
 }
 
@@ -1291,6 +1347,16 @@ fn start_reaper() {
 /// `ps` 的 RSS 只报了几十 MB——`--asr-bench` 以前记的「0.6B ≈ 816 MiB」就是这么少算的。
 /// ⚠️ **它管的是「累积」，管不住单次峰值**：一段很长的录音在那一次请求里照样会冲到
 /// 十几 GB（上游行为），只是转完马上还回去。
+///
+/// ## T3.5.9 方案 B-lite 之后，这条还要留着（2026-10-03）
+///
+/// 方案 B 的补丁（`AGENTEAR_MLX_CACHE_MB`）已经让「从外面重启」不再是日常路径——
+/// 实测补丁版 25 段 ×3 轮末态 ≈ 865 MB，不再累积（见
+/// `docs/data/qwen3-memory-2026-10/README.md`）。但这道「超了就重启」**不删**，
+/// 当成最后一道保险：① 它不依赖上游/我们的运行时行为对不对——哪天运行时的来源
+/// 又换了（比如回退到官方包、或者补丁哪天失效），这道闸照样兜得住；
+/// ② 单次超长录音的峰值管不住是补丁管不了的那部分（见上一段），这道闸是唯一的
+/// 后盾；③ 代码已经在生产跑过，删掉换不来什么、只换来一个新的风险窗口。
 const SERVER_FOOTPRINT_BUDGET: u64 = 4 << 30;
 
 /// 进程的 `phys_footprint`（活动监视器「内存」那一列；含 Metal 缓冲区）。读不到给 `None`。
@@ -1390,8 +1456,26 @@ mod tests {
 
     #[test]
     fn runtime_pin_is_consistent() {
-        assert!(RUNTIME_URL.contains(&format!("/download/{SPEECH_VERSION}/")), "URL 与版本常量要一致");
+        // 方案 B-lite 起 RUNTIME_URL 指向 AgentEar 自己的 release（tag 是
+        // `speech-runtime-<SPEECH_VERSION>`），不再是 `/download/{SPEECH_VERSION}/`
+        // 这种上游的路径形状——但版本号本身必须原样出现在 URL 里，
+        // 不然改了 SPEECH_VERSION 忘改 URL 这种事检不出来。
+        assert!(RUNTIME_URL.contains(SPEECH_VERSION), "URL 里要原样带着版本号");
+        assert!(RUNTIME_URL.contains("iDoris-ai/AgentEar"), "方案 B-lite：运行时由我们自己发布，不是上游的 release");
         assert_eq!(RUNTIME_SHA256.len(), 64);
+    }
+
+    /// `AGENTEAR_MLX_CACHE_MB` 必须真的被传给每一个 speech 子进程——这是
+    /// 补丁生效的唯一开关（不设 = 补丁版行为等同官方版，常驻服务照样会涨到几十 GB）。
+    #[test]
+    fn speech_command_always_sets_the_cache_limit_env() {
+        let cmd = speech_command(Path::new("/tmp/does-not-matter"));
+        let val = cmd
+            .get_envs()
+            .find(|(k, _)| *k == std::ffi::OsStr::new("AGENTEAR_MLX_CACHE_MB"))
+            .and_then(|(_, v)| v)
+            .map(|v| v.to_string_lossy().to_string());
+        assert_eq!(val, Some(AGENTEAR_MLX_CACHE_MB.to_string()));
     }
 
     /// pid 被复用时不能误杀：命令行必须**恰好**是我们运行时目录里的 speech-server。

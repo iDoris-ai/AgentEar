@@ -1,0 +1,88 @@
+# AgentEar 补丁：speech-swift v0.0.28（231f8eb6, soniqo/speech-swift，Apache-2.0）
+#
+# 这不是我们自己的代码——这是对上游 speech-swift 的修改。按 Apache-2.0 §4(b)，
+# 被改过的文件要带上「已被修改」的说明；下面两处改动里，AudioServer.swift 的
+# hunk 已经在文件内加了这样一条注释（"---- Modified by AgentEar ----"）。
+#
+# ## 改了什么、为什么（T3.5.9 第 1/2 步，docs/data/qwen3-memory-2026-10/README.md）
+#
+# speech-server 的 Qwen3-ASR 转写路径（Sources/AudioServer/AudioServer.swift 的
+# `dispatchTranscribe`）每次请求后不释放 MLX 用过的 Metal 缓冲区。0.6B 档（我们的
+# 默认模型）又恰好没有上游给 1.7B 准备的那层缓存上限保护（只套在
+# `if modelSize == .large` 里）。结果是常驻服务越用越涨：实测 25 段真实录音后
+# 从 3.4 GB 涨到 47–50 GB，逼近 swap，30 秒的录音要转 97–237 秒
+# （jason 2026-10-02 原话「越用越慢，一句话要好几分钟」）。
+#
+# 这个补丁加一个**默认不生效**的环境变量开关：
+#   - `AGENTEAR_MLX_CACHE_MB=<N>`：给 MLX 设一个 N MB 的缓存上限
+#     （`MLX.Memory.cacheLimit`），且本次请求结束后 `MLX.Memory.clearCache()`。
+#     AgentEar 自己起 speech-server 时传 256（见 src/qwen3.rs 的
+#     `AGENTEAR_MLX_CACHE_MB` 常量，取值依据同 TTS 边车 v0.17.0）。
+#   - `AGENTEAR_MLX_CLEAR_ONLY=1`：只清缓存、不设上限（留着给以后排障用）。
+#   - 两个都不设：**原版行为完全不变**——这是为什么同一个二进制能用来做
+#     「补丁 / 不补丁」的对照实验（见上面那份 README）。
+#
+# Package.swift 的那一行只是把 `MLX` 产品加进 AudioServer target 的依赖——
+# 用 `MLX.Memory` 之前必须先能 import 到它。
+#
+# ## 怎么生成 / 复现
+#
+#   git clone --depth 1 --branch v0.0.28 https://github.com/soniqo/speech-swift
+#   cd speech-swift && git apply <本文件>
+#   swift build -c release --product speech-server
+#
+# 打包进 AgentEar 分发的运行时见 scripts/build-speech-runtime.sh（T3.5.9 方案 B-lite：
+# 自己编译 speech-server、只换这一个二进制，`mlx.metallib` 等其余文件原样用官方发布包的）。
+#
+# ## 实测结果摘要（25 段真实录音 ×3 轮，详见上面的 README）
+#
+# 不开这个开关：末态 47–49 GB（与未修改的官方二进制一致，50 GB）。
+# 开（256 MB）：末态 ≈ 865 MB，请求中峰值 2.36–2.43 GB。速度未检出差异，
+# 转写文字逐字一致（这个补丁不改转写结果，只改内存生命周期）。
+
+diff --git a/Package.swift b/Package.swift
+index c16593e..7fa17dd 100644
+--- a/Package.swift
++++ b/Package.swift
+@@ -847,6 +847,7 @@ let package = Package(
+                 "MAGNeTMusicGen",
+                 "StableAudio3MusicGen",
+                 "AudioCommon",
++                .product(name: "MLX", package: "mlx-swift"),
+                 .product(name: "Hummingbird", package: "hummingbird"),
+                 .product(name: "HummingbirdWebSocket", package: "hummingbird-websocket"),
+                 // Pulled in via hummingbird-websocket but we keep the explicit
+diff --git a/Sources/AudioServer/AudioServer.swift b/Sources/AudioServer/AudioServer.swift
+index c841518..94e7277 100644
+--- a/Sources/AudioServer/AudioServer.swift
++++ b/Sources/AudioServer/AudioServer.swift
+@@ -4,6 +4,7 @@ import HummingbirdCore
+ import HummingbirdWebSocket
+ import NIOCore
+ import Qwen3ASR
++import MLX
+ import Qwen3TTS
+ import Qwen3TTSCoreML
+ import CosyVoiceTTS
+@@ -1686,6 +1687,21 @@ func dispatchTranscribe(
+         return (try? model.transcribeAudio(audio16k, sampleRate: 16000, language: language)) ?? ""
+     case "qwen3-asr":
+         let model = try await state.loadQwen3ASR(modelId: variant.modelId)
++        // ---- Modified by AgentEar (https://github.com/iDoris-ai/AgentEar), T3.5.9 ----
++        // 原版这条路径每次请求后不释放 MLX 用过的 Metal 缓冲区，常驻服务会越用越涨
++        // （0.6B 没有上游给 1.7B 准备的缓存上限保护）。两个环境变量都不设时行为与
++        // 原版完全一致；详见 patches/speech-swift-v0.0.28-agentear.patch 顶部说明。
++        let env = ProcessInfo.processInfo.environment
++        if let mb = env["AGENTEAR_MLX_CACHE_MB"], let n = Int(mb) {
++            MLX.Memory.cacheLimit = n * 1024 * 1024
++            defer { MLX.Memory.clearCache() }
++            return try model.transcribeCheckingCancellation(audio: audio16k, sampleRate: 16000)
++        }
++        if env["AGENTEAR_MLX_CLEAR_ONLY"] != nil {
++            defer { MLX.Memory.clearCache() }
++            return try model.transcribeCheckingCancellation(audio: audio16k, sampleRate: 16000)
++        }
++        // ---- end AgentEar modification ----
+         return try model.transcribeCheckingCancellation(audio: audio16k, sampleRate: 16000)
+     default:
+         throw RealtimeDispatchError.engineNotEnabled(kind: "ASR", engine: variant.engine)
