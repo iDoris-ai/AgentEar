@@ -103,7 +103,9 @@ fn main() -> Result<()> {
     //
     // 命令行能覆盖是为了排障——「换个引擎试试」不该逼用户先改配置再改回来，
     // 和 `--lang` 是同一个理由。
-    let pinned_backend = args.iter().any(|a| a == "--asr-backend");
+    // `mut`：T3.5.9 方案 B-lite 的 `Note` 分支会把它 pin 住（一次性 CLI 在
+    // 恢复空档里只在内存里退回 builtin，不碰磁盘，见下面）。
+    let mut pinned_backend = args.iter().any(|a| a == "--asr-backend");
     let backend = if pinned_backend {
         let v = flag_value(&args, "--asr-backend").ok_or_else(|| {
             anyhow::anyhow!(
@@ -168,34 +170,90 @@ fn main() -> Result<()> {
     // 这**不是**「用户从没装过」——那种情况下面的退回仍然要发生（不能让
     // 升级直接把守护进程卡死），但额外在后台静默补下运行时（只有 99 MB 量级，
     // 模型不会重新下），装好后自动换回 speech_swift，不需要用户再去设置里点一次。
-    // 只在真的要用 ASR 的调用路径上做（守护进程 / `--transcribe` 之类）：
+    //
+    // ⚠️ **PR #106 评审阻塞项**：判据不能只看 `cfg.asr_backend ==
+    // SpeechSwift`——下面几行就会把它持久化改写成 `builtin`（为了让 preflight
+    // 在这一轮能过），如果下一次启动只认 `asr_backend`，这条「其实是在恢复」
+    // 的线索会在它被改写的那一刻起永久丢失：进程被杀、崩溃，或者升级后第一次
+    // 调用恰好是一次性 CLI 且没跑完下载，往后就再也没有人会去后台补那 99 MB
+    // 了。改成跨启动的持久标记（[`qwen3::read_recovering_marker`]），判断逻辑
+    // 收进 [`qwen3::recovery_decision`] 这个纯函数（真值表见它的测试）。
+    //
+    // 只在真的要用 ASR 的调用路径上判断（守护进程 / `--transcribe` 之类）：
     // `--match-command --json` 这种不碰音频的宿主契约入口不该因为这个顺带
-    // 发起一次后台下载。
-    let qwen3_runtime_recovering = needs_asr_preflight(&args)
-        && cfg.asr_backend == engine::AsrBackend::SpeechSwift
-        && !qwen3::is_ready(cfg.qwen3_model)
-        && qwen3::model_installed(cfg.qwen3_model)
+    // 读一次标记文件。
+    let qwen3_recovery_marker = qwen3::read_recovering_marker();
+    // 标记在的话跟着标记走（可能是上一次恢复没跑完的那个模型，不一定是当前
+    // 配置选的那个）；没有标记就看当前配置——这是「首次发现空档」的情形。
+    let qwen3_recovery_model = qwen3_recovery_marker.unwrap_or(cfg.qwen3_model);
+    let qwen3_recovery_gap = !qwen3::is_ready(qwen3_recovery_model)
+        && qwen3::model_installed(qwen3_recovery_model)
         && !qwen3::runtime_installed();
-    if qwen3_runtime_recovering {
-        log::info!(
-            "{} 的模型权重还在，但 speech-swift 运行时版本已更新到 {}：后台补下运行时……",
-            cfg.qwen3_model.label(),
-            qwen3::SPEECH_VERSION
-        );
-        tray::note_qwen3_runtime_recovering(cfg.qwen3_model);
-        qwen3::start(cfg.qwen3_model, tray::on_qwen3_runtime_recovered);
+    // 只有空手（无子命令）启动的那个进程才是长驻守护进程；带了任何子命令 flag
+    // 的调用（包括 `--asr-backend` 这种纯修饰符）一次性跑完就退出，等不到
+    // 下载跑完，不该在这种进程里起下载线程（PR #106 评审阻塞项的一部分）。
+    //
+    // ⚠️ `args` 是 `std::env::args()` 的全量结果，**第 0 项永远是程序自己的
+    // 路径**——`args.is_empty()` 对任何调用都恒为 false，这里原来就是这么写的，
+    // 复现的时候当场抓到（守护进程被误判成「带子命令」，整条 Download 路径
+    // 永远走不到，见 PR #106 这次 commit 的描述）。判「没有子命令」要看
+    // `args.len() <= 1`。
+    let qwen3_is_daemon = args.len() <= 1;
+    let qwen3_recovery = if needs_asr_preflight(&args) {
+        qwen3::recovery_decision(
+            qwen3_recovery_gap,
+            qwen3_recovery_marker.is_some(),
+            cfg.asr_backend == engine::AsrBackend::SpeechSwift,
+            qwen3_is_daemon,
+        )
+    } else {
+        qwen3::RecoveryAction::None
+    };
+    match qwen3_recovery {
+        qwen3::RecoveryAction::None => {}
+        qwen3::RecoveryAction::Note => {
+            log::info!(
+                "{} 的运行时还缺（升级空档，或上一次恢复被打断）：一次性命令不发起下载，记下标记交给下次守护进程启动去后台补",
+                qwen3_recovery_model.label()
+            );
+            if let Err(e) = qwen3::write_recovering_marker(qwen3_recovery_model) {
+                log::warn!("写升级恢复标记失败（不影响这一轮，但可能导致下次启动漏掉重试）：{e:#}");
+            }
+        }
+        qwen3::RecoveryAction::Download => {
+            log::info!(
+                "{} 的模型权重还在，但 speech-swift 运行时版本已更新到 {}（或上一次恢复被打断）：后台补下运行时……",
+                qwen3_recovery_model.label(),
+                qwen3::SPEECH_VERSION
+            );
+            if let Err(e) = qwen3::write_recovering_marker(qwen3_recovery_model) {
+                log::warn!("写升级恢复标记失败（不影响这一轮退回 SenseVoice，但进程被打断后下一次可能不会自动重试）：{e:#}");
+            }
+            tray::note_qwen3_runtime_recovering(qwen3_recovery_model);
+            qwen3::start(qwen3_recovery_model, tray::on_qwen3_runtime_recovered);
+        }
     }
 
     // 配置里选着 Qwen3-ASR，但它现在用不了（没下载、被删了、或者下到一半），
     // 而 PATH 上也没有老的 brew 版 speech：不对账的话下面的 preflight 会让
     // **整个守护进程起不来**。宁可退回随包的 SenseVoice 并把原因写清楚——
     // 录音是这个程序的本职，不能因为一个可选后端没装好就全挂。
-    let backend = if !pinned_backend
+    let backend = if qwen3_recovery == qwen3::RecoveryAction::Note {
+        // 一次性 CLI 处在恢复空档：这一轮**只在内存里**退回 builtin（靠 pin
+        // 住这个进程的后端选择），完全不碰 config.json——持久化交给上面已经
+        // 写的标记，不是靠改 asr_backend（PR #106 评审阻塞项：改了
+        // asr_backend 会在下一次启动把「这其实是在恢复」这条线索冲掉）。
+        log::warn!(
+            "  运行时还没补好；这次启动只在内存里退回随包的 SenseVoice，不改写配置（交给下次守护进程启动去后台补）"
+        );
+        pinned_backend = true;
+        engine::AsrBackend::Builtin
+    } else if !pinned_backend
         && backend == engine::AsrBackend::SpeechSwift
         && !qwen3::is_ready(cfg.qwen3_model)
         && std::process::Command::new("speech").arg("--help").output().is_err()
     {
-        if qwen3_runtime_recovering {
+        if qwen3_recovery == qwen3::RecoveryAction::Download {
             log::warn!(
                 "  运行时还没下完，这次启动先用随包的 SenseVoice；装好后下一轮自动换回 {}",
                 cfg.qwen3_model.label()

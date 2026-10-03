@@ -1,4 +1,4 @@
-# AgentEar 补丁：speech-swift v0.0.28（231f8eb6, soniqo/speech-swift，Apache-2.0）
+# AgentEar 补丁：speech-swift v0.0.28（231f8eb9f0971fee335fef49f42d2975e4fbf8bc, soniqo/speech-swift，Apache-2.0）
 #
 # 这不是我们自己的代码——这是对上游 speech-swift 的修改。按 Apache-2.0 §4(b)，
 # 被改过的文件要带上「已被修改」的说明；下面两处改动里，AudioServer.swift 的

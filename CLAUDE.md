@@ -58,6 +58,12 @@ M1 完成；**知识库投递 + 全文检索默认开（v0.4.2）**；M2 理解�
   装好后自动切回 speech_swift，期间先退回随包 SenseVoice（日志写清楚原因，
   不是静默降级）。旧版本号对应的运行时目录**不会被自动删**（见
   `src/qwen3.rs::runtime_dir` 上的注释）。
+  ⚠️ **这个判据不能只看 `asr_backend`**（PR #106 评审抓到并修复）：退回逻辑会把
+  `asr_backend` 持久化改写成 `builtin`，如果下一次启动只认这个字段，进程被杀 /
+  崩溃 / 一次性命令没跑完下载都会让恢复永久失效。改成跨启动的持久标记
+  （`qwen3::read/write/clear_recovering_marker` + `qwen3::recovery_decision`
+  这个纯函数判断要不要重试/要不要真的发起下载）。一次性 CLI 子命令遇到这种
+  空档只记标记、不发起下载（`RecoveryAction::Note`），交给下一次守护进程启动。
 - GGUF 路线（llama.cpp）另开 **T3.5.7** 评准确率，没做。
 
 **M3 实时对话（ADR-0007）：V1 的通话链路已随 v0.6.0 发布；v0.7.0 给了它产品入口。**

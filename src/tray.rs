@@ -113,14 +113,48 @@ pub fn note_qwen3_runtime_recovering(m: crate::qwen3::Qwen3Model) {
     *QWEN3_RECOVERING.lock().unwrap_or_else(|e| e.into_inner()) = Some(m);
 }
 
-/// 升级空档的运行时补完之后调用。**不经过 `QWEN3_INTENT`**——这不是用户在
-/// 设置里的新选择，是恢复升级前就有的配置；但如果用户在这段时间手动选了
-/// 别的引擎（或者干脆把这个 flag 清掉了），就不强行换回去。
+/// 升级空档恢复完成时，该不该真的换回 speech_swift——纯函数，测试钉住
+/// （PR #106 评审非阻塞①）。
+///
+/// `recovering`：`QWEN3_RECOVERING` 的快照（这是不是我们自己发起的恢复）。
+/// `intent`：`QWEN3_INTENT` 的快照——**恢复窗口期内用户在下拉框里重选了同一个
+/// 模型**是一个真实场景：点击处理会无条件清掉 `QWEN3_RECOVERING`（同一个模型
+/// 已经在装，`qwen3::start` 会去重、不会起第二个下载线程，但回调还是原来那个
+/// `on_qwen3_runtime_recovered`，不是用户点击那条路径期望的 `on_qwen3_installed`）。
+/// 只看 `QWEN3_RECOVERING` 会把这种「用户选的其实是同一个模型」误判成
+/// 「用户选了别的」，于是**不换回去**——明明用户要的就是这个模型。
+/// 两条线索任一对上这个 `m` 就该换。
+fn should_switch_back(
+    recovering: Option<crate::qwen3::Qwen3Model>,
+    intent: Option<crate::qwen3::Qwen3Model>,
+    m: crate::qwen3::Qwen3Model,
+) -> bool {
+    recovering == Some(m) || intent == Some(m)
+}
+
+/// 升级空档的运行时补完之后调用。
 pub fn on_qwen3_runtime_recovered(m: crate::qwen3::Qwen3Model) {
-    let mut r = QWEN3_RECOVERING.lock().unwrap_or_else(|e| e.into_inner());
-    if *r == Some(m) {
-        *r = None;
-        drop(r);
+    // 装完就算恢复完成——不管接下来要不要真的切回引擎，“空档”已经不存在了
+    // （`is_ready` 会重新变 true），标记没必要留着等下次启动误触发重试。
+    crate::qwen3::clear_recovering_marker();
+
+    let recovering = {
+        let mut r = QWEN3_RECOVERING.lock().unwrap_or_else(|e| e.into_inner());
+        let v = *r;
+        if v == Some(m) {
+            *r = None;
+        }
+        v
+    };
+    let intent = {
+        let mut i = QWEN3_INTENT.lock().unwrap_or_else(|e| e.into_inner());
+        let v = *i;
+        if v == Some(m) {
+            *i = None;
+        }
+        v
+    };
+    if should_switch_back(recovering, intent, m) {
         log::info!("{} 运行时补完，换回 speech_swift", m.label());
         switch_to_qwen3(m);
     } else {
@@ -1805,6 +1839,18 @@ mod tests {
         assert_eq!(voice_index_for_tag(TAG_QWEN3_DL_BASE), None);
         assert_eq!(voice_index_for_tag(TAG_DEVICE_BASE), None);
         assert_eq!(voice_index_for_tag(TAG_TONE_BASE), None);
+    }
+
+    /// PR #106 评审非阻塞①：恢复窗口期内用户重选了同一个模型，不该被当成
+    /// 「用户选了别的」。
+    #[test]
+    fn should_switch_back_honors_either_recovering_or_user_intent() {
+        use crate::qwen3::Qwen3Model::{Large, Small};
+        assert!(should_switch_back(Some(Small), None, Small), "恢复标记对得上");
+        assert!(should_switch_back(None, Some(Small), Small), "恢复窗口期内用户重选了同一个模型");
+        assert!(!should_switch_back(None, None, Small), "两个都没对上：用户选了别的，或者 flag 被清掉了");
+        assert!(!should_switch_back(Some(Large), Some(Large), Small), "两条线索都指向别的模型");
+        assert!(should_switch_back(Some(Small), Some(Large), Small), "只要有一条对上就该换");
     }
 
     #[test]

@@ -24,7 +24,10 @@ PATCH="$ROOT/patches/speech-swift-v0.0.28-agentear.patch"
 # RUNTIME_URL / RUNTIME_SHA256 / RUNTIME_BYTES 一致。改这几行不会影响
 # AgentEar 本身用哪个 URL（那是 src/qwen3.rs 的常量，由这个脚本的产物反过来驱动）。
 UPSTREAM_TAG="v0.0.28"
-UPSTREAM_COMMIT="231f8eb"
+# PR #106 评审非阻塞③：钉死完整 40 位 sha，不要只核对前缀——前缀匹配在上游
+# 恰好有两个 commit 共享同一个短前缀时会把错的那个也放过去（概率很低，但
+# 核对完整 sha 的代价是 0，没有理由省）。
+UPSTREAM_COMMIT="231f8eb9f0971fee335fef49f42d2975e4fbf8bc"
 UPSTREAM_REPO="https://github.com/soniqo/speech-swift"
 OFFICIAL_URL="https://github.com/soniqo/speech-swift/releases/download/v0.0.28/speech-macos-arm64.tar.gz"
 OFFICIAL_SHA256="cc144cac7985884f026a76281fdb504ce6e0fe2ad11a9b0a7901cf8b617b930a"
@@ -56,10 +59,9 @@ fi
 
 cd "$SRC"
 HEAD="$(git rev-parse HEAD)"
-case "$HEAD" in
-  "${UPSTREAM_COMMIT}"*) ;;
-  *) die "pinned commit 不对：HEAD=${HEAD}，期望 ${UPSTREAM_COMMIT}...（上游可能把这个 tag 重新打过？）" ;;
-esac
+# 核对完整 40 位 sha，不是前缀——见上面 UPSTREAM_COMMIT 的注释。
+[ "$HEAD" = "$UPSTREAM_COMMIT" ] \
+  || die "pinned commit 不对：HEAD=${HEAD}，期望 ${UPSTREAM_COMMIT}（上游可能把这个 tag 重新打过？）"
 log "pinned commit 核对通过：$HEAD"
 
 if git diff --quiet; then

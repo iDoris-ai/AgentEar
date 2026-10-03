@@ -259,6 +259,45 @@ fn model_marker(m: Qwen3Model) -> Option<PathBuf> {
     root().map(|r| r.join(format!("{}.installed", m.dir_name())))
 }
 
+/// T3.5.9 方案 B-lite 续（PR #106 评审 CHANGES_REQUESTED，阻塞项）：升级空档恢复
+/// 「跨启动仍能重试」的标记。**故意不用 `asr_backend` 当判据**——`main.rs` 的
+/// preflight 退回逻辑会把 `asr_backend` 持久化成 `builtin`（为了让这一轮的
+/// Dispatch 正常工作），如果下一次启动只看 `asr_backend` 来判断「要不要继续
+/// 恢复」，这条线索会在它被改写的那一刻起永久丢失：进程被杀、崩溃，或者升级后
+/// 第一次调用恰好是一次性 CLI 且没跑完下载，往后就再也没有人会去后台补那 99 MB
+/// 的运行时了——用户永久卡在 SenseVoice 上，这正是评审抓到的那个 bug。
+/// 这个标记专门记「还在等运行时补上」这件事，生命周期与 `asr_backend` 分开：
+/// 只在确认装好（[`runtime_installed`] 真的变 true）之后才清掉。
+fn recovering_marker() -> Option<PathBuf> {
+    root().map(|r| r.join("runtime-recovering.json"))
+}
+
+/// 读标记。文件不存在、读不出来、或者内容不是一个认得的模型名，都当「没有在
+/// 恢复」——宁可漏一次重试，也不要让一个偶然损坏的标记文件变成硬错误。
+pub fn read_recovering_marker() -> Option<Qwen3Model> {
+    let p = recovering_marker()?;
+    let text = fs::read_to_string(p).ok()?;
+    serde_json::from_str(&text).ok()
+}
+
+/// 写标记：原子写（tmp + rename），复用 [`write_marker`] 同一套安全写法。
+/// 失败只记日志、不阻断这一轮的退回——标记只是「跨启动的记忆」，
+/// 写不进去也不该让这一轮的 ASR 用不了。
+pub fn write_recovering_marker(m: Qwen3Model) -> Result<()> {
+    let p = recovering_marker().context("数据目录未初始化")?;
+    let content = serde_json::to_string(&m).context("序列化模型名失败")?;
+    write_marker(&p, &content)
+}
+
+/// 清标记：运行时真的补上了（不管最后有没有真的切回 speech_swift——
+/// 用户可能在下载期间手动选了别的引擎）。`is_ready` 这时已经会重新变 true，
+/// 「空档」本身不存在了，标记没必要留着等下次启动误触发重试。
+pub fn clear_recovering_marker() {
+    if let Some(p) = recovering_marker() {
+        let _ = fs::remove_file(p);
+    }
+}
+
 pub fn speech_bin() -> Option<PathBuf> {
     runtime_dir().map(|d| d.join("speech"))
 }
@@ -981,11 +1020,14 @@ fn cmdline_of(pid: i32) -> Option<String> {
 /// **真动手之前再核命令行**：pid 会被系统复用，必须是我们运行时目录里的
 /// `speech-server` 才发信号——宁可漏收，不能误杀别人的进程。
 pub fn reap_stale_server() {
-    let (Some(dir), Some(bin)) = (root(), server_bin()) else { return };
-    reap_stale_in(&dir, &bin, std::process::id() as i32, server_pid());
+    let Some(dir) = root() else { return };
+    // PR #106 评审非阻塞②：传运行时根目录（`runtime/`），不是当前版本那一个
+    // 具体的二进制路径——见 `is_our_server_cmdline` 上的注释。
+    let runtime_root = dir.join("runtime");
+    reap_stale_in(&dir, &runtime_root, std::process::id() as i32, server_pid());
 }
 
-fn reap_stale_in(dir: &Path, bin: &Path, me: i32, current_server: Option<i32>) {
+fn reap_stale_in(dir: &Path, runtime_root: &Path, me: i32, current_server: Option<i32>) {
     let Ok(entries) = fs::read_dir(dir) else { return };
     for e in entries.flatten() {
         let name = e.file_name().to_string_lossy().to_string();
@@ -1008,7 +1050,7 @@ fn reap_stale_in(dir: &Path, bin: &Path, me: i32, current_server: Option<i32>) {
             }
             ReapVerdict::KillAndRemove => {
                 // 读不到命令行就不杀（宁可漏收）
-                if cmdline_of(server).is_some_and(|c| is_our_server_cmdline(&c, bin)) {
+                if cmdline_of(server).is_some_and(|c| is_our_server_cmdline(&c, runtime_root)) {
                     log::warn!("发现上一次留下的 Qwen3-ASR 常驻服务（pid {server}），收掉");
                     unsafe { libc::kill(server, libc::SIGTERM) };
                 }
@@ -1029,10 +1071,26 @@ fn remove_own_pid_file(server: i32) {
     }
 }
 
-/// 这条命令行是不是「我们运行时目录里的 speech-server」。纯函数，测试钉住。
-fn is_our_server_cmdline(cmdline: &str, our_bin: &Path) -> bool {
-    let bin = our_bin.to_string_lossy();
-    !bin.is_empty() && cmdline.split_whitespace().any(|tok| tok == bin)
+/// 这条命令行是不是「我们 qwen3 运行时根目录下**任意版本**的 speech-server」。
+/// 纯函数，测试钉住。
+///
+/// ⚠️ **PR #106 评审非阻塞②**：原来只认当前 `SPEECH_VERSION` 对应的那一个
+/// 具体路径（`tok == our_bin`）。升级之后，旧版本号对应的运行时目录故意不删
+/// （见 `runtime_dir` 上的注释），如果里面留着一个孤儿 `speech-server`，
+/// 旧判法会因为路径对不上**当前**版本而永远认不出它——`reap_verdict` 已经判了
+/// `KillAndRemove`，pid 文件会被删，但因为这里核对不过，进程本身杀不掉，
+/// 于是「孤儿还活着、pid 文件却没了」，之后再没有人记得去收它。
+/// 现在只要求「在我们自己的运行时根目录下、文件名恰好是 `speech-server`」——
+/// **仍然不认别的程序**：根目录前缀必须匹配（不是别的运行时目录），
+/// 文件名必须整段相等（不是 `speech-server-evil` 这种前缀碰巧对上的）。
+fn is_our_server_cmdline(cmdline: &str, runtime_root: &Path) -> bool {
+    let root = runtime_root.to_string_lossy();
+    if root.is_empty() {
+        return false;
+    }
+    cmdline.split_whitespace().any(|tok| {
+        tok.starts_with(root.as_ref()) && Path::new(tok).file_name().is_some_and(|f| f == "speech-server")
+    })
 }
 
 fn kill_server(s: &mut Server, why: &str) {
@@ -1393,6 +1451,50 @@ fn reap_reason(resident: bool, backend_is_qwen3: bool, idle: Duration, limit: Du
     }
 }
 
+/// T3.5.9 方案 B-lite 续（PR #106 评审阻塞项）：升级空档恢复要不要重试、
+/// 要不要真的发起后台下载——纯函数，调用方（`main.rs`）只负责算好这四个
+/// 输入、照返回值去动作，所有判断逻辑都在这里，真值表见测试。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RecoveryAction {
+    /// 不是恢复场景：没有空档，或者既没有标记也没有「配置里选着 speech_swift」
+    /// 这条线索——比如用户从没装过，或者早就手动切到别的引擎了。
+    None,
+    /// 是恢复场景，但这个进程不该发起下载（一次性 CLI）：记下标记，
+    /// 这一轮本地退回 builtin（不改配置、不起下载线程），交给下一次
+    /// 守护进程启动去接着做。
+    Note,
+    /// 是恢复场景，且该发起下载（守护进程）：写标记、退回 builtin、后台下载。
+    Download,
+}
+
+/// - `gap`：这个模型「装过但现在用不了，且运行时缺失」
+///   （`model_installed ∧ !runtime_installed ∧ !is_ready`，调用方算好传进来）。
+/// - `marker_present`：磁盘上有没有「上一次恢复被中断」的标记
+///   （[`read_recovering_marker`]）。
+/// - `configured_backend_is_speech_swift`：**只在没有标记时才看它**——
+///   首次发现空档（用户本来就选着 speech_swift，这一轮刚发现装不上）靠它
+///   判断「这是该恢复的场景」；有标记之后就不再依赖它，因为它随时可能已经被
+///   同一次 preflight 的退回逻辑改写成 `builtin`（这正是这次修的 bug：不能让
+///   「标记还在、但配置已经被我们自己改掉」被误判成「不是恢复场景」）。
+/// - `is_daemon`：只有长驻的守护进程才发起下载线程——一次性 CLI 子命令等不到
+///   下载跑完就退出了（运行时约 99 MB，守护进程里实测几秒钟内能完成，但一次性
+///   命令通常比这个还快），交给下一次守护进程启动去接着做。
+pub fn recovery_decision(
+    gap: bool,
+    marker_present: bool,
+    configured_backend_is_speech_swift: bool,
+    is_daemon: bool,
+) -> RecoveryAction {
+    if !gap || (!marker_present && !configured_backend_is_speech_swift) {
+        return RecoveryAction::None;
+    }
+    if is_daemon {
+        RecoveryAction::Download
+    } else {
+        RecoveryAction::Note
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1478,19 +1580,29 @@ mod tests {
         assert_eq!(val, Some(AGENTEAR_MLX_CACHE_MB.to_string()));
     }
 
-    /// pid 被复用时不能误杀：命令行必须**恰好**是我们运行时目录里的 speech-server。
+    /// pid 被复用时不能误杀：命令行必须真的是我们 qwen3 运行时根目录下的
+    /// 某个 `speech-server`。**升级后旧版本号的目录也要认得出**（PR #106
+    /// 评审非阻塞②）——不再要求与当前版本的路径逐字相同。
     #[test]
-    fn stale_server_is_recognised_only_by_our_exact_path() {
-        let ours = Path::new("/Users/x/.agentear/models/qwen3/runtime/speech-v0.0.28/speech-server");
-        let sandboxed = format!("/usr/bin/sandbox-exec -p (version 1) {} --host 127.0.0.1 --port 5000", ours.display());
-        assert!(is_our_server_cmdline(&format!("{} --host 127.0.0.1 --port 5000", ours.display()), ours));
-        assert!(is_our_server_cmdline(&sandboxed, ours));
-        assert!(!is_our_server_cmdline("/opt/homebrew/bin/speech-server --port 8080", ours), "brew 的那个不是我们拉的");
-        assert!(!is_our_server_cmdline("/usr/bin/vim notes.txt", ours));
-        assert!(!is_our_server_cmdline("", ours));
+    fn stale_server_is_recognised_under_our_runtime_root_any_version() {
+        let root = Path::new("/Users/x/.agentear/models/qwen3/runtime");
+        let current = root.join("speech-v0.0.28-agentear.1/speech-server");
+        let old = root.join("speech-v0.0.28/speech-server");
+        let sandboxed = format!("/usr/bin/sandbox-exec -p (version 1) {} --host 127.0.0.1 --port 5000", current.display());
+
+        assert!(is_our_server_cmdline(&format!("{} --host 127.0.0.1 --port 5000", current.display()), root), "当前版本");
+        assert!(is_our_server_cmdline(&format!("{} --host 127.0.0.1 --port 5000", old.display()), root), "升级后，旧版本号对应的目录也认得出");
+        assert!(is_our_server_cmdline(&sandboxed, root), "套了 sandbox-exec 也认得出");
+        assert!(!is_our_server_cmdline("/opt/homebrew/bin/speech-server --port 8080", root), "brew 的那个不是我们拉的");
+        assert!(!is_our_server_cmdline("/usr/bin/vim notes.txt", root));
+        assert!(!is_our_server_cmdline("", root));
         assert!(
-            !is_our_server_cmdline(&format!("{}-evil --port 1", ours.display()), ours),
-            "前缀相同的别的程序不算"
+            !is_our_server_cmdline(&format!("{}/speech-server-evil --port 1", root.display()), root),
+            "文件名前缀相同的别的程序不算（整段文件名必须相等）"
+        );
+        assert!(
+            !is_our_server_cmdline(&format!("{}/other/speech-server --port 1", root.parent().unwrap().display()), root),
+            "根目录不对的（比如别的运行时目录）不算"
         );
     }
 
@@ -1569,14 +1681,14 @@ mod tests {
         let me = std::process::id() as i32;
 
         // ① 拥有者活着：命令行视角 reap（current=None）不能动它
-        reap_stale_in(&dir, &bin, me, None);
+        reap_stale_in(&dir, &dir, me, None);
         assert!(is_running(&mut server), "守护进程的常驻服务被命令行杀掉了（N1）");
         assert!(pf.exists(), "别人的 pid 文件不能删");
 
         // ② 拥有者死了：这才是孤儿，收掉并删文件
         let _ = owner.kill();
         let _ = owner.wait();
-        reap_stale_in(&dir, &bin, me, None);
+        reap_stale_in(&dir, &dir, me, None);
         assert!(!is_running(&mut server), "拥有者死了之后孤儿要被收掉");
         assert!(!pf.exists());
 
@@ -1585,7 +1697,7 @@ mod tests {
         guard.0.push(other.id() as i32);
         let legacy = dir.join(LEGACY_PID_FILE);
         fs::write(&legacy, other.id().to_string()).unwrap();
-        reap_stale_in(&dir, &bin, me, None);
+        reap_stale_in(&dir, &dir, me, None);
         assert!(is_running(&mut other), "命令行对不上的进程不能杀");
         assert!(!legacy.exists());
         let _ = other.kill();
@@ -1602,6 +1714,69 @@ mod tests {
         assert!(reap_reason(true, true, s(600), s(600)).is_some(), "到点就回收");
         assert!(reap_reason(false, true, s(1), s(600)).is_some(), "关了常驻立刻回收");
         assert!(reap_reason(true, false, s(1), s(600)).is_some(), "换回 SenseVoice 立刻回收");
+    }
+
+    /// PR #106 评审阻塞项的真值表。
+    #[test]
+    fn recovery_decision_truth_table() {
+        use RecoveryAction::*;
+        // 没有空档：不管别的条件是什么，都不是恢复场景
+        assert_eq!(recovery_decision(false, true, true, true), None);
+        assert_eq!(recovery_decision(false, false, false, false), None);
+
+        // 有空档，但既没有标记也没有「配置里选着 speech_swift」这条线索——
+        // 不是恢复场景（比如用户从没装过，或者早就手动切走了）
+        assert_eq!(recovery_decision(true, false, false, true), None);
+        assert_eq!(recovery_decision(true, false, false, false), None);
+
+        // 首次发现（还没有标记）：靠配置判断
+        assert_eq!(recovery_decision(true, false, true, true), Download, "守护进程首次发现，该发起下载");
+        assert_eq!(recovery_decision(true, false, true, false), Note, "一次性 CLI 首次发现，只记标记");
+
+        // 已经有标记（哪怕配置这时已经被退回成 builtin 了）：仍然要恢复——
+        // 这正是评审要修的那条 bug：不能只看 asr_backend。
+        assert_eq!(
+            recovery_decision(true, true, false, true),
+            Download,
+            "标记在、配置已被退回成 builtin：守护进程仍要重试"
+        );
+        assert_eq!(recovery_decision(true, true, false, false), Note, "同上，但这次是一次性 CLI");
+        // 标记在、配置碰巧还是 speech_swift：同样要恢复（两条线索都指向恢复）
+        assert_eq!(recovery_decision(true, true, true, true), Download);
+    }
+
+    /// ①「boot 1 中断 → boot 2 仍能恢复」：模拟两次启动。
+    #[test]
+    fn boot_1_interrupted_boot_2_still_recovers() {
+        // boot 1：守护进程，配置还是 speech_swift，还没有标记——决定发起下载。
+        // 调用方据此会写标记、把配置退回 builtin，然后下载被打断（进程被杀 /
+        // 网络失败，这个决策函数看不出两者的区别，也不需要看出）。
+        let boot1 = recovery_decision(true, false, true, true);
+        assert_eq!(boot1, RecoveryAction::Download);
+
+        // boot 2：配置已经是 builtin 了（boot 1 退回时持久化的那一步），
+        // 但标记还在——仍要重试。如果这里看的是 asr_backend 而不是标记，
+        // 这一步会错判成 None，用户就永久卡在 SenseVoice 上了。
+        let boot2 = recovery_decision(true, true, false, true);
+        assert_eq!(boot2, RecoveryAction::Download, "标记保住了恢复的线索，boot 2 仍要重试");
+    }
+
+    /// ② 一次性 CLI 不发起下载：`Note` 这个返回值本身就是契约——
+    /// `main.rs` 只在 `Download` 分支里调 `qwen3::start` / `config::update`，
+    /// `Note` 分支只写标记、在内存里退回 builtin，不碰磁盘上的 `asr_backend`。
+    #[test]
+    fn one_shot_cli_only_notes_does_not_download() {
+        assert_eq!(recovery_decision(true, false, true, false), RecoveryAction::Note);
+        assert_eq!(recovery_decision(true, true, false, false), RecoveryAction::Note);
+    }
+
+    /// ③ 下载失败后下次启动仍会重试：失败和「被杀」对这个决策函数是同一件事——
+    /// 两者都不会调 `clear_recovering_marker()`（只有真正装好那一刻才调），
+    /// 所以下一次启动看到的都是「标记在、配置可能已经是 builtin」，
+    /// 与 `boot_1_interrupted_boot_2_still_recovers` 是同一条断言。
+    #[test]
+    fn failed_download_is_retried_next_boot() {
+        assert_eq!(recovery_decision(true, true, false, true), RecoveryAction::Download);
     }
 
     #[test]

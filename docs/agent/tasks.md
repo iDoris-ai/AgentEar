@@ -1114,6 +1114,31 @@
     `mlx.metallib` 仍是官方那份——没装 Metal Toolchain，没法验证自己编译 `.metallib`
     是否可行，也没有必要（它跟这次的内存补丁无关，只跟上游 mlx-swift 版本绑定）。
     没给 soniqo/speech-swift 提上游 PR（A 路线仍未做）。
+- **第 2 步评审修复（PR #106，2026-10-03，`DONE`）**：PR-Daemon 评审抓到一个阻塞项——
+  升级空档的恢复判据原来只看 `cfg.asr_backend == speech_swift`，而 preflight 的退回
+  逻辑会把这个字段持久化改写成 `builtin`；进程被杀、崩溃，或升级后第一次调用恰好是
+  一次性 CLI 且没跑完下载，这条「其实是在恢复」的线索会永久丢失，用户卡在 SenseVoice
+  上。改成跨启动的持久标记（`qwen3::read/write/clear_recovering_marker`，判断逻辑
+  收进 `qwen3::recovery_decision` 这个纯函数，真值表 + ①②③ 三条验收测试见
+  `src/qwen3.rs` 测试）；一次性 CLI 不再发起下载（`RecoveryAction::Note`，只记标记，
+  不碰 `config.json`，靠 pin 住这次调用的后端选择在内存里退回 builtin）。
+  - **真实复现过**（不是只跑单测）：手工构造「boot 1 被打断」后的磁盘状态
+    （`config.json` 已经是 `builtin`、标记文件写着 `"0.6b"`、运行时目录只有旧版本）
+    ——这是因为活的网络下载在这台机器上快到（~4.5 秒）没法用真实 kill 可靠掐在中途，
+    手工构造的状态与「boot 1 真的被打断」逐字节等价（config 持久化、标记内容都是
+    `main.rs` 真代码会写出的那两份）。跑真实守护进程（boot 2）：日志依次出现
+    「模型权重还在，但...（或上一次恢复被打断）：后台补下运行时……」→ 下载 4.3 秒内
+    完成、sha 校验通过 → 「运行时补完，换回 speech_swift」→ 常驻服务起来并预热成功；
+    `config.json` 终态 `asr_backend` 回到 `speech_swift`，标记文件被清掉。
+  - 非阻塞①：`tray::should_switch_back` 纯函数，恢复窗口期内用户在下拉框重选同一个
+    模型时改认 `QWEN3_INTENT`，不会被 `QWEN3_RECOVERING` 被清空误判成「用户选了别的」。
+  - 非阻塞②：`is_our_server_cmdline` 从「必须是当前版本那一个具体路径」放宽成
+    「在我们 qwen3 运行时根目录下、文件名恰好是 `speech-server`」——升级后旧版本号
+    目录里的孤儿现在也认得出。
+  - 非阻塞③：`build-speech-runtime.sh` 的 `UPSTREAM_COMMIT` 改成核对完整 40 位 sha。
+  - 非阻塞④：`lint-shell.sh` 的正则从 `[^ -~]` 收紧为 `[^[:print:][:space:]]`——
+    前者连 tab/CR 之类的 ASCII 控制字符也当成「全角字符坑」误报；脚本里加了自检
+    （合成 tab / `${VAR}` / 全角括号三个用例，改坏了当场报错退出，不会悄悄又变假绿）。
 
 ---
 
