@@ -1042,7 +1042,7 @@
   「出现 GGUF 路径应重新评估」。
 - ⚠️ `llama-server` 默认上下文会吃 30 GB 级内存（ADR-0010 RAW §5），**`-c` 必须钉死并有测试守着**。
 
-### T3.5.9 Qwen3-ASR 常驻服务的内存：从「外面重启」到「进程内管住」  `IN PROGRESS`（2026-10-02 新增，jason 定；第 1 步 `DONE`）
+### T3.5.9 Qwen3-ASR 常驻服务的内存：从「外面重启」到「进程内管住」  `IN PROGRESS`（2026-10-02 新增，jason 定；第 1 步 `DONE`，第 2 步 B-lite `DONE`，待 jason 过一轮真机验收）
 - **来源**：jason 2026-10-02「越用越慢，一句话要好几分钟」。v0.26.2（PR #104 `d65080c`，**已发布**）先在外面兜底：
   每轮转完 `phys_footprint` > 4 GiB 就重启 speech-server。jason：「重启是临时方案」，要求查根因、规划自己解决。
 - **读源码得到的根因（speech-swift v0.0.28 @ `231f8eb`，✅ 第 1 步已实测证实）**：
@@ -1077,7 +1077,68 @@
     （装 Toolchain，或从官方发布包取并钉 sha）。
 - **相邻缺口（PR #104 评审顺带记的，非本 PR 引入）**：`main.rs` 约 1081 行 worker 线程出错走
   `std::process::exit(1)`，**跳过所有 Drop 也没调 `qwen3::stop_server`**——任何常驻服务清理在这条路径上都会被跳过
-  （孤儿由下次启动的 `reap_stale_server` 按 pid 文件收）。做方案 B 时顺手修。
+  （孤儿由下次启动的 `reap_stale_server` 按 pid 文件收）。✅ 做方案 B 时顺手修了
+  （worker 异常退出路径现在会调 `qwen3::stop_server`）。
+- **第 2 步「方案 B-lite」结果（2026-10-03，`DONE`）**：没有走 A（给 soniqo/speech-swift 提 PR，
+  还没提）也没有走原计划的 B（自己写最小服务端复用 `Qwen3ASR` 库）——改成更小的
+  **B-lite：自己从上游同一个 pinned 源码 + 第 1 步验证过的那个补丁编译官方的
+  `speech-server`，只换这一个二进制，`speech` CLI / `mlx.metallib` / 各个 bundle
+  仍用官方发布包里原样那份**（省掉自己装 Metal Toolchain 编 `.metallib` 的麻烦，
+  也不用从零实现 HTTP 协议/模型加载）。
+  - 补丁入库：[`patches/speech-swift-v0.0.28-agentear.patch`](../../patches/speech-swift-v0.0.28-agentear.patch)
+    （带 Apache-2.0 §4(b) 要求的修改说明）；构建脚本：
+    [`scripts/build-speech-runtime.sh`](../../scripts/build-speech-runtime.sh)（克隆 pinned tag →
+    核对 commit → 打补丁 → `swift build -c release --product speech-server` →
+    下官方 tarball 校验 sha → 只换 `speech-server` → 重新打包）。
+  - **真跑过一次完整构建**（非 incremental，克隆到干净临时目录）：耗时约 363 s（约 6 分钟，
+    与第 1 步记的「5.5 分钟」一致）。产物 `speech-macos-arm64-v0.0.28-agentear.1.tar.gz`
+    （sha256 `58f3701e663b157d1da427af8257d4cb44ac51f839b0401f3380f92c8e28f2d1`，
+    99502348 字节，解包后约 382.9 MB），发布在
+    `iDoris-ai/AgentEar` 自己的 GitHub release（**prerelease**，tag
+    `speech-runtime-v0.0.28-agentear.1`），`src/qwen3.rs::RUNTIME_URL` 等常量已更新。
+  - `src/qwen3.rs::SPEECH_VERSION` 改成 `v0.0.28-agentear.1`，`speech_command`
+    无条件传 `AGENTEAR_MLX_CACHE_MB=256`；v0.26.2 的 `SERVER_FOOTPRINT_BUDGET`
+    超限重启**没删**，当最后一道保险。
+  - **升级路径真跑过**（不是只看代码）：造一个「模型装过、运行时是旧版本」的临时
+    数据目录，守护进程启动时实测看到日志
+    `Qwen3-ASR 0.6B 的模型权重还在，但 speech-swift 运行时版本已更新到
+    v0.0.28-agentear.1：后台补下运行时……` → `运行时还没下完，这次启动先用随包的
+    SenseVoice` → 后台下载 8 秒内完成、sha 校验通过 → `运行时补完，换回
+    speech_swift` → 常驻服务自动预热成功。**模型没有被重新下**（只读了一次
+    `cp -c` 克隆来的 3 GB 缓存，没有新的网络请求打到 Hugging Face）。
+  - **真机 25 段录音基准测过**（`--asr-bench ... --runs 25 --only qwen3-0.6b-resident`，
+    同一批 jason 2026-10-02 的真实录音）：`server_footprint_mb` 全程在 998–1357 MB
+    之间波动，**零次「超过上限」重启**（都在 4 GiB 预算以内，补丁本身就把涨势按住了，
+    这次压根没用上 v0.26.2 那道后备闸）。转写内容看起来完整、通顺，不是乱码。
+  - **诚实边界**：只测了 0.6B；1.7B 本身已有上游的 4 GB 保护，这一轮没有单独测它。
+    `mlx.metallib` 仍是官方那份——没装 Metal Toolchain，没法验证自己编译 `.metallib`
+    是否可行，也没有必要（它跟这次的内存补丁无关，只跟上游 mlx-swift 版本绑定）。
+    没给 soniqo/speech-swift 提上游 PR（A 路线仍未做）。
+- **第 2 步评审修复（PR #106，2026-10-03，`DONE`）**：PR-Daemon 评审抓到一个阻塞项——
+  升级空档的恢复判据原来只看 `cfg.asr_backend == speech_swift`，而 preflight 的退回
+  逻辑会把这个字段持久化改写成 `builtin`；进程被杀、崩溃，或升级后第一次调用恰好是
+  一次性 CLI 且没跑完下载，这条「其实是在恢复」的线索会永久丢失，用户卡在 SenseVoice
+  上。改成跨启动的持久标记（`qwen3::read/write/clear_recovering_marker`，判断逻辑
+  收进 `qwen3::recovery_decision` 这个纯函数，真值表 + ①②③ 三条验收测试见
+  `src/qwen3.rs` 测试）；一次性 CLI 不再发起下载（`RecoveryAction::Note`，只记标记，
+  不碰 `config.json`，靠 pin 住这次调用的后端选择在内存里退回 builtin）。
+  - **真实复现过**（不是只跑单测）：手工构造「boot 1 被打断」后的磁盘状态
+    （`config.json` 已经是 `builtin`、标记文件写着 `"0.6b"`、运行时目录只有旧版本）
+    ——这是因为活的网络下载在这台机器上快到（~4.5 秒）没法用真实 kill 可靠掐在中途，
+    手工构造的状态与「boot 1 真的被打断」逐字节等价（config 持久化、标记内容都是
+    `main.rs` 真代码会写出的那两份）。跑真实守护进程（boot 2）：日志依次出现
+    「模型权重还在，但...（或上一次恢复被打断）：后台补下运行时……」→ 下载 4.3 秒内
+    完成、sha 校验通过 → 「运行时补完，换回 speech_swift」→ 常驻服务起来并预热成功；
+    `config.json` 终态 `asr_backend` 回到 `speech_swift`，标记文件被清掉。
+  - 非阻塞①：`tray::should_switch_back` 纯函数，恢复窗口期内用户在下拉框重选同一个
+    模型时改认 `QWEN3_INTENT`，不会被 `QWEN3_RECOVERING` 被清空误判成「用户选了别的」。
+  - 非阻塞②：`is_our_server_cmdline` 从「必须是当前版本那一个具体路径」放宽成
+    「在我们 qwen3 运行时根目录下、文件名恰好是 `speech-server`」——升级后旧版本号
+    目录里的孤儿现在也认得出。
+  - 非阻塞③：`build-speech-runtime.sh` 的 `UPSTREAM_COMMIT` 改成核对完整 40 位 sha。
+  - 非阻塞④：`lint-shell.sh` 的正则从 `[^ -~]` 收紧为 `[^[:print:][:space:]]`——
+    前者连 tab/CR 之类的 ASCII 控制字符也当成「全角字符坑」误报；脚本里加了自检
+    （合成 tab / `${VAR}` / 全角括号三个用例，改坏了当场报错退出，不会悄悄又变假绿）。
 
 ---
 
