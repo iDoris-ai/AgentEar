@@ -35,6 +35,12 @@ jobs:
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-
 
+      # macOS 自带 bash 3.2：`$VAR` 后紧跟全角字符会被当成变量名一部分，`set -u` 下直接崩。
+      # 这个检查原来用 `grep -P`（macOS grep 不支持），一直是假绿（PR #106 才发现）；
+      # 没人跑的检查等于没有检查，所以放进 CI。
+      - name: shell 脚本检查（bash 3.2 全角字符坑）
+        run: /bin/bash scripts/lint-shell.sh
+
       - name: 编译检查
         run: cargo build --locked
 
