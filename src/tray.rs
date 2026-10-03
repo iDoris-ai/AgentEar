@@ -113,6 +113,26 @@ pub fn note_qwen3_runtime_recovering(m: crate::qwen3::Qwen3Model) {
     *QWEN3_RECOVERING.lock().unwrap_or_else(|e| e.into_inner()) = Some(m);
 }
 
+/// 用户做了一个关于识别引擎的明确选择——选 SenseVoice、选另一档 Qwen3 模型、
+/// 或者任何会改 `asr_backend` / `qwen3_model` 的入口——这个选择之后，之前任何
+/// 「还在等运行时补上」的恢复线索都该作废。
+///
+/// ⚠️ **PR #106 评审第 3 轮阻塞项**：第 2 轮只清了内存里的 `QWEN3_RECOVERING`，
+/// 没清跨启动的磁盘标记（`qwen3::clear_recovering_marker`）。标记比内存 flag
+/// 活得更久——用户在恢复窗口期选了别的引擎之后，如果进程这时被杀/下载本身失败，
+/// 标记会原样留在磁盘上；未来某次启动重新出现 gap（比如下一次 `SPEECH_VERSION`
+/// 升级）时，`recovery_decision` 只看 `marker_present`，会把用户早就放弃的那个
+/// 模型**又恢复回来**，装好后 `should_switch_back` 判 true，把用户明确选过的
+/// 引擎在持久化层面强行换掉。两处都要清，所以收敛到这一个函数，不要分散写。
+///
+/// 所有会改 `asr_backend` / `qwen3_model` 的入口都要调用它：
+/// `switch_to_qwen3`（覆盖「用户选了已经装好的模型」「下载完成后切过去」两条路）、
+/// 「选 SenseVoice」分支、「选一档还没装好的模型，开始下载」分支。
+fn abandon_qwen3_recovery() {
+    *QWEN3_RECOVERING.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    crate::qwen3::clear_recovering_marker();
+}
+
 /// 升级空档恢复完成时，该不该真的换回 speech_swift——纯函数，测试钉住
 /// （PR #106 评审非阻塞①）。
 ///
@@ -132,12 +152,13 @@ fn should_switch_back(
     recovering == Some(m) || intent == Some(m)
 }
 
-/// 升级空档的运行时补完之后调用。
+/// 升级空档的运行时补完之后调用（`qwen3::start` 的安装成功回调）。
+/// **磁盘标记已经被清过了**——`qwen3::install`（`start` 和 `install_blocking`
+/// 共用的核心函数）在往下走到这个回调之前，成功路径上已经统一清掉
+/// `runtime-recovering.json`（PR #106 评审第 3 轮：收敛到一个地方清，
+/// 这里不用重复清一遍）。这个函数剩下要做的只是：这一次装好之后，
+/// 要不要真的把识别引擎切回去。
 pub fn on_qwen3_runtime_recovered(m: crate::qwen3::Qwen3Model) {
-    // 装完就算恢复完成——不管接下来要不要真的切回引擎，“空档”已经不存在了
-    // （`is_ready` 会重新变 true），标记没必要留着等下次启动误触发重试。
-    crate::qwen3::clear_recovering_marker();
-
     let recovering = {
         let mut r = QWEN3_RECOVERING.lock().unwrap_or_else(|e| e.into_inner());
         let v = *r;
@@ -164,6 +185,10 @@ pub fn on_qwen3_runtime_recovered(m: crate::qwen3::Qwen3Model) {
 
 /// 把识别引擎切到某一档 Qwen3（已确认装好）。常驻开着就顺手预热。
 fn switch_to_qwen3(m: crate::qwen3::Qwen3Model) {
+    // 任何切到某一档 Qwen3 的路径都经过这里（用户点了已装好的模型、下载完成后
+    // 自动切过去、恢复完成换回去）——收在这一处清掉恢复线索，不用在每个调用点
+    // 分别记得清（PR #106 评审第 3 轮）。
+    abandon_qwen3_recovery();
     config::update(|c| {
         c.asr_backend = crate::engine::AsrBackend::SpeechSwift;
         c.qwen3_model = m;
@@ -1068,8 +1093,9 @@ fn handle_qwen3(tag: isize) -> bool {
     }
     if tag == TAG_ASR_ENGINE_BASE {
         *QWEN3_INTENT.lock().unwrap_or_else(|e| e.into_inner()) = None;
-        // 用户自己选了 SenseVoice：升级空档的后台恢复不该在这之后又把引擎换回去。
-        *QWEN3_RECOVERING.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        // 用户自己选了 SenseVoice：升级空档的后台恢复不该在这之后又把引擎换回去，
+        // 磁盘上的恢复标记也要一起清（PR #106 评审第 3 轮阻塞项）。
+        abandon_qwen3_recovery();
         config::update(|c| c.asr_backend = crate::engine::AsrBackend::Builtin);
         log::info!("识别引擎改为 SenseVoice（随包，下次录音生效）");
         std::thread::spawn(|| qwen3::stop_server("识别引擎换回 SenseVoice"));
@@ -1077,8 +1103,10 @@ fn handle_qwen3(tag: isize) -> bool {
     }
     if let Some(m) = qwen3_model_for_tag(tag, TAG_ASR_ENGINE_BASE + 1) {
         let mut intent = QWEN3_INTENT.lock().unwrap_or_else(|e| e.into_inner());
-        // 同上：用户自己在下拉框里选了一档，这是用户的新选择，不是升级后台恢复。
-        *QWEN3_RECOVERING.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        // 同上：用户自己在下拉框里选了一档，这是用户的新选择，不是升级后台恢复
+        // ——哪怕选的是「还没装好、要先下载」的那一档，也不该让一个指向别的模型
+        // 的旧恢复标记继续留着（PR #106 评审第 3 轮阻塞项）。
+        abandon_qwen3_recovery();
         if qwen3::is_ready(m) {
             *intent = None;
             drop(intent);
@@ -1851,6 +1879,62 @@ mod tests {
         assert!(!should_switch_back(None, None, Small), "两个都没对上：用户选了别的，或者 flag 被清掉了");
         assert!(!should_switch_back(Some(Large), Some(Large), Small), "两条线索都指向别的模型");
         assert!(should_switch_back(Some(Small), Some(Large), Small), "只要有一条对上就该换");
+    }
+
+    /// PR #106 评审第 3 轮阻塞项：恢复窗口期用户选了 SenseVoice（或别的模型）之后，
+    /// 磁盘上的恢复标记必须跟内存 flag 一起清，否则未来某次重新出现 gap 时会把
+    /// 用户早就放弃的模型又恢复回来。
+    ///
+    /// 场景：恢复中（标记写着 `Small`）→ 用户选了 SenseVoice（`abandon_qwen3_recovery`）
+    /// → 标记被清 → 再模拟一次 gap 启动（`recovery_decision`，配置这时已经是
+    /// `builtin`）→ 不发起恢复；就算假设性地跑到 `should_switch_back`，两条线索
+    /// 也都是 `None`，不会切回。
+    ///
+    /// ⚠️ **`#[ignore]`**：`qwen3::root()` 依赖 `download::DATA_ROOT`，是一个
+    /// 进程级 `OnceLock`，默认 `cargo test` 里没人设过它（唯一会设的那条测试
+    /// ——`asr.rs::prompt_actually_changes_real_whisper_output`——同样是
+    /// `#[ignore]`）。单独跑：`cargo test -- --ignored
+    /// abandoning_recovery_clears_the_marker_so_a_future_gap_does_not_restart_it`。
+    #[test]
+    #[ignore]
+    fn abandoning_recovery_clears_the_marker_so_a_future_gap_does_not_restart_it() {
+        use crate::qwen3::{self, Qwen3Model::Small};
+        let data_root = crate::testutil::tmpdir("agentear-abandon-recovery");
+        // `write_marker` 不会自己建父目录——真实运行时这个目录在 qwen3
+        // 运行时/模型装好的过程里早就建过了，这里手工补上。
+        std::fs::create_dir_all(data_root.join("models").join("qwen3")).unwrap();
+        crate::download::set_data_root(data_root);
+
+        // 恢复中：main.rs 的 Download 分支会先写标记。
+        qwen3::write_recovering_marker(Small).expect("写标记失败");
+        assert_eq!(qwen3::read_recovering_marker(), Some(Small), "前置条件：标记真的写进去了");
+        *QWEN3_RECOVERING.lock().unwrap_or_else(|e| e.into_inner()) = Some(Small);
+
+        // 用户在这个窗口期选了 SenseVoice。
+        abandon_qwen3_recovery();
+
+        assert_eq!(qwen3::read_recovering_marker(), None, "磁盘标记必须被清掉");
+        assert_eq!(
+            *QWEN3_RECOVERING.lock().unwrap_or_else(|e| e.into_inner()),
+            None,
+            "内存 flag 也要清"
+        );
+
+        // 再模拟一次 gap 启动：配置这时已经是 builtin（用户刚选的），标记也没了。
+        let action = qwen3::recovery_decision(
+            /* gap */ true,
+            qwen3::read_recovering_marker().is_some(),
+            /* configured_backend_is_speech_swift */ false,
+            /* is_daemon */ true,
+        );
+        assert_eq!(action, qwen3::RecoveryAction::None, "不该重新发起对用户已放弃模型的恢复");
+
+        // 就算假设性地跑到完成回调，两条线索也都对不上，不会切回去。
+        assert!(!should_switch_back(
+            *QWEN3_RECOVERING.lock().unwrap_or_else(|e| e.into_inner()),
+            *QWEN3_INTENT.lock().unwrap_or_else(|e| e.into_inner()),
+            Small
+        ));
     }
 
     #[test]

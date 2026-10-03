@@ -644,6 +644,14 @@ fn install(m: Qwen3Model, cancel: &AtomicBool) -> Result<()> {
     smoke(m).map_err(|e| io_err(format!("加载冒烟失败: {e:#}")))?;
     write_marker(&model_marker(m).context("数据目录未初始化")?, m.revision())?;
     download::sync_dir(&root);
+    // 任何一次成功安装（不管是 `start` 的后台线程、`install_blocking` 的
+    // `--fetch-qwen3`，还是哪个模型）都会先确保共享的运行时装好（上面
+    // `need_runtime` 那一段），所以这里是「运行时现在肯定装好了」的唯一汇合点：
+    // 不管升级恢复标记当初记的是不是这个 `m`，运行时装好之后那个标记都已经
+    // 没有意义了（PR #106 评审第 3 轮阻塞项：「on_qwen3_installed /
+    // install_blocking 成功之后也要清」，放在这个共用的核心函数里比在每个
+    // 调用方分别清更不容易漏）。
+    clear_recovering_marker();
     Ok(())
 }
 
@@ -1084,12 +1092,18 @@ fn remove_own_pid_file(server: i32) {
 /// **仍然不认别的程序**：根目录前缀必须匹配（不是别的运行时目录），
 /// 文件名必须整段相等（不是 `speech-server-evil` 这种前缀碰巧对上的）。
 fn is_our_server_cmdline(cmdline: &str, runtime_root: &Path) -> bool {
-    let root = runtime_root.to_string_lossy();
-    if root.is_empty() {
+    if runtime_root.as_os_str().is_empty() {
         return false;
     }
+    // PR #106 评审第 3 轮非阻塞项：原来用字符串 `starts_with` 判断「在不在
+    // 运行时根目录下」，`.../runtime-evil/speech-server` 这种前缀字符串碰巧
+    // 对上、但实际在**另一个目录**的路径会被误判成「我们的」（字符串前缀
+    // 不等于路径分量前缀：`"…/runtime-evil"` 的字符串确实以 `"…/runtime"`
+    // 开头）。改成 `Path::starts_with`——按路径分量比较，`runtime-evil`
+    // 和 `runtime` 是两个不同的分量，不会再被误判。
     cmdline.split_whitespace().any(|tok| {
-        tok.starts_with(root.as_ref()) && Path::new(tok).file_name().is_some_and(|f| f == "speech-server")
+        let p = Path::new(tok);
+        p.starts_with(runtime_root) && p.file_name().is_some_and(|f| f == "speech-server")
     })
 }
 
@@ -1603,6 +1617,14 @@ mod tests {
         assert!(
             !is_our_server_cmdline(&format!("{}/other/speech-server --port 1", root.parent().unwrap().display()), root),
             "根目录不对的（比如别的运行时目录）不算"
+        );
+        // PR #106 评审第 3 轮非阻塞项：`runtime-evil` 与 `runtime` 字符串上
+        // 共享前缀，但是**两个不同的目录**——按路径分量比较就不会把它认错；
+        // 旧的 `starts_with` 字符串比较会在这条上误判成「我们的」。
+        let sibling = root.with_file_name("runtime-evil").join("speech-server");
+        assert!(
+            !is_our_server_cmdline(&format!("{} --port 1", sibling.display()), root),
+            "runtime-evil 跟 runtime 字符串前缀碰巧对上，但不是同一个目录，不该认成我们的"
         );
     }
 

@@ -238,16 +238,31 @@ fn main() -> Result<()> {
     // 而 PATH 上也没有老的 brew 版 speech：不对账的话下面的 preflight 会让
     // **整个守护进程起不来**。宁可退回随包的 SenseVoice 并把原因写清楚——
     // 录音是这个程序的本职，不能因为一个可选后端没装好就全挂。
-    let backend = if qwen3_recovery == qwen3::RecoveryAction::Note {
+    let backend = if qwen3_recovery == qwen3::RecoveryAction::Note && !pinned_backend {
         // 一次性 CLI 处在恢复空档：这一轮**只在内存里**退回 builtin（靠 pin
         // 住这个进程的后端选择），完全不碰 config.json——持久化交给上面已经
         // 写的标记，不是靠改 asr_backend（PR #106 评审阻塞项：改了
         // asr_backend 会在下一次启动把「这其实是在恢复」这条线索冲掉）。
+        //
+        // ⚠️ `&& !pinned_backend`（PR #106 评审第 3 轮 Low 项）：用户用
+        // `--asr-backend speech_swift` 显式指定过后端时**不要**悄悄换成
+        // SenseVoice——跟下面那条老的 fallback 分支同一个语义：显式指定
+        // 就不静默降级，运行时不在就让 `preflight` 报清楚的错误退出，
+        // 而不是假装它换成了别的引擎（用户会看到转写用了他没选的后端）。
         log::warn!(
             "  运行时还没补好；这次启动只在内存里退回随包的 SenseVoice，不改写配置（交给下次守护进程启动去后台补）"
         );
         pinned_backend = true;
         engine::AsrBackend::Builtin
+    } else if qwen3_recovery == qwen3::RecoveryAction::Note {
+        // 上面同样的空档，但用户显式 `--asr-backend speech_swift` 锁死了后端：
+        // 尊重这个显式选择，不覆盖——运行时缺失的话，下面 preflight 该怎么
+        // 报错还是怎么报错（和「从没装过」时显式指定的报错路径一致）。
+        log::info!(
+            "  {} 处在升级恢复空档（后台已经在补），但 --asr-backend 显式锁死了后端，不悄悄换成 SenseVoice",
+            qwen3_recovery_model.label()
+        );
+        backend
     } else if !pinned_backend
         && backend == engine::AsrBackend::SpeechSwift
         && !qwen3::is_ready(cfg.qwen3_model)
@@ -648,18 +663,19 @@ fn main() -> Result<()> {
             log::warn!("开不了一轮：{e}");
         }
         println!("== 通话一轮（离线，不走麦克风）==");
-        // ASR：与守护进程同一个引擎、同一条参数规则（`--lang` 只认 th / auto）。
-        // 与守护进程同一个后端、同一套构造（`config.json` 的 `asr_backend` 说了算）
-        let engine = engine::build(cfg.asr_backend, &vendor, Some(&data_root))?;
+        // ASR：用上面已经构造好的 `asr`（同一个 Dispatch），**不要再按
+        // `cfg.asr_backend` 重新 `engine::build` 一个**——PR #106 评审第 3 轮
+        // Low 项：重新 build 会绕开升级空档里的 `pinned_backend` 退回逻辑，
+        // 读到的是磁盘上原始的 `speech_swift`，这一轮会直接撞上还没装好的运行时。
         let asr_lang = if lang == talk::TalkLang::Th {
             asr::AsrLang::Thai
         } else {
             asr::AsrLang::Auto
         };
         // 分段耗时：命令行这一轮从「开始转写」起算（没有松键这一刻，也没有录音时长）。
-        timings::begin_at(Instant::now(), "conversation", None, engine.name());
+        timings::begin_at(Instant::now(), "conversation", None, asr.name());
         let t_asr = Instant::now();
-        let transcript = engine
+        let transcript = asr
             .transcribe(std::path::Path::new(&wav), asr_lang)
             .with_context(|| format!("转写失败：{wav}"))?;
         timings::mark(timings::Stage::AsrDone);
@@ -850,8 +866,10 @@ fn main() -> Result<()> {
                 Some("th") => asr::AsrLang::Thai,
                 _ => asr::AsrLang::Auto,
             };
-            let engine = engine::build(config::get().asr_backend, &vendor, Some(&dir))?;
-            let t = engine.transcribe(std::path::Path::new(&raw), lang)?;
+            // 用上面已经构造好的 `asr`（同一个 Dispatch），不要按
+            // `config::get().asr_backend` 重新 build——PR #106 评审第 3 轮
+            // Low 项，理由同 `--talk-turn` 那处。
+            let t = asr.transcribe(std::path::Path::new(&raw), lang)?;
             let text = paste::sanitize(&t.text);
             println!("听到: {text}");
             text

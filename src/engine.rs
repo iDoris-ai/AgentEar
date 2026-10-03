@@ -396,18 +396,6 @@ fn is_pure_latin(s: &str) -> bool {
     has_latin
 }
 
-/// 按后端选择造一个引擎。**配置切换走这里，不需要重新编译。**
-pub fn build(
-    backend: AsrBackend,
-    vendor: &Path,
-    data_root: Option<&Path>,
-) -> Result<Box<dyn AsrEngine>> {
-    match backend {
-        AsrBackend::Builtin => Ok(Box::new(BuiltinEngine::new(vendor, data_root)?)),
-        AsrBackend::SpeechSwift => Ok(Box::new(SpeechSwiftEngine::new(data_root))),
-    }
-}
-
 /// 守护进程用的引擎：**每一轮按当前配置分派**到 builtin 或 speech_swift。
 ///
 /// 为什么不在启动时定死：设置窗口里切「语音识别」要**即时生效**
@@ -524,12 +512,18 @@ mod tests {
 
     /// 验收判据之二：**切换后端不需要重新编译**，
     /// 同一份二进制按参数造出不同的引擎。
+    ///
+    /// ⚠️ PR #106 评审第 3 轮：原来走独立的 `build()` 函数，但生产代码里
+    /// 已经没有任何调用点再用它（`--talk-turn` / `--add-command-wav` 改成
+    /// 复用守护进程那同一个 `Dispatch` 之后，`build()` 变成只有这条测试在用
+    /// 的死代码），所以删掉那个函数，测试直接造 `SpeechSwiftEngine`——
+    /// 验收的还是同一件事：**同一份二进制按参数造出不同的引擎**，不需要
+    /// 透过那个单独的 `build()` 入口。
     #[test]
-    fn build_dispatches_by_backend_without_recompiling() {
-        let tmp = std::env::temp_dir().join("agentear-engine-test");
-        // Builtin 需要 vendor 里的真实文件，这里只验证 SpeechSwift 这条分支
-        // 能在没有任何 vendor 文件的情况下造出来——它本来就不依赖 vendor。
-        let e = build(AsrBackend::SpeechSwift, &tmp, None).expect("speech_swift 不该依赖 vendor");
+    fn speech_swift_engine_does_not_need_vendor() {
+        // Builtin 需要 vendor 里的真实文件；SpeechSwift 本来就不依赖 vendor，
+        // 这里验证它在没有任何 vendor 文件的情况下也能造出来。
+        let e = SpeechSwiftEngine::new(None);
         assert_eq!(e.name(), "speech_swift");
     }
 
