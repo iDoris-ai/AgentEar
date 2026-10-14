@@ -5,7 +5,8 @@
 //! `transcribe` 共用的 resolver 建好——每次现查，不缓存，所以下载完成后
 //! 已有 `Asr` 实例下一轮转写即可用，不需要重建。
 
-use crate::download::ModelSpec;
+use crate::download::{Fail, ModelSpec};
+use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -83,9 +84,31 @@ pub(crate) fn bin_fingerprint(bin: &Path) -> Option<String> {
     Some(format!("{:x}", h.finalize())[..16].to_string())
 }
 
+/// 原子写安装记录，调用方保证两份文件 SHA 全过 + 加载冒烟通过之后才调用。
+pub(crate) fn write_pair_record(data_root: &Path, rec: &PairRecord) -> Result<()> {
+    let path = record_path(data_root);
+    let tmp = path.with_file_name(format!(
+        "{}.tmp.{}",
+        path.file_name()
+            .and_then(|x| x.to_str())
+            .unwrap_or("installed"),
+        std::process::id()
+    ));
+    if fs::symlink_metadata(&tmp).is_ok() {
+        fs::remove_file(&tmp).ok();
+    }
+    let json = serde_json::to_string(rec)
+        .map_err(|e| anyhow::Error::new(Fail::Io).context(format!("序列化安装记录失败: {e}")))?;
+    fs::write(&tmp, json)
+        .map_err(|e| anyhow::Error::new(Fail::Io).context(format!("写安装记录失败: {e}")))?;
+    fs::rename(&tmp, &path)
+        .map_err(|e| anyhow::Error::new(Fail::Io).context(format!("落地安装记录失败: {e}")))?;
+    Ok(())
+}
+
 /// 数据目录里这一对文件是否就绪：两个文件都是普通文件、体积和记录里的
 /// 声明对得上、记录里的 bin 指纹和当前 bin 对得上。
-fn data_pair(data_root: &Path, bin: &Path) -> Option<(PathBuf, PathBuf)> {
+pub(crate) fn data_pair(data_root: &Path, bin: &Path) -> Option<(PathBuf, PathBuf)> {
     let dir = data_root.join("models");
     let (model, vad) = (dir.join(SENSEVOICE.file), dir.join(VAD.file));
     if !crate::download::is_present(&model) || !crate::download::is_present(&vad) {

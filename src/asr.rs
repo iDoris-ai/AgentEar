@@ -544,6 +544,40 @@ pub fn verify_thai_model(model: &Path) -> Result<()> {
     Ok(())
 }
 
+/// SenseVoice+VAD 下载组的安装校验：真的用这两个候选文件跑一次识别。
+///
+/// 和 [`verify_thai_model`] 的差别：只看 `exit 0` 不够——VAD 可能把静音
+/// 在模型被真正用上之前就滤掉。判据改成"输出里必须有识别标记"（哪怕是
+/// `<|nospeech|>`），这个标记只有两个文件都真被加载、推理跑完才会出现。
+pub(crate) fn smoke_sensevoice_pair(bin: &Path, model: &Path, vad: &Path) -> Result<()> {
+    let wav = std::env::temp_dir().join(format!("agentear-sv-smoke-{}.wav", std::process::id()));
+    write_silence(&wav, 0.5).context("写冒烟用的静音 wav 失败")?;
+    let out = Command::new(bin)
+        .arg("-m")
+        .arg(model)
+        .arg("--vad")
+        .arg(vad)
+        .arg("-a")
+        .arg(&wav)
+        .arg("--keep-tags")
+        .output()
+        .with_context(|| format!("启动 {} 失败", bin.display()));
+    let _ = std::fs::remove_file(&wav);
+    let out = out?;
+    if !out.status.success() {
+        bail!(
+            "SenseVoice/VAD 加载冒烟失败 (exit {:?}):\n{}",
+            out.status.code(),
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    if !stdout.contains("<|") {
+        bail!("冒烟没有识别标记，不能证明模型/VAD 真被加载：{stdout}");
+    }
+    Ok(())
+}
+
 /// 16 kHz 单声道静音。whisper 只吃 16 kHz。
 fn write_silence(path: &Path, secs: f32) -> Result<()> {
     let spec = hound::WavSpec {
@@ -589,6 +623,47 @@ mod tests {
         std::fs::create_dir_all(&vendor).unwrap();
         assert!(Asr::new(&vendor, None).is_err(), "引擎二进制缺失必须报错");
         let _ = std::fs::remove_dir_all(&vendor);
+    }
+
+    /// `smoke_sensevoice_pair` 的核心判据：**只看 `exit 0` 不够**，必须
+    /// 真有识别标记。用一个 sentinel 脚本代替真引擎，分别验证两种输入：
+    /// 有标记（通过）、没标记（拒绝，即便 exit 0）；同时验证两个候选文件
+    /// 的路径确实被当成参数传给了"引擎"，不是随便两个占位符。
+    #[test]
+    fn smoke_sensevoice_pair_requires_a_recognition_tag_not_just_exit_0() {
+        let dir = crate::testutil::tmpdir("agentear-sv-smoke-sentinel");
+        let model = dir.join("model.gguf");
+        let vad = dir.join("vad.gguf");
+        std::fs::write(&model, b"m").unwrap();
+        std::fs::write(&vad, b"v").unwrap();
+
+        // sentinel 把自己收到的参数记到与自己同目录的 args.log；是否打印
+        // 识别标记由同目录下是否存在 `want-tag` 这个哨兵文件决定——不用
+        // 环境变量，省得并行跑的测试互相踩。
+        let sentinel = dir.join("sentinel.sh");
+        std::fs::write(
+            &sentinel,
+            "#!/bin/sh\nd=$(dirname \"$0\")\necho \"$@\" > \"$d/args.log\"\nif [ -f \"$d/want-tag\" ]; then echo '<|zh|>mock<|eos|>'; fi\nexit 0\n",
+        )
+        .unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&sentinel, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        // 1) 没有识别标记：哪怕 exit 0，也必须报错——这正是本函数要挡的
+        //    那类假阳性（VAD 把输入全滤掉，SenseVoice 根本没被真正用上）。
+        let err = smoke_sensevoice_pair(&sentinel, &model, &vad).unwrap_err();
+        assert!(err.to_string().contains("没有识别标记"), "{err}");
+
+        // 2) 两个候选文件的路径真的被传给了"引擎"，不是占位符。
+        let args = std::fs::read_to_string(dir.join("args.log")).unwrap();
+        assert!(args.contains(model.to_str().unwrap()), "{args}");
+        assert!(args.contains(vad.to_str().unwrap()), "{args}");
+
+        // 3) 有识别标记才算通过。
+        std::fs::write(dir.join("want-tag"), b"").unwrap();
+        smoke_sensevoice_pair(&sentinel, &model, &vad).expect("有识别标记应该通过");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// `--keep-tags` 下每段转写的固定前缀。

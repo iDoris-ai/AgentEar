@@ -60,7 +60,9 @@ use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::OnceLock;
 use std::time::Duration;
 
-/// 一个可下载的模型。
+/// 一个可下载的模型。字段都是 `Copy`（两个 `&'static str` + 两个数），
+/// 派生 `Clone`/`Copy` 只是省得调用方到处 `&spec`——不改变任何语义。
+#[derive(Clone, Copy)]
 pub struct ModelSpec {
     /// 落盘文件名，同时也是 URL 的最后一段。
     pub file: &'static str,

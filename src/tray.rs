@@ -242,6 +242,8 @@ const TAG_RESUME_STANDALONE: isize = 15;
 const TAG_ASR_ENGINE_BASE: isize = 900;
 /// 设置窗口里每个 Qwen3 模型那一行的按钮（下载 / 取消 / 重试），`+` 模型下标。
 const TAG_QWEN3_DL_BASE: isize = 950;
+/// SenseVoice+VAD 下载组一行的按钮（下载/取消/重试）。独立于 Qwen3 的几档。
+const TAG_SV_PAIR_DL: isize = 960;
 /// `+0` 是「系统默认」，`+1..` 对应 `DEVICE_SNAPSHOT` 的下标。
 const TAG_DEVICE_BASE: isize = 1000;
 
@@ -841,7 +843,7 @@ fn list_voices(cfg: &config::Config, root: &std::path::Path) -> Vec<String> {
 
 fn handle(tag: isize, mtm: MainThreadMarker) {
     // Qwen3 相关的 tag 先处理：900/950 段落在音色（800 + 下标）的理论范围里。
-    if handle_qwen3(tag) || handle_a24(tag) {
+    if handle_qwen3(tag) || handle_a24(tag) || handle_sv_pair(tag) {
         return;
     }
     // 模式切换单独处理：它的副作用不止改配置（要掐播放、要开关会话）。
@@ -1133,6 +1135,22 @@ fn handle_qwen3(tag: isize) -> bool {
     false
 }
 
+/// SenseVoice+VAD 下载组这一行的按钮。没有引擎可切，只管下载本身。
+fn handle_sv_pair(tag: isize) -> bool {
+    if tag != TAG_SV_PAIR_DL {
+        return false;
+    }
+    match crate::builtin_download::state() {
+        download::State::Downloading(_) => crate::builtin_download::cancel(),
+        download::State::Verifying | download::State::Ready => {}
+        _ => {
+            log::info!("开始下载 SenseVoice+VAD（约 256 MB）");
+            crate::builtin_download::start(|| {});
+        }
+    }
+    true
+}
+
 /// tag → 音色下标。只认 `800..900`，别的区间（900 引擎 / 950 下载 / 1000 设备）一律不是音色。
 fn voice_index_for_tag(tag: isize) -> Option<usize> {
     (TAG_VOICE_BASE..TAG_VOICE_BASE + VOICE_TAG_SPAN as isize)
@@ -1181,6 +1199,9 @@ thread_local! {
         const { std::cell::RefCell::new(None) };
     /// 设置窗口里 Agent24 那一行（状态 + 连接/断开按钮），同样由 0.5 s 定时器活刷新。
     static A24_ROW: std::cell::RefCell<Option<(Retained<NSTextField>, Retained<NSButton>)>> =
+        const { std::cell::RefCell::new(None) };
+    /// 设置窗口里 SenseVoice+VAD 下载组那一行，同样由 0.5 s 定时器活刷新。
+    static SV_ROW: std::cell::RefCell<Option<(Retained<NSTextField>, Retained<NSButton>)>> =
         const { std::cell::RefCell::new(None) };
 }
 
@@ -1507,6 +1528,23 @@ fn build_settings_content(
         }
     }
     {
+        // SenseVoice+VAD 就绪状态，不绑在下拉框上：没有引擎要切。
+        let y = next_row();
+        let label = info_label(mtm, "", y);
+        label.setFrame(rect(
+            MARGIN + 18.0,
+            y,
+            SETTINGS_WIDTH - 2.0 * MARGIN - 18.0 - 110.0,
+            ROW_H,
+        ));
+        let b = action_button(mtm, &target, "", TAG_SV_PAIR_DL, y);
+        b.setFrame(rect(SETTINGS_WIDTH - MARGIN - 104.0, y, 104.0, ROW_H));
+        content.addSubview(&label);
+        content.addSubview(&b);
+        SV_ROW.with(|r| *r.borrow_mut() = Some((label, b)));
+        refresh_sv_row(lang);
+    }
+    {
         let row_y = next_row();
         content.addSubview(&info_label(mtm, i18n::t(lang, Key::AsrEngineSection), row_y));
         let popup = asr_engine_popup(mtm, &target, lang, row_y);
@@ -1667,6 +1705,32 @@ fn refresh_qwen3_rows(lang: Lang) {
     });
 }
 
+/// 刷新设置窗口里 SenseVoice+VAD 那一行；文案复用 qwen3 的通用函数。
+fn refresh_sv_row(lang: Lang) {
+    SV_ROW.with(|r| {
+        let r = r.borrow();
+        let Some((label, button)) = r.as_ref() else {
+            return;
+        };
+        let st = crate::builtin_download::state();
+        label.setStringValue(&NSString::from_str(&i18n::qwen3_status(
+            lang,
+            "SenseVoice + VAD",
+            256,
+            st,
+            crate::builtin_download::progress_bytes(),
+        )));
+        match i18n::qwen3_button(lang, st) {
+            Some(t) => {
+                button.setTitle(&NSString::from_str(t));
+                button.setHidden(false);
+                button.setEnabled(st != download::State::Verifying);
+            }
+            None => button.setHidden(true),
+        }
+    });
+}
+
 pub struct Tray {
     _item: Retained<NSStatusItem>,
     _timer: Retained<NSTimer>,
@@ -1731,6 +1795,7 @@ pub fn install(mtm: MainThreadMarker) -> Option<Tray> {
                 if visible {
                     refresh_qwen3_rows(config::get().ui_lang);
                     refresh_a24_row(config::get().ui_lang);
+                    refresh_sv_row(config::get().ui_lang);
                 }
                 if let Some(button) = item_for_timer.button(mtm) {
                     // 每次都重读语言，这样切换后标题最多 0.5s 就跟上
