@@ -8,6 +8,7 @@
 mod a3;
 mod a3_pair;
 mod asr;
+mod builtin_models;
 mod download;
 mod engine;
 mod audio;
@@ -324,9 +325,21 @@ fn main() -> Result<()> {
     // 是给宿主（Agent24）的冻结契约入口，宿主调它不该取决于 ASR 装没装好——
     // 早先它排在这里之后，没有 vendor 的机器上直接报「缺少 ASR 依赖文件」退出。
     if needs_asr_preflight(&args) {
-        asr.preflight(cfg.asr_lang)
-            .with_context(|| format!("ASR 后端 {} 依赖检查失败", asr.name()))?;
-        log::debug!("ASR 后端 = {}，依赖检查通过", asr.name());
+        match asr.preflight(cfg.asr_lang) {
+            Ok(()) => log::debug!("ASR 后端 = {}，依赖检查通过", asr.name()),
+            // 守护进程（无子命令）：模型未就绪不是致命错误——继续起 GUI/托盘，
+            // 让用户看到「识别模型尚未准备」，而不是直接退出看不到界面。
+            // 真正用到 ASR 时（worker 转写路径）再报一次这个错误。
+            Err(e) if args.len() <= 1 => {
+                log::warn!(
+                    "ASR 后端 {} 依赖检查未通过，守护进程继续启动，识别暂不可用: {e:#}",
+                    asr.name()
+                );
+            }
+            Err(e) => {
+                return Err(e).with_context(|| format!("ASR 后端 {} 依赖检查失败", asr.name()));
+            }
+        }
     } else {
         log::debug!("这个子命令不需要 ASR，跳过依赖检查");
     }
@@ -616,7 +629,7 @@ fn main() -> Result<()> {
 
     // 环境自检，排查「按了没反应」
     if args.iter().any(|a| a == "--diagnose") {
-        return diagnose(&vendor);
+        return diagnose(&vendor, &data_root);
     }
 
     // ------------------------------------------------------------------
@@ -2598,7 +2611,7 @@ pub fn restart_self() {
 }
 
 /// 环境自检。「按了没反应」时先跑这个。
-fn diagnose(vendor: &std::path::Path) -> Result<()> {
+fn diagnose(vendor: &std::path::Path, data_root: &std::path::Path) -> Result<()> {
     use cpal::traits::{DeviceTrait, HostTrait};
 
     println!("=== AgentEar 环境自检 ===\n");
@@ -2631,20 +2644,35 @@ fn diagnose(vendor: &std::path::Path) -> Result<()> {
         None => println!("  ❌ 找不到输入设备"),
     }
 
-    println!("\nASR 依赖:");
-    for (name, p) in [
-        ("二进制", vendor.join("bin/llama-funasr-sensevoice")),
-        ("模型", vendor.join("models/sensevoice-small-q8.gguf")),
-        ("VAD", vendor.join("models/fsmn-vad.gguf")),
-    ] {
-        let ok = p.exists();
-        let size = p.metadata().map(|m| m.len() / 1048576).unwrap_or(0);
-        println!(
-            "  {} {name}: {} ({} MiB)",
-            if ok { "✅" } else { "❌" },
-            p.display(),
-            size
-        );
+    println!("\nASR 依赖（所选引擎：SenseVoice+VAD）:");
+    let bin = vendor.join("bin/llama-funasr-sensevoice");
+    println!(
+        "  {} 二进制: {}",
+        if bin.exists() { "✅" } else { "❌" },
+        bin.display()
+    );
+    match builtin_models::resolve(vendor, Some(data_root), &bin) {
+        Some((m, v)) => {
+            println!("  ✅ 模型对已就绪: {}", m.display());
+            println!("     VAD: {}", v.display());
+        }
+        None => {
+            println!("  ⚪ 模型对尚未安装——录音会保存，识别会提示未准备");
+            println!(
+                "     旧 bundle: {}",
+                vendor
+                    .join("models")
+                    .join(builtin_models::SENSEVOICE.file)
+                    .display()
+            );
+            println!(
+                "     新数据目录: {}",
+                data_root
+                    .join("models")
+                    .join(builtin_models::SENSEVOICE.file)
+                    .display()
+            );
+        }
     }
 
     // Qwen3-ASR 同样是可选项，没装用 ⚪。
@@ -2838,7 +2866,7 @@ fn diagnose(vendor: &std::path::Path) -> Result<()> {
         );
     }
 
-    println!("\n数据目录: {}", data_root()?.display());
+    println!("\n数据目录: {}", data_root.display());
     Ok(())
 }
 
@@ -2943,7 +2971,8 @@ pub(crate) fn data_root() -> Result<PathBuf> {
 /// 查找顺序：环境变量 → .app bundle 内的 Resources → 源码树。
 /// 打包后可执行文件在 `AgentEar.app/Contents/MacOS/`，
 /// vendor 在 `AgentEar.app/Contents/Resources/vendor`。
-/// 只处理文字、不碰音频的子命令：它们不需要 ASR，也就不该被 ASR 依赖检查挡住。
+/// 只处理文字、不碰音频的子命令，以及 diagnose/模型预下载这类不需要 ASR
+/// 已就绪就能跑的子命令：都不该被 ASR 依赖检查挡住。
 const TEXT_ONLY_SUBCOMMANDS: &[&str] = &[
     "--match-command",
     "--commands",
@@ -2953,6 +2982,8 @@ const TEXT_ONLY_SUBCOMMANDS: &[&str] = &[
     "--cue",
     "--cue-wav",
     "--timings",
+    "--diagnose",
+    "--fetch-thai",
 ];
 
 /// 这次运行要不要先做 ASR 依赖检查。守护进程（无子命令）和一切会转写的子命令都要；
@@ -3336,6 +3367,8 @@ mod host_wiring_tests {
         assert!(!needs_asr_preflight(&a(&["--run-command", "x", "--host", "fake"])));
         assert!(!needs_asr_preflight(&a(&["--say", "你好"])));
         assert!(needs_asr_preflight(&a(&["--commands", "--add-command-wav", "x.wav"])), "混了会转写的：保守，照样检查");
+        assert!(!needs_asr_preflight(&a(&["--diagnose"])), "diagnose 要能在模型缺失时也跑到完整报告");
+        assert!(!needs_asr_preflight(&a(&["--fetch-thai"])), "预下载泰语模型不该被 SenseVoice 缺失挡住");
     }
 
     /// 测试用的 linger：未设 / 非法 = 0（行为不变），上限 120。

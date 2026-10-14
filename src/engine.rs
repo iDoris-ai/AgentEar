@@ -116,8 +116,18 @@ impl AsrEngine for BuiltinEngine {
     }
 
     fn preflight(&self, lang: AsrLang) -> Result<()> {
-        if lang == AsrLang::Thai && !crate::download::is_installed(&crate::download::THAI) {
-            bail!("泰语模型还没下载，先跑 --fetch-thai");
+        match lang {
+            // Thai 只检查自己的依赖，不被 SenseVoice 缺失挡住。
+            AsrLang::Thai => {
+                if !crate::download::is_installed(&crate::download::THAI) {
+                    bail!("泰语模型还没下载，先跑 --fetch-thai");
+                }
+            }
+            // 与 transcribe 共用同一个 resolver，不缓存首次缺失——下载完成后
+            // 这个实例下一轮转写即可用。
+            AsrLang::Auto => {
+                self.inner.resolve_sensevoice_pair()?;
+            }
         }
         Ok(())
     }
@@ -611,5 +621,58 @@ mod tests {
     fn auto_lang_sends_no_language_flag() {
         assert_eq!(SpeechSwiftEngine::lang_flag(AsrLang::Auto), None);
         assert_eq!(SpeechSwiftEngine::lang_flag(AsrLang::Thai), Some("th"));
+    }
+
+    /// PR1 RED2：`build_dynamic` 造出的同一个 `Dispatch` 实例，模型缺失时
+    /// `preflight` 报待准备且绝不调用引擎二进制（sentinel 0 次）；装上小文件
+    /// + 合法安装记录之后，**不重建**也能解析出新路径。
+    #[test]
+    fn dispatch_preflight_sees_installed_pair_without_rebuilding() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let base =
+            std::env::temp_dir().join(format!("agentear-engine-pair-{}", std::process::id()));
+        let vendor = base.join("vendor");
+        let data = base.join("data");
+        std::fs::create_dir_all(&vendor).unwrap();
+        std::fs::create_dir_all(&data).unwrap();
+
+        // sentinel：真实可执行，被调用就在旁边写一个标记文件。
+        let bin = vendor.join("bin/llama-funasr-sensevoice");
+        std::fs::create_dir_all(bin.parent().unwrap()).unwrap();
+        let called = base.join("called");
+        std::fs::write(&bin, format!("#!/bin/sh\ntouch {}\n", called.display())).unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let asr = build_dynamic(None, &vendor, Some(&data)).expect("vendor 里有 bin，构造应成功");
+
+        let err = format!("{:#}", asr.preflight(AsrLang::Auto).unwrap_err());
+        assert!(err.contains("尚未准备"), "{err}");
+        assert!(!called.exists(), "模型未就绪时绝不能调用引擎二进制");
+
+        let models = data.join("models");
+        std::fs::create_dir_all(&models).unwrap();
+        let model = models.join(crate::builtin_models::SENSEVOICE.file);
+        let vad = models.join(crate::builtin_models::VAD.file);
+        std::fs::write(&model, b"tiny-model").unwrap();
+        std::fs::write(&vad, b"tiny-vad").unwrap();
+        let rec = crate::builtin_models::PairRecord {
+            sensevoice_bytes: std::fs::metadata(&model).unwrap().len(),
+            vad_bytes: std::fs::metadata(&vad).unwrap().len(),
+            bin_fingerprint: crate::builtin_models::bin_fingerprint(&bin).unwrap(),
+        };
+        std::fs::write(
+            data.join("models/sensevoice-pair.installed"),
+            serde_json::to_string(&rec).unwrap(),
+        )
+        .unwrap();
+
+        assert!(
+            asr.preflight(AsrLang::Auto).is_ok(),
+            "装完小文件+合法记录后，同一实例应能解析出新路径"
+        );
+        assert!(!called.exists(), "preflight 本身不调用引擎二进制");
+
+        let _ = std::fs::remove_dir_all(&base);
     }
 }
