@@ -659,6 +659,8 @@ mod tests {
         let rec = crate::builtin_models::PairRecord {
             sensevoice_bytes: std::fs::metadata(&model).unwrap().len(),
             vad_bytes: std::fs::metadata(&vad).unwrap().len(),
+            sensevoice_sha256: crate::builtin_models::SENSEVOICE.sha256.to_string(),
+            vad_sha256: crate::builtin_models::VAD.sha256.to_string(),
             bin_fingerprint: crate::builtin_models::bin_fingerprint(&bin).unwrap(),
         };
         std::fs::write(

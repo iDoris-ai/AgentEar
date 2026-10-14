@@ -325,7 +325,8 @@ fn main() -> Result<()> {
     // 是给宿主（Agent24）的冻结契约入口，宿主调它不该取决于 ASR 装没装好——
     // 早先它排在这里之后，没有 vendor 的机器上直接报「缺少 ASR 依赖文件」退出。
     if needs_asr_preflight(&args) {
-        match asr.preflight(cfg.asr_lang) {
+        let lang_for_preflight = transcribe_lang(&args, cfg.asr_lang)?;
+        match asr.preflight(lang_for_preflight) {
             Ok(()) => log::debug!("ASR 后端 = {}，依赖检查通过", asr.name()),
             // 守护进程（无子命令）：模型未就绪不是致命错误——继续起 GUI/托盘，
             // 让用户看到「识别模型尚未准备」，而不是直接退出看不到界面。
@@ -364,15 +365,9 @@ fn main() -> Result<()> {
         // 后者会把 `--transcribe th.wav` 里的文件名当成语言选择。
         // 写错了就报错退出，不静默用配置里的值：排障时最怕的就是
         // 「我明明指定了泰语」而它其实走了别的引擎。
-        let lang = match args.iter().position(|a| a == "--lang") {
-            Some(i) => match args.get(i + 1).map(String::as_str) {
-                Some("th") | Some("thai") => asr::AsrLang::Thai,
-                Some("auto") => asr::AsrLang::Auto,
-                Some(other) => anyhow::bail!("--lang 只认 th / auto，收到 {other:?}"),
-                None => anyhow::bail!("--lang 后面要跟语言（th 或 auto）"),
-            },
-            None => config::get().asr_lang,
-        };
+        // 与上面 preflight 用的是同一个解析（`transcribe_lang`），
+        // 这里只是再查一遍当前配置，不会得到不同的语言。
+        let lang = transcribe_lang(&args, config::get().asr_lang)?;
         let t0 = Instant::now();
         let t = asr.transcribe(std::path::Path::new(&wav), lang)?;
         // 离线转写也走一遍纠错，否则「开了纠错但效果不对」这类问题
@@ -2995,6 +2990,33 @@ fn needs_asr_preflight(args: &[String]) -> bool {
     !text_only || audio
 }
 
+/// `--transcribe ... --lang th|auto` 的显式语言要在 preflight 之前就生效。
+///
+/// 修复前 preflight 只看 `cfg.asr_lang`（存储配置，默认 Auto）：配置是
+/// Auto、显式传了 `--lang th`、又没装 SenseVoice 时，preflight(Auto) 会在
+/// 真正解析 `--lang` 之前就因为 Auto 分支要的 SenseVoice 未就绪而报错退出，
+/// 泰语本来是独立于 SenseVoice 的，却被 Auto 的检查挡住了。
+///
+/// **只读不写**：返回值只影响这一次 preflight/transcribe 用哪个语言，
+/// 不改 `cfg.asr_lang`，存储配置和菜单里的勾选都不受影响。
+/// 只在真有 `--transcribe` 时才看 `--lang`——`--talk-turn` 等子命令的
+/// `--lang` 是 `talk::TalkLang`（zh/en/th），语义不同，不归这个函数管，
+/// Qwen3 恢复期退回 SenseVoice 的那条逻辑也不经过这里。
+fn transcribe_lang(args: &[String], stored: asr::AsrLang) -> Result<asr::AsrLang> {
+    if !args.iter().any(|a| a == "--transcribe") {
+        return Ok(stored);
+    }
+    match args.iter().position(|a| a == "--lang") {
+        Some(i) => match args.get(i + 1).map(String::as_str) {
+            Some("th") | Some("thai") => Ok(asr::AsrLang::Thai),
+            Some("auto") => Ok(asr::AsrLang::Auto),
+            Some(other) => anyhow::bail!("--lang 只认 th / auto，收到 {other:?}"),
+            None => anyhow::bail!("--lang 后面要跟语言（th 或 auto）"),
+        },
+        None => Ok(stored),
+    }
+}
+
 fn vendor_root() -> Result<PathBuf> {
     if let Ok(p) = std::env::var("AGENTEAR_VENDOR") {
         return Ok(PathBuf::from(p));
@@ -3367,8 +3389,14 @@ mod host_wiring_tests {
         assert!(!needs_asr_preflight(&a(&["--run-command", "x", "--host", "fake"])));
         assert!(!needs_asr_preflight(&a(&["--say", "你好"])));
         assert!(needs_asr_preflight(&a(&["--commands", "--add-command-wav", "x.wav"])), "混了会转写的：保守，照样检查");
-        assert!(!needs_asr_preflight(&a(&["--diagnose"])), "diagnose 要能在模型缺失时也跑到完整报告");
-        assert!(!needs_asr_preflight(&a(&["--fetch-thai"])), "预下载泰语模型不该被 SenseVoice 缺失挡住");
+        assert!(
+            !needs_asr_preflight(&a(&["--diagnose"])),
+            "diagnose 要能在模型缺失时也跑到完整报告"
+        );
+        assert!(
+            !needs_asr_preflight(&a(&["--fetch-thai"])),
+            "预下载泰语模型不该被 SenseVoice 缺失挡住"
+        );
     }
 
     /// 测试用的 linger：未设 / 非法 = 0（行为不变），上限 120。
