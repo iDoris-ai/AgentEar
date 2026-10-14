@@ -167,7 +167,8 @@ fn transcribe_rejects_tiny_self_declared_record_with_no_sha_fields() {
 /// 光比字节数看不出来，必须靠 sha256 挡住。
 #[test]
 fn transcribe_rejects_current_size_record_with_wrong_sha() {
-    let base = std::env::temp_dir().join(format!("agentear-pr1-r1-wrongsha-{}", std::process::id()));
+    let base =
+        std::env::temp_dir().join(format!("agentear-pr1-r1-wrongsha-{}", std::process::id()));
     let _ = fs::remove_dir_all(&base);
     let vendor = fixture_vendor(&base);
     let data = base.join("data");
@@ -335,14 +336,21 @@ fn explicit_cli_thai_lang_bypasses_auto_preflight_without_sensevoice() {
 
     let wav = base.join("synthetic.wav");
     fs::write(&wav, b"RIFF....WAVEfmt ").unwrap();
-    let out = run(&vendor, &data, &["--transcribe", wav.to_str().unwrap(), "--lang", "th"]);
+    let out = run(
+        &vendor,
+        &data,
+        &["--transcribe", wav.to_str().unwrap(), "--lang", "th"],
+    );
     assert!(
         out.status.success(),
         "配置 Auto + 显式 --lang th + Thai 模型就绪 + 没装 SenseVoice 时应该成功：{:?}\n{}",
         out.status,
         String::from_utf8_lossy(&out.stderr)
     );
-    assert!(base.join("whisper-called").exists(), "whisper 必须被调用一次");
+    assert!(
+        base.join("whisper-called").exists(),
+        "whisper 必须被调用一次"
+    );
     assert!(!base.join("sv-called").exists(), "SenseVoice 不该被调用");
 
     let stored = fs::read_to_string(data.join("config.json")).unwrap();
@@ -383,7 +391,10 @@ fn auto_without_explicit_lang_still_fails_when_no_models_installed() {
 /// `--lang` 给了非法值时要维持原有的那条报错，不受本次「提前解析」改动影响。
 #[test]
 fn transcribe_lang_invalid_value_keeps_original_error() {
-    let base = std::env::temp_dir().join(format!("agentear-pr1-r1-langinvalid-{}", std::process::id()));
+    let base = std::env::temp_dir().join(format!(
+        "agentear-pr1-r1-langinvalid-{}",
+        std::process::id()
+    ));
     let _ = fs::remove_dir_all(&base);
     let vendor = fixture_vendor_with_whisper(&base);
     let data = base.join("data");
@@ -392,7 +403,11 @@ fn transcribe_lang_invalid_value_keeps_original_error() {
 
     let wav = base.join("synthetic.wav");
     fs::write(&wav, b"RIFF....WAVEfmt ").unwrap();
-    let out = run(&vendor, &data, &["--transcribe", wav.to_str().unwrap(), "--lang", "zz"]);
+    let out = run(
+        &vendor,
+        &data,
+        &["--transcribe", wav.to_str().unwrap(), "--lang", "zz"],
+    );
     assert!(!out.status.success(), "非法 --lang 必须非零退出");
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(

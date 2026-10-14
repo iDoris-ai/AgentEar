@@ -219,7 +219,11 @@ mod tests {
             vad_sha256: VAD.sha256.to_string(),
             bin_fingerprint: bin_fingerprint(&bin).unwrap(),
         };
-        fs::write(record_path(&data), serde_json::to_string(&wrong_size_rec).unwrap()).unwrap();
+        fs::write(
+            record_path(&data),
+            serde_json::to_string(&wrong_size_rec).unwrap(),
+        )
+        .unwrap();
         assert!(
             resolve(&vendor, Some(&data), &bin).is_none(),
             "记录自称的体积跟当前 spec 不一致时必须判未就绪"
@@ -233,7 +237,11 @@ mod tests {
             vad_sha256: "f".repeat(64),
             bin_fingerprint: bin_fingerprint(&bin).unwrap(),
         };
-        fs::write(record_path(&data), serde_json::to_string(&wrong_sha_rec).unwrap()).unwrap();
+        fs::write(
+            record_path(&data),
+            serde_json::to_string(&wrong_sha_rec).unwrap(),
+        )
+        .unwrap();
         assert!(
             resolve(&vendor, Some(&data), &bin).is_none(),
             "同尺寸但 sha256 对不上当前 spec 时必须判未就绪"
