@@ -165,12 +165,16 @@ pub(crate) fn run_with(
         done_before += spec.bytes;
     }
 
+    // 缓存命中时最后一次进度回调之后可能已被取消：不进入 Verifying。
+    bail_if_cancelled(cancel)?;
     // 冒烟在 rename 之后、写记录之前：两文件 SHA 过了还不算就绪。
     on_verifying();
     let model = dir.join(specs[0].file);
     let vad = dir.join(specs[1].file);
     smoke(bin, &model, &vad)
         .map_err(|e| anyhow::Error::new(Fail::Io).context(format!("加载冒烟失败: {e:#}")))?;
+    // 冒烟后、落记录前再核对：取消后不得写安装记录；已校验的模型文件保留供重试复用。
+    bail_if_cancelled(cancel)?;
 
     let fp = builtin_models::bin_fingerprint(bin).ok_or_else(|| {
         anyhow::Error::new(Fail::Io).context("无法为当前引擎生成指纹，拒绝写安装记录")
@@ -188,6 +192,14 @@ pub(crate) fn run_with(
         },
     )?;
     download::sync_dir(&dir);
+    Ok(())
+}
+
+/// 本 job 已被取消就返回 `Fail::Cancelled`（不写记录、不动已有文件）。
+fn bail_if_cancelled(cancel: &AtomicBool) -> Result<()> {
+    if cancel.load(Ordering::SeqCst) {
+        return Err(anyhow::Error::new(Fail::Cancelled).context("用户取消了下载"));
+    }
     Ok(())
 }
 
@@ -209,6 +221,7 @@ fn ensure_one(
         && download::verify_file(&dest, spec.sha256, spec.bytes).is_ok()
     {
         on_progress(done_before + spec.bytes);
+        bail_if_cancelled(cancel)?;
         return Ok(());
     }
 
@@ -230,6 +243,8 @@ fn ensure_one(
         )?;
     }
 
+    // 整个 .part 已就位时不会走 fetch_url，必须自己核对取消；.part 保留供重试。
+    bail_if_cancelled(cancel)?;
     download::verify_file(&part, spec.sha256, spec.bytes)?;
     fs::File::open(&part)
         .and_then(|f| f.sync_all())
@@ -693,6 +708,111 @@ mod tests {
             ok_smoke,
         )
         .expect("已装好时重跑应该照样成功，不触网");
+    }
+
+    /// R1：两文件已缓存、最后一次 Downloading 进度回调时用户取消——
+    /// 不得进入 Verifying/冒烟，不得落记录；已校验文件保留，重试直接复用。
+    #[test]
+    fn run_with_cached_pair_cancelled_at_final_progress_is_not_ready_and_retry_reuses() {
+        let a = b"tiny sensevoice".to_vec();
+        let b = b"tiny vad".to_vec();
+        let fx = Fixture::start(HashMap::from([
+            ("/a.bin", a.clone()),
+            ("/b.bin", b.clone()),
+        ]));
+        let (spec_a, spec_b) = tiny_pair(&fx);
+        let data_root = crate::testutil::tmpdir("sv-pair-cancel-cached");
+        let bin = data_root.join("fake-bin");
+        fs::write(&bin, b"fake engine bytes").unwrap();
+        fs::create_dir_all(data_root.join("models")).unwrap();
+        fs::write(data_root.join("models/a.bin"), &a).unwrap();
+        fs::write(data_root.join("models/b.bin"), &b).unwrap();
+        let cancel = AtomicBool::new(false);
+        let total = spec_a.bytes + spec_b.bytes;
+        let verifying = std::cell::Cell::new(false);
+
+        let err = run_with(
+            &data_root,
+            &bin,
+            &[spec_a, spec_b],
+            &|done| {
+                if done == total {
+                    cancel.store(true, Ordering::SeqCst);
+                }
+            },
+            &|| verifying.set(true),
+            &cancel,
+            ok_smoke,
+        )
+        .unwrap_err();
+        assert_eq!(err.downcast_ref::<Fail>(), Some(&Fail::Cancelled));
+        assert!(!verifying.get(), "取消后不得进入 Verifying");
+        assert!(!data_root.join("models/sensevoice-pair.installed").exists());
+        assert_eq!(fs::read(data_root.join("models/a.bin")).unwrap(), a);
+
+        // 用户再试：复用已校验文件，成功落记录。
+        cancel.store(false, Ordering::SeqCst);
+        run_with(
+            &data_root,
+            &bin,
+            &[spec_a, spec_b],
+            &noop_progress,
+            &noop_verifying,
+            &cancel,
+            ok_smoke,
+        )
+        .expect("重试应复用文件并成功");
+        assert!(data_root.join("models/sensevoice-pair.installed").exists());
+    }
+
+    /// R1：冒烟期间取消——冒烟返回后、落记录前核对，不得写安装记录，文件保留。
+    #[test]
+    fn run_with_cancel_during_smoke_does_not_write_record() {
+        static SMOKE_CANCEL: AtomicBool = AtomicBool::new(false);
+        fn cancelling_smoke(_: &Path, _: &Path, _: &Path) -> Result<()> {
+            SMOKE_CANCEL.store(true, Ordering::SeqCst);
+            Ok(())
+        }
+        let a = b"tiny sensevoice".to_vec();
+        let b = b"tiny vad".to_vec();
+        let fx = Fixture::start(HashMap::from([
+            ("/a.bin", a.clone()),
+            ("/b.bin", b.clone()),
+        ]));
+        let (spec_a, spec_b) = tiny_pair(&fx);
+        let data_root = crate::testutil::tmpdir("sv-pair-cancel-smoke");
+        let bin = data_root.join("fake-bin");
+        fs::write(&bin, b"fake engine bytes").unwrap();
+
+        let err = run_with(
+            &data_root,
+            &bin,
+            &[spec_a, spec_b],
+            &noop_progress,
+            &noop_verifying,
+            &SMOKE_CANCEL,
+            cancelling_smoke,
+        )
+        .unwrap_err();
+        assert_eq!(err.downcast_ref::<Fail>(), Some(&Fail::Cancelled));
+        assert!(!data_root.join("models/sensevoice-pair.installed").exists());
+        assert_eq!(fs::read(data_root.join("models/a.bin")).unwrap(), a);
+        assert_eq!(fs::read(data_root.join("models/b.bin")).unwrap(), b);
+    }
+
+    /// R1：完整 .part 已就位（不走 fetch_url）时预先取消——.part 保留、不 rename。
+    #[test]
+    fn ensure_one_cancel_with_complete_part_keeps_part_and_skips_rename() {
+        let a = b"tiny sensevoice".to_vec();
+        let fx = Fixture::start(HashMap::new());
+        let (spec_a, _) = tiny_pair(&fx);
+        let dir = crate::testutil::tmpdir("sv-dl-cancel-part");
+        fs::write(dir.join("a.bin.part"), &a).unwrap();
+        let cancel = AtomicBool::new(true);
+        let err = ensure_one(&dir, &spec_a, 0, &noop_progress, &cancel).unwrap_err();
+        assert_eq!(err.downcast_ref::<Fail>(), Some(&Fail::Cancelled));
+        assert!(!dir.join("a.bin").exists());
+        assert!(dir.join("a.bin.part").exists());
     }
 
     /// 同一把组锁跨进程/跨线程互斥：锁被占着时 `run_with` 必须报
