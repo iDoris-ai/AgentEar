@@ -20,6 +20,7 @@
 
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
+use std::f64::consts::PI;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::OnceLock;
@@ -554,6 +555,55 @@ pub fn verify_thai_model(model: &Path) -> Result<()> {
     Ok(())
 }
 
+/// SenseVoice+VAD 下载组的安装校验：真的用这两个候选文件跑一次识别。
+///
+/// 和 [`verify_thai_model`] 的差别：只看 `exit 0` 不够——VAD 可能把静音
+/// 在模型被真正用上之前就滤掉。判据改成"输出里必须有识别标记"（哪怕是
+/// `<|nospeech|>`），这个标记只有两个文件都真被加载、推理跑完才会出现。
+pub(crate) fn smoke_sensevoice_pair(bin: &Path, model: &Path, vad: &Path) -> Result<()> {
+    // pid 不够唯一：同进程内并行跑这个函数两次（真实安装 + 测试）会撞同一个
+    // 文件名，一边删一边读。补一个纳秒戳当独有后缀，不改全局 `write_silence`。
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let wav = std::env::temp_dir().join(format!(
+        "agentear-sv-smoke-{}-{nonce}.wav",
+        std::process::id()
+    ));
+    // 静音会被 VAD 直接滤成空输出：真实 pinned 引擎吃 0.5s 静音时 exit 0，
+    // 但 stdout 只有一个换行、没有识别标记，于是合法装好的 SenseVoice+VAD
+    // 反而通不过下面这道「真被加载」的检查（见 EAR-NATIVE-SILENCE-RESULT.json）。
+    // 换成一段纯数学生成的谐波+音节包络波形（移植自 probe-synthetic-vad.py
+    // variant 0），不依赖麦克风/TTS/网络/版权音频，实测同一个引擎会真的
+    // 吐出识别标记。
+    write_synthetic_probe(&wav).context("写冒烟用的合成探针 wav 失败")?;
+    let out = Command::new(bin)
+        .arg("-m")
+        .arg(model)
+        .arg("--vad")
+        .arg(vad)
+        .arg("-a")
+        .arg(&wav)
+        .arg("--keep-tags")
+        .output()
+        .with_context(|| format!("启动 {} 失败", bin.display()));
+    let _ = std::fs::remove_file(&wav);
+    let out = out?;
+    if !out.status.success() {
+        bail!(
+            "SenseVoice/VAD 加载冒烟失败 (exit {:?}):\n{}",
+            out.status.code(),
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    if !stdout.contains("<|") {
+        bail!("冒烟没有识别标记，不能证明模型/VAD 真被加载：{stdout}");
+    }
+    Ok(())
+}
+
 /// 16 kHz 单声道静音。whisper 只吃 16 kHz。
 fn write_silence(path: &Path, secs: f32) -> Result<()> {
     let spec = hound::WavSpec {
@@ -565,6 +615,61 @@ fn write_silence(path: &Path, secs: f32) -> Result<()> {
     let mut w = hound::WavWriter::create(path, spec)?;
     for _ in 0..(16_000.0 * secs) as usize {
         w.write_sample(0i16)?;
+    }
+    w.finalize()?;
+    Ok(())
+}
+
+/// 2 秒、16 kHz 单声道的确定性合成探针，供 [`smoke_sensevoice_pair`] 用。
+/// 纯数学生成（谐波和 + 音节包络），没有随机项，不读麦克风/网络/TTS/
+/// 任何版权音频。
+///
+/// ⚠️ 必须用 `create_new(true)` 开文件：调用方给的是一个带纳秒戳的临时路径，
+/// 纳秒戳降低撞名概率但不是零——如果那个路径已经存在（撞名，或被人提前放了
+/// 一个符号链接），`WavWriter::create`（内部是普通 `File::create`，截断/跟随
+/// 链接）会悄悄盖掉或跟进别人的文件。`create_new` 让这种情况直接报错退出，
+/// 不去动那个已存在的路径。
+fn write_synthetic_probe(path: &Path) -> Result<()> {
+    const RATE: usize = 16_000;
+    let n = RATE * 2;
+    let mut samples = Vec::with_capacity(n);
+    let mut peak = 0.0f64;
+    for i in 0..n {
+        let t = i as f64 / RATE as f64;
+        let syllable = (t * 4.0) as i64 as usize % 4;
+        let f0 = 120.0 + 9.0 * (2.0 * PI * 3.0 * t).sin();
+        let f1 = [700.0, 450.0, 350.0, 700.0][syllable];
+        let f2 = [1200.0, 2000.0, 2400.0, 1200.0][syllable];
+        let phase = 2.0 * PI * f0 * t;
+        let v: f64 = (1..32)
+            .map(|h| {
+                let h = h as f64;
+                (h * phase).sin() / h
+                    * (0.12
+                        + 2.0 * (-((h * f0 - f1) / 130.0).powi(2)).exp()
+                        + 1.5 * (-((h * f0 - f2) / 200.0).powi(2)).exp()
+                        + 0.6 * (-((h * f0 - 2900.0) / 250.0).powi(2)).exp())
+            })
+            .sum();
+        let envelope = (PI * ((t * 4.0) % 1.0)).sin().powf(0.45);
+        let s = v * envelope;
+        peak = peak.max(s.abs());
+        samples.push(s);
+    }
+    let spec = hound::WavSpec {
+        channels: 1,
+        sample_rate: RATE as u32,
+        bits_per_sample: 16,
+        sample_format: hound::SampleFormat::Int,
+    };
+    let file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .with_context(|| format!("合成探针路径已存在，拒绝覆盖：{}", path.display()))?;
+    let mut w = hound::WavWriter::new(file, spec)?;
+    for s in samples {
+        w.write_sample((s / peak * 22000.0) as i16)?;
     }
     w.finalize()?;
     Ok(())
@@ -599,6 +704,47 @@ mod tests {
         std::fs::create_dir_all(&vendor).unwrap();
         assert!(Asr::new(&vendor, None).is_err(), "引擎二进制缺失必须报错");
         let _ = std::fs::remove_dir_all(&vendor);
+    }
+
+    /// `smoke_sensevoice_pair` 的核心判据：**只看 `exit 0` 不够**，必须
+    /// 真有识别标记。用一个 sentinel 脚本代替真引擎，分别验证两种输入：
+    /// 有标记（通过）、没标记（拒绝，即便 exit 0）；同时验证两个候选文件
+    /// 的路径确实被当成参数传给了"引擎"，不是随便两个占位符。
+    #[test]
+    fn smoke_sensevoice_pair_requires_a_recognition_tag_not_just_exit_0() {
+        let dir = crate::testutil::tmpdir("agentear-sv-smoke-sentinel");
+        let model = dir.join("model.gguf");
+        let vad = dir.join("vad.gguf");
+        std::fs::write(&model, b"m").unwrap();
+        std::fs::write(&vad, b"v").unwrap();
+
+        // sentinel 把自己收到的参数记到与自己同目录的 args.log；是否打印
+        // 识别标记由同目录下是否存在 `want-tag` 这个哨兵文件决定——不用
+        // 环境变量，省得并行跑的测试互相踩。
+        let sentinel = dir.join("sentinel.sh");
+        std::fs::write(
+            &sentinel,
+            "#!/bin/sh\nd=$(dirname \"$0\")\necho \"$@\" > \"$d/args.log\"\nif [ -f \"$d/want-tag\" ]; then echo '<|zh|>mock<|eos|>'; fi\nexit 0\n",
+        )
+        .unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&sentinel, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        // 1) 没有识别标记：哪怕 exit 0，也必须报错——这正是本函数要挡的
+        //    那类假阳性（VAD 把输入全滤掉，SenseVoice 根本没被真正用上）。
+        let err = smoke_sensevoice_pair(&sentinel, &model, &vad).unwrap_err();
+        assert!(err.to_string().contains("没有识别标记"), "{err}");
+
+        // 2) 两个候选文件的路径真的被传给了"引擎"，不是占位符。
+        let args = std::fs::read_to_string(dir.join("args.log")).unwrap();
+        assert!(args.contains(model.to_str().unwrap()), "{args}");
+        assert!(args.contains(vad.to_str().unwrap()), "{args}");
+
+        // 3) 有识别标记才算通过。
+        std::fs::write(dir.join("want-tag"), b"").unwrap();
+        smoke_sensevoice_pair(&sentinel, &model, &vad).expect("有识别标记应该通过");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// `--keep-tags` 下每段转写的固定前缀。
@@ -959,5 +1105,124 @@ mod whisper_tests {
             "带 prompt 应该至少救回一个技术词的拉丁书写，实际输出：{with:?}"
         );
         assert_ne!(without, with, "prompt 应该真的改变了输出，不能两次一模一样");
+    }
+
+    /// 探针本身必须是真数据：非静音、长度/采样率对得上——防止
+    /// `write_synthetic_probe` 以后被悄悄改回退化成静音却没人发现。
+    #[test]
+    fn synthetic_probe_is_not_silence_and_has_the_right_shape() {
+        let dir = crate::testutil::tmpdir("agentear-sv-probe-shape");
+        let path = dir.join("probe.wav");
+        write_synthetic_probe(&path).unwrap();
+        let reader = hound::WavReader::open(&path).unwrap();
+        let spec = reader.spec();
+        assert_eq!(spec.sample_rate, 16_000);
+        assert_eq!(spec.channels, 1);
+        let samples: Vec<i16> = reader.into_samples::<i16>().map(|s| s.unwrap()).collect();
+        assert_eq!(samples.len(), 32_000);
+        assert!(samples.iter().any(|&s| s != 0), "探针不能是静音");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 负控：目标路径已经被别人占了（普通文件，内容是哨兵字节）时，
+    /// `write_synthetic_probe` 必须报错退出、不能截断/覆写它——
+    /// `WavWriter::create` 内部是 `File::create`，纳秒戳降低撞名概率但不是
+    /// 零，撞上了就会悄悄吃掉已经在那个路径上的数据。
+    #[test]
+    fn write_synthetic_probe_refuses_to_overwrite_existing_file() {
+        let dir = crate::testutil::tmpdir("agentear-sv-probe-noclobber");
+        let path = dir.join("probe.wav");
+        std::fs::write(&path, b"sentinel-not-a-wav").unwrap();
+        let err = write_synthetic_probe(&path);
+        assert!(err.is_err(), "已存在的路径必须拒绝写入");
+        let bytes = std::fs::read(&path).unwrap();
+        assert_eq!(bytes, b"sentinel-not-a-wav", "已存在的文件内容不能被改动");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 负控的符号链接变体：目标路径是指向别处文件的符号链接时，
+    /// `create_new` 必须让整个调用失败、绝不能跟着链接写穿到别人的文件里。
+    #[test]
+    fn write_synthetic_probe_refuses_to_follow_a_symlink() {
+        let dir = crate::testutil::tmpdir("agentear-sv-probe-nosymlink");
+        let real = dir.join("someone-elses-file");
+        std::fs::write(&real, b"sentinel-not-a-wav").unwrap();
+        let link = dir.join("probe.wav");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let err = write_synthetic_probe(&link);
+        assert!(err.is_err(), "指向已存在文件的符号链接必须拒绝写入");
+        let bytes = std::fs::read(&real).unwrap();
+        assert_eq!(bytes, b"sentinel-not-a-wav", "链接背后的文件内容不能被改动");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 真机、真引擎、真缓存权重，不是 mock：对已经 SHA 锁定的公开缓存
+    /// SenseVoice+VAD（`ear-pr2-review/source-and-vendor-hashes.json` 钉的
+    /// 那两个模型文件 + 引擎二进制）跑一次真实 `smoke_sensevoice_pair`。
+    /// 这条测试就是本轮修复的 GREEN：换成合成探针之前，这个真实合法 pair
+    /// 会被旧判据拒掉（旧版喂 0.5s 静音，真实引擎 exit 0 但 stdout 只有
+    /// 一个换行、没有识别标记，见 EAR-NATIVE-SILENCE-RESULT.json）。
+    ///
+    /// `#[ignore]`：需要这台机器已经按 PR1/PR2 下载好 SenseVoice+VAD——
+    /// `AGENTEAR_VENDOR` 指到装了它们的 vendor 目录（默认 `vendor`，worktree
+    /// 里没有，照旧参 `prompt_actually_changes_real_whisper_output` 的用法）。
+    /// CI 不跑这条、也不下载任何权重。
+    #[test]
+    #[ignore = "需要真实已下载的 SenseVoice+VAD 权重对（native cache）"]
+    fn smoke_sensevoice_pair_accepts_the_real_pinned_pair() {
+        let vendor = native_cache_vendor();
+        let bin = vendor.join("bin/llama-funasr-sensevoice");
+        let model = vendor.join("models/sensevoice-small-q8.gguf");
+        let vad = vendor.join("models/fsmn-vad.gguf");
+        smoke_sensevoice_pair(&bin, &model, &vad)
+            .expect("真实合法 SenseVoice+VAD pair 应该通过冒烟");
+    }
+
+    /// 同一个真实引擎，VAD 路径不存在——必须拒绝（exit!=0）。
+    #[test]
+    #[ignore = "需要真实已下载的 SenseVoice+VAD 权重对（native cache）"]
+    fn smoke_sensevoice_pair_rejects_a_missing_vad_path() {
+        let vendor = native_cache_vendor();
+        let bin = vendor.join("bin/llama-funasr-sensevoice");
+        let model = vendor.join("models/sensevoice-small-q8.gguf");
+        let vad = vendor.join("models/does-not-exist.gguf");
+        assert!(smoke_sensevoice_pair(&bin, &model, &vad).is_err());
+    }
+
+    /// 同一个真实引擎，VAD 文件存在但不是合法 gguf——必须拒绝。
+    #[test]
+    #[ignore = "需要真实已下载的 SenseVoice+VAD 权重对（native cache）"]
+    fn smoke_sensevoice_pair_rejects_a_corrupt_vad_file() {
+        let vendor = native_cache_vendor();
+        let bin = vendor.join("bin/llama-funasr-sensevoice");
+        let model = vendor.join("models/sensevoice-small-q8.gguf");
+        let dir = crate::testutil::tmpdir("agentear-sv-smoke-badvad");
+        let bad_vad = dir.join("bad.gguf");
+        std::fs::write(&bad_vad, b"not-a-real-gguf-file").unwrap();
+        assert!(smoke_sensevoice_pair(&bin, &model, &bad_vad).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 同一个真实引擎，SenseVoice 模型文件损坏——必须拒绝。
+    #[test]
+    #[ignore = "需要真实已下载的 SenseVoice+VAD 权重对（native cache）"]
+    fn smoke_sensevoice_pair_rejects_a_corrupt_sensevoice_model() {
+        let vendor = native_cache_vendor();
+        let bin = vendor.join("bin/llama-funasr-sensevoice");
+        let vad = vendor.join("models/fsmn-vad.gguf");
+        let dir = crate::testutil::tmpdir("agentear-sv-smoke-badmodel");
+        let bad_model = dir.join("bad.gguf");
+        std::fs::write(&bad_model, b"not-a-real-gguf-file").unwrap();
+        assert!(smoke_sensevoice_pair(&bin, &bad_model, &vad).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 上面四条 native-cache 忽略测试共用的 vendor 定位：跟
+    /// `prompt_actually_changes_real_whisper_output` 同一套 `AGENTEAR_VENDOR`
+    /// 约定，worktree 里跑要显式指到装了真实权重的 checkout。
+    fn native_cache_vendor() -> PathBuf {
+        std::env::var("AGENTEAR_VENDOR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| PathBuf::from("vendor"))
     }
 }

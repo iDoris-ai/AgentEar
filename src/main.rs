@@ -8,6 +8,7 @@
 mod a3;
 mod a3_pair;
 mod asr;
+mod builtin_download;
 mod builtin_models;
 mod download;
 mod engine;
@@ -79,6 +80,7 @@ fn main() -> Result<()> {
     // 那种错很难发现，因为默认配置恰好是大多数情况下对的那个。
     let data_root = data_root()?;
     download::set_data_root(data_root.clone());
+    builtin_download::set_paths(vendor.clone(), data_root.clone());
     timings::init(&data_root);
     // 术语表在**启动时**就确保存在，不等到第一次纠错。
     //
