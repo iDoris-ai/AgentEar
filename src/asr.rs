@@ -613,6 +613,12 @@ fn write_silence(path: &Path, secs: f32) -> Result<()> {
 /// 2 秒、16 kHz 单声道的确定性合成探针，供 [`smoke_sensevoice_pair`] 用。
 /// 纯数学生成（谐波和 + 音节包络），没有随机项，不读麦克风/网络/TTS/
 /// 任何版权音频。
+///
+/// ⚠️ 必须用 `create_new(true)` 开文件：调用方给的是一个带纳秒戳的临时路径，
+/// 纳秒戳降低撞名概率但不是零——如果那个路径已经存在（撞名，或被人提前放了
+/// 一个符号链接），`WavWriter::create`（内部是普通 `File::create`，截断/跟随
+/// 链接）会悄悄盖掉或跟进别人的文件。`create_new` 让这种情况直接报错退出，
+/// 不去动那个已存在的路径。
 fn write_synthetic_probe(path: &Path) -> Result<()> {
     const RATE: usize = 16_000;
     let n = RATE * 2;
@@ -646,7 +652,12 @@ fn write_synthetic_probe(path: &Path) -> Result<()> {
         bits_per_sample: 16,
         sample_format: hound::SampleFormat::Int,
     };
-    let mut w = hound::WavWriter::create(path, spec)?;
+    let file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .with_context(|| format!("合成探针路径已存在，拒绝覆盖：{}", path.display()))?;
+    let mut w = hound::WavWriter::new(file, spec)?;
     for s in samples {
         w.write_sample((s / peak * 22000.0) as i16)?;
     }
@@ -1100,6 +1111,38 @@ mod whisper_tests {
         let samples: Vec<i16> = reader.into_samples::<i16>().map(|s| s.unwrap()).collect();
         assert_eq!(samples.len(), 32_000);
         assert!(samples.iter().any(|&s| s != 0), "探针不能是静音");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 负控：目标路径已经被别人占了（普通文件，内容是哨兵字节）时，
+    /// `write_synthetic_probe` 必须报错退出、不能截断/覆写它——
+    /// `WavWriter::create` 内部是 `File::create`，纳秒戳降低撞名概率但不是
+    /// 零，撞上了就会悄悄吃掉已经在那个路径上的数据。
+    #[test]
+    fn write_synthetic_probe_refuses_to_overwrite_existing_file() {
+        let dir = crate::testutil::tmpdir("agentear-sv-probe-noclobber");
+        let path = dir.join("probe.wav");
+        std::fs::write(&path, b"sentinel-not-a-wav").unwrap();
+        let err = write_synthetic_probe(&path);
+        assert!(err.is_err(), "已存在的路径必须拒绝写入");
+        let bytes = std::fs::read(&path).unwrap();
+        assert_eq!(bytes, b"sentinel-not-a-wav", "已存在的文件内容不能被改动");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 负控的符号链接变体：目标路径是指向别处文件的符号链接时，
+    /// `create_new` 必须让整个调用失败、绝不能跟着链接写穿到别人的文件里。
+    #[test]
+    fn write_synthetic_probe_refuses_to_follow_a_symlink() {
+        let dir = crate::testutil::tmpdir("agentear-sv-probe-nosymlink");
+        let real = dir.join("someone-elses-file");
+        std::fs::write(&real, b"sentinel-not-a-wav").unwrap();
+        let link = dir.join("probe.wav");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let err = write_synthetic_probe(&link);
+        assert!(err.is_err(), "指向已存在文件的符号链接必须拒绝写入");
+        let bytes = std::fs::read(&real).unwrap();
+        assert_eq!(bytes, b"sentinel-not-a-wav", "链接背后的文件内容不能被改动");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
