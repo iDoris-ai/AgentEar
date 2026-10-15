@@ -8,6 +8,7 @@
 mod a3;
 mod a3_pair;
 mod asr;
+mod builtin_models;
 mod download;
 mod engine;
 mod audio;
@@ -199,7 +200,9 @@ fn main() -> Result<()> {
     // 永远走不到，见 PR #106 这次 commit 的描述）。判「没有子命令」要看
     // `args.len() <= 1`。
     let qwen3_is_daemon = args.len() <= 1;
-    let qwen3_recovery = if needs_asr_preflight(&args) {
+    // 恢复判定与后端对账独立于「要不要跑 preflight」：`--diagnose`/`--fetch-thai`
+    // 跳过 preflight，但仍要像 base 一样保留 speech_swift 并写恢复标记。
+    let qwen3_recovery = if needs_asr_preflight(&args) || reconciles_asr_backend(&args) {
         qwen3::recovery_decision(
             qwen3_recovery_gap,
             qwen3_recovery_marker.is_some(),
@@ -324,9 +327,22 @@ fn main() -> Result<()> {
     // 是给宿主（Agent24）的冻结契约入口，宿主调它不该取决于 ASR 装没装好——
     // 早先它排在这里之后，没有 vendor 的机器上直接报「缺少 ASR 依赖文件」退出。
     if needs_asr_preflight(&args) {
-        asr.preflight(cfg.asr_lang)
-            .with_context(|| format!("ASR 后端 {} 依赖检查失败", asr.name()))?;
-        log::debug!("ASR 后端 = {}，依赖检查通过", asr.name());
+        let lang_for_preflight = transcribe_lang(&args, cfg.asr_lang)?;
+        match asr.preflight(lang_for_preflight) {
+            Ok(()) => log::debug!("ASR 后端 = {}，依赖检查通过", asr.name()),
+            // 守护进程（无子命令）：模型未就绪不是致命错误——继续起 GUI/托盘，
+            // 让用户看到「识别模型尚未准备」，而不是直接退出看不到界面。
+            // 真正用到 ASR 时（worker 转写路径）再报一次这个错误。
+            Err(e) if args.len() <= 1 && is_model_pair_not_ready(&e) => {
+                log::warn!(
+                    "ASR 后端 {} 依赖检查未通过，守护进程继续启动，识别暂不可用: {e:#}",
+                    asr.name()
+                );
+            }
+            Err(e) => {
+                return Err(e).with_context(|| format!("ASR 后端 {} 依赖检查失败", asr.name()));
+            }
+        }
     } else {
         log::debug!("这个子命令不需要 ASR，跳过依赖检查");
     }
@@ -351,15 +367,9 @@ fn main() -> Result<()> {
         // 后者会把 `--transcribe th.wav` 里的文件名当成语言选择。
         // 写错了就报错退出，不静默用配置里的值：排障时最怕的就是
         // 「我明明指定了泰语」而它其实走了别的引擎。
-        let lang = match args.iter().position(|a| a == "--lang") {
-            Some(i) => match args.get(i + 1).map(String::as_str) {
-                Some("th") | Some("thai") => asr::AsrLang::Thai,
-                Some("auto") => asr::AsrLang::Auto,
-                Some(other) => anyhow::bail!("--lang 只认 th / auto，收到 {other:?}"),
-                None => anyhow::bail!("--lang 后面要跟语言（th 或 auto）"),
-            },
-            None => config::get().asr_lang,
-        };
+        // 与上面 preflight 用的是同一个解析（`transcribe_lang`），
+        // 这里只是再查一遍当前配置，不会得到不同的语言。
+        let lang = transcribe_lang(&args, config::get().asr_lang)?;
         let t0 = Instant::now();
         let t = asr.transcribe(std::path::Path::new(&wav), lang)?;
         // 离线转写也走一遍纠错，否则「开了纠错但效果不对」这类问题
@@ -616,7 +626,7 @@ fn main() -> Result<()> {
 
     // 环境自检，排查「按了没反应」
     if args.iter().any(|a| a == "--diagnose") {
-        return diagnose(&vendor);
+        return diagnose(&vendor, &data_root);
     }
 
     // ------------------------------------------------------------------
@@ -2598,7 +2608,7 @@ pub fn restart_self() {
 }
 
 /// 环境自检。「按了没反应」时先跑这个。
-fn diagnose(vendor: &std::path::Path) -> Result<()> {
+fn diagnose(vendor: &std::path::Path, data_root: &std::path::Path) -> Result<()> {
     use cpal::traits::{DeviceTrait, HostTrait};
 
     println!("=== AgentEar 环境自检 ===\n");
@@ -2631,20 +2641,35 @@ fn diagnose(vendor: &std::path::Path) -> Result<()> {
         None => println!("  ❌ 找不到输入设备"),
     }
 
-    println!("\nASR 依赖:");
-    for (name, p) in [
-        ("二进制", vendor.join("bin/llama-funasr-sensevoice")),
-        ("模型", vendor.join("models/sensevoice-small-q8.gguf")),
-        ("VAD", vendor.join("models/fsmn-vad.gguf")),
-    ] {
-        let ok = p.exists();
-        let size = p.metadata().map(|m| m.len() / 1048576).unwrap_or(0);
-        println!(
-            "  {} {name}: {} ({} MiB)",
-            if ok { "✅" } else { "❌" },
-            p.display(),
-            size
-        );
+    println!("\nASR 依赖（所选引擎：SenseVoice+VAD）:");
+    let bin = vendor.join("bin/llama-funasr-sensevoice");
+    println!(
+        "  {} 二进制: {}",
+        if bin.exists() { "✅" } else { "❌" },
+        bin.display()
+    );
+    match builtin_models::resolve(vendor, Some(data_root), &bin) {
+        Some((m, v)) => {
+            println!("  ✅ 模型对已就绪: {}", m.display());
+            println!("     VAD: {}", v.display());
+        }
+        None => {
+            println!("  ⚪ 模型对尚未安装——录音会保存，识别会提示未准备");
+            println!(
+                "     旧 bundle: {}",
+                vendor
+                    .join("models")
+                    .join(builtin_models::SENSEVOICE.file)
+                    .display()
+            );
+            println!(
+                "     新数据目录: {}",
+                data_root
+                    .join("models")
+                    .join(builtin_models::SENSEVOICE.file)
+                    .display()
+            );
+        }
     }
 
     // Qwen3-ASR 同样是可选项，没装用 ⚪。
@@ -2838,7 +2863,7 @@ fn diagnose(vendor: &std::path::Path) -> Result<()> {
         );
     }
 
-    println!("\n数据目录: {}", data_root()?.display());
+    println!("\n数据目录: {}", data_root.display());
     Ok(())
 }
 
@@ -2943,7 +2968,8 @@ pub(crate) fn data_root() -> Result<PathBuf> {
 /// 查找顺序：环境变量 → .app bundle 内的 Resources → 源码树。
 /// 打包后可执行文件在 `AgentEar.app/Contents/MacOS/`，
 /// vendor 在 `AgentEar.app/Contents/Resources/vendor`。
-/// 只处理文字、不碰音频的子命令：它们不需要 ASR，也就不该被 ASR 依赖检查挡住。
+/// 只处理文字、不碰音频的子命令，以及 diagnose/模型预下载这类不需要 ASR
+/// 已就绪就能跑的子命令：都不该被 ASR 依赖检查挡住。
 const TEXT_ONLY_SUBCOMMANDS: &[&str] = &[
     "--match-command",
     "--commands",
@@ -2953,6 +2979,8 @@ const TEXT_ONLY_SUBCOMMANDS: &[&str] = &[
     "--cue",
     "--cue-wav",
     "--timings",
+    "--diagnose",
+    "--fetch-thai",
 ];
 
 /// 这次运行要不要先做 ASR 依赖检查。守护进程（无子命令）和一切会转写的子命令都要；
@@ -2962,6 +2990,46 @@ fn needs_asr_preflight(args: &[String]) -> bool {
     let text_only = args.iter().any(|a| TEXT_ONLY_SUBCOMMANDS.contains(&a.as_str()));
     let audio = args.iter().any(|a| NEEDS_AUDIO.contains(&a.as_str()));
     !text_only || audio
+}
+
+/// `--transcribe ... --lang th|auto` 的显式语言要在 preflight 之前就生效。
+///
+/// 修复前 preflight 只看 `cfg.asr_lang`（存储配置，默认 Auto）：配置是
+/// Auto、显式传了 `--lang th`、又没装 SenseVoice 时，preflight(Auto) 会在
+/// 真正解析 `--lang` 之前就因为 Auto 分支要的 SenseVoice 未就绪而报错退出，
+/// 泰语本来是独立于 SenseVoice 的，却被 Auto 的检查挡住了。
+///
+/// **只读不写**：返回值只影响这一次 preflight/transcribe 用哪个语言，
+/// 不改 `cfg.asr_lang`，存储配置和菜单里的勾选都不受影响。
+/// 只在真有 `--transcribe` 时才看 `--lang`——`--talk-turn` 等子命令的
+/// `--lang` 是 `talk::TalkLang`（zh/en/th），语义不同，不归这个函数管，
+/// Qwen3 恢复期退回 SenseVoice 的那条逻辑也不经过这里。
+fn transcribe_lang(args: &[String], stored: asr::AsrLang) -> Result<asr::AsrLang> {
+    if !args.iter().any(|a| a == "--transcribe") {
+        return Ok(stored);
+    }
+    match args.iter().position(|a| a == "--lang") {
+        Some(i) => match args.get(i + 1).map(String::as_str) {
+            Some("th") | Some("thai") => Ok(asr::AsrLang::Thai),
+            Some("auto") => Ok(asr::AsrLang::Auto),
+            Some(other) => anyhow::bail!("--lang 只认 th / auto，收到 {other:?}"),
+            None => anyhow::bail!("--lang 后面要跟语言（th 或 auto）"),
+        },
+        None => Ok(stored),
+    }
+}
+
+/// 跳过 preflight 的 `--diagnose`/`--fetch-thai` 仍参与 Qwen3 恢复判定，
+/// 否则下面的退回会把用户的 speech_swift 持久化改成 builtin、丢掉恢复标记。
+fn reconciles_asr_backend(args: &[String]) -> bool {
+    args.iter()
+        .any(|a| a == "--diagnose" || a == "--fetch-thai")
+}
+
+/// 守护进程启动期只放行类型化的「模型对未就绪」；其他 preflight 错误
+/// （speech 契约失败、引擎二进制缺失等）必须仍然致命退出。
+fn is_model_pair_not_ready(e: &anyhow::Error) -> bool {
+    e.downcast_ref::<asr::ModelPairNotReady>().is_some()
 }
 
 fn vendor_root() -> Result<PathBuf> {
@@ -3336,6 +3404,14 @@ mod host_wiring_tests {
         assert!(!needs_asr_preflight(&a(&["--run-command", "x", "--host", "fake"])));
         assert!(!needs_asr_preflight(&a(&["--say", "你好"])));
         assert!(needs_asr_preflight(&a(&["--commands", "--add-command-wav", "x.wav"])), "混了会转写的：保守，照样检查");
+        assert!(
+            !needs_asr_preflight(&a(&["--diagnose"])),
+            "diagnose 要能在模型缺失时也跑到完整报告"
+        );
+        assert!(
+            !needs_asr_preflight(&a(&["--fetch-thai"])),
+            "预下载泰语模型不该被 SenseVoice 缺失挡住"
+        );
     }
 
     /// 测试用的 linger：未设 / 非法 = 0（行为不变），上限 120。
@@ -3357,5 +3433,35 @@ mod host_wiring_tests {
         assert_eq!(turn_error(&wrapped).kind, "privacy_denied", "被 context 包一层也认得出");
         assert_eq!(turn_error(&anyhow::anyhow!("TTS 边车请求失败")).kind, "tts_unavailable");
         assert_eq!(turn_error(&anyhow::anyhow!("别的")).kind, "internal");
+    }
+
+    /// 守护进程只放行类型化的「模型对未就绪」；其他 preflight 错误必须仍然致命，
+    /// 即使文案里恰好出现「尚未准备」也不行（不靠字符串猜）。
+    #[test]
+    fn only_typed_model_pair_error_is_tolerated_by_daemon() {
+        assert!(is_model_pair_not_ready(&anyhow::Error::new(
+            asr::ModelPairNotReady
+        )));
+        assert!(is_model_pair_not_ready(
+            &anyhow::Error::new(asr::ModelPairNotReady).context("包了一层上下文")
+        ));
+        for msg in [
+            "识别模型尚未准备",
+            "`speech transcribe` 不认 --context",
+            "内置 ASR 不可用",
+        ] {
+            assert!(!is_model_pair_not_ready(&anyhow::anyhow!(msg)));
+        }
+    }
+
+    /// `--diagnose`/`--fetch-thai` 跳过 preflight，但仍参与 Qwen3 恢复判定。
+    #[test]
+    fn diagnose_and_fetch_thai_still_reconcile_backend() {
+        let a = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert!(reconciles_asr_backend(&a(&["agentear", "--diagnose"])));
+        assert!(reconciles_asr_backend(&a(&["agentear", "--fetch-thai"])));
+        let other = a(&["agentear", "--match-command", "x"]);
+        assert!(!reconciles_asr_backend(&other));
+        assert!(!needs_asr_preflight(&a(&["agentear", "--diagnose"])));
     }
 }

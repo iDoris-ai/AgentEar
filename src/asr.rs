@@ -77,8 +77,9 @@ pub enum AsrLang {
 
 pub struct Asr {
     bin: PathBuf,
-    model: PathBuf,
-    vad: PathBuf,
+    /// vendor 目录本身，留给 `resolve_sensevoice_pair` 现查旧 bundle——
+    /// 模型/VAD 的路径不在构造时钉死，见该方法的说明。
+    vendor: PathBuf,
     /// 泰语链路的二进制。**缺失不是致命错误**——它只影响泰语，
     /// 主链路照常工作。老版本升级上来时 vendor 里没有这个文件，
     /// 那时候不该连启动都失败。
@@ -107,6 +108,20 @@ pub struct Transcript {
     pub lang: Option<String>,
 }
 
+/// SenseVoice 模型对尚未安装/就绪。可识别的类型化错误：守护进程启动期只放行
+/// 这一种 preflight 失败（`downcast_ref`），其余（契约失败、引擎缺失等）仍致命。
+/// 文案不声称录音已保存：`--transcribe <file>` 与启动 preflight 时并没有录音。
+#[derive(Debug)]
+pub(crate) struct ModelPairNotReady;
+
+impl std::fmt::Display for ModelPairNotReady {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("识别模型尚未准备：请在设置里安装模型后重试（或重跑 --transcribe）")
+    }
+}
+
+impl std::error::Error for ModelPairNotReady {}
+
 impl Asr {
     /// `data_root` 用来读 `terms.json`，取里面的拉丁词当泰语 code-switch 的
     /// initial prompt。传 `None`（比如还没跑过 `--diagnose` 之外的一次性
@@ -114,19 +129,24 @@ impl Asr {
     pub fn new(vendor: &Path, data_root: Option<&Path>) -> Result<Self> {
         let a = Self {
             bin: vendor.join("bin/llama-funasr-sensevoice"),
-            model: vendor.join("models/sensevoice-small-q8.gguf"),
-            vad: vendor.join("models/fsmn-vad.gguf"),
+            vendor: vendor.to_path_buf(),
             whisper: vendor.join("bin/whisper-cli"),
             data_root: data_root.map(Path::to_path_buf),
         };
-        // 只校验主链路。whisper 的缺失留到真要用泰语时再报——
-        // 见 whisper 字段的说明。
-        for p in [&a.bin, &a.model, &a.vad] {
-            if !p.exists() {
-                bail!("缺少 ASR 依赖文件: {}", p.display());
-            }
+        // 只校验引擎二进制本身。模型/VAD 的有无不在构造时判——
+        // 它们现在可能还没下载，`preflight`/`transcribe` 每次现查
+        // （`resolve_sensevoice_pair`），下载完成后这个实例下一轮即可用。
+        if !a.bin.exists() {
+            bail!("缺少 ASR 引擎: {}", a.bin.display());
         }
         Ok(a)
+    }
+
+    /// `preflight`(Auto) 与 `transcribe_sensevoice` 共用：现查一遍模型对是否
+    /// 就绪，不缓存首次缺失。
+    pub(crate) fn resolve_sensevoice_pair(&self) -> Result<(PathBuf, PathBuf)> {
+        crate::builtin_models::resolve(&self.vendor, self.data_root.as_deref(), &self.bin)
+            .ok_or_else(|| anyhow::Error::new(ModelPairNotReady))
     }
 
     /// 按选定的识别语言分派到对应引擎。
@@ -138,11 +158,12 @@ impl Asr {
     }
 
     fn transcribe_sensevoice(&self, wav: &Path) -> Result<Transcript> {
+        let (model, vad) = self.resolve_sensevoice_pair()?;
         let out = Command::new(&self.bin)
             .arg("-m")
-            .arg(&self.model)
+            .arg(&model)
             .arg("--vad")
-            .arg(&self.vad)
+            .arg(&vad)
             .arg("-a")
             .arg(wav)
             // 必须保留标记：`<|zh|>` / `<|en|>` 是区分「转写结果」与「日志」的唯一
@@ -552,6 +573,33 @@ fn write_silence(path: &Path, secs: f32) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// PR1 RED1：temp vendor 只有 bin fixture、没有模型/VAD 时，
+    /// `Asr::new` 也要能造出定位对象——模型的有无留给 preflight/transcribe
+    /// 现查，不该在构造时就因为「还没下载」而失败。
+    #[test]
+    fn new_succeeds_with_bin_fixture_and_no_models() {
+        let vendor = std::env::temp_dir().join(format!("agentear-asr-new-{}", std::process::id()));
+        let bin = vendor.join("bin/llama-funasr-sensevoice");
+        std::fs::create_dir_all(bin.parent().unwrap()).unwrap();
+        std::fs::write(&bin, b"fixture-bin").unwrap();
+        let err = Asr::new(&vendor, None).err().map(|e| e.to_string());
+        assert!(
+            err.is_none(),
+            "只有 bin、没有模型/VAD 时构造应该成功：{err:?}"
+        );
+        let _ = std::fs::remove_dir_all(&vendor);
+    }
+
+    /// 引擎二进制本身缺失仍然是致命错误——不能把「真的装坏了」吞掉。
+    #[test]
+    fn new_fails_without_bin() {
+        let vendor =
+            std::env::temp_dir().join(format!("agentear-asr-nobin-{}", std::process::id()));
+        std::fs::create_dir_all(&vendor).unwrap();
+        assert!(Asr::new(&vendor, None).is_err(), "引擎二进制缺失必须报错");
+        let _ = std::fs::remove_dir_all(&vendor);
+    }
 
     /// `--keep-tags` 下每段转写的固定前缀。
     fn tagged(lang: &str, body: &str) -> String {
