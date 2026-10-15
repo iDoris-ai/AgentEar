@@ -113,6 +113,10 @@ fn data_pair(data_root: &Path, bin: &Path) -> Option<(PathBuf, PathBuf)> {
 
 /// 旧完整 bundle：vendor 里随包分发的那一对，没有安装记录也信——这是
 /// `Asr::new` 原来就有的行为，这里只是纳入同一个 resolver。
+///
+/// 信任边界：vendor 对**没有体积/记录校验**，且 `resolve` 先查它、优先于已完整
+/// 校验的数据目录对——vendor 里放了垃圾文件就会遮住合法的数据目录对。这是有意
+/// 保留的既有 bundle 信任（vendor 随签名 app 分发），本 PR 不改信任策略。
 fn vendor_pair(vendor: &Path) -> Option<(PathBuf, PathBuf)> {
     let dir = vendor.join("models");
     let (model, vad) = (dir.join(SENSEVOICE.file), dir.join(VAD.file));
@@ -276,5 +280,128 @@ mod tests {
             resolve(&vendor, Some(&data), &bin).is_none(),
             "没有 sha256 字段的记录反序列化就该失败，必须判未就绪"
         );
+    }
+
+    /// 评审 Low：每个判据单独一条负例，每条只违反一项，其余字段全部合法
+    /// （完整 sha 字段，反序列化不会先失败）。先断言基线合法，再变异一项。
+    struct Fx {
+        vendor: PathBuf,
+        data: PathBuf,
+        bin: PathBuf,
+        model: PathBuf,
+        vad: PathBuf,
+        rec: PairRecord,
+    }
+
+    fn fx(name: &str) -> Fx {
+        let vendor = tmp(&format!("{name}-v"));
+        let data = tmp(&format!("{name}-d"));
+        fs::create_dir_all(data.join("models")).unwrap();
+        let bin = vendor.join("bin/llama-funasr-sensevoice");
+        fs::create_dir_all(bin.parent().unwrap()).unwrap();
+        fs::write(&bin, b"fixture-bin-bytes").unwrap();
+        let model = data.join("models").join(SENSEVOICE.file);
+        let vad = data.join("models").join(VAD.file);
+        fs::write(&model, vec![b'm'; SENSEVOICE.bytes as usize]).unwrap();
+        fs::write(&vad, vec![b'v'; VAD.bytes as usize]).unwrap();
+        let rec = PairRecord {
+            sensevoice_bytes: SENSEVOICE.bytes,
+            vad_bytes: VAD.bytes,
+            sensevoice_sha256: SENSEVOICE.sha256.to_string(),
+            vad_sha256: VAD.sha256.to_string(),
+            bin_fingerprint: bin_fingerprint(&bin).unwrap(),
+        };
+        let f = Fx {
+            vendor,
+            data,
+            bin,
+            model,
+            vad,
+            rec,
+        };
+        f.write_rec();
+        assert!(f.ok(), "基线必须合法，否则负例没有意义");
+        f
+    }
+
+    impl Fx {
+        fn write_rec(&self) {
+            fs::write(
+                record_path(&self.data),
+                serde_json::to_string(&self.rec).unwrap(),
+            )
+            .unwrap();
+        }
+        fn ok(&self) -> bool {
+            resolve(&self.vendor, Some(&self.data), &self.bin).is_some()
+        }
+    }
+
+    #[test]
+    fn rejects_only_bin_fingerprint_mismatch() {
+        let mut f = fx("neg-fp");
+        f.rec.bin_fingerprint = "0000000000000000".into();
+        f.write_rec();
+        assert!(!f.ok());
+    }
+
+    #[test]
+    fn rejects_only_actual_size_differing_from_record() {
+        let f = fx("neg-actual");
+        fs::write(&f.model, vec![b'm'; SENSEVOICE.bytes as usize + 1]).unwrap();
+        assert!(!f.ok());
+    }
+
+    #[test]
+    fn rejects_only_record_size_differing_from_spec() {
+        // 记录体积 == 实际体积，但 != spec。
+        let mut f = fx("neg-spec");
+        let n = SENSEVOICE.bytes as usize + 1;
+        fs::write(&f.model, vec![b'm'; n]).unwrap();
+        f.rec.sensevoice_bytes = n as u64;
+        f.write_rec();
+        assert!(!f.ok());
+    }
+
+    #[test]
+    fn rejects_only_record_that_is_not_a_regular_file() {
+        // 内容完全合法，但记录路径是符号链接（`is_file` 为假）。
+        let f = fx("neg-isfile");
+        let real = f.data.join("real-record.json");
+        fs::rename(record_path(&f.data), &real).unwrap();
+        std::os::unix::fs::symlink(&real, record_path(&f.data)).unwrap();
+        assert!(!f.ok());
+    }
+
+    #[test]
+    fn vendor_pair_requires_both_files() {
+        // 只有 model、只有 vad：都不能被当成一对（`&&` 不能是 `||`）。
+        for only_model in [true, false] {
+            let vendor = tmp(if only_model { "vp-model" } else { "vp-vad" });
+            let models = vendor.join("models");
+            fs::create_dir_all(&models).unwrap();
+            let file = if only_model {
+                SENSEVOICE.file
+            } else {
+                VAD.file
+            };
+            fs::write(models.join(file), b"x").unwrap();
+            assert!(vendor_pair(&vendor).is_none(), "only_model={only_model}");
+        }
+    }
+
+    /// 信任边界（既有 bundle 信任，策略不变）：vendor 对没有体积/记录校验，
+    /// 且优先于已校验完整的数据目录对——哪怕 vendor 里是垃圾文件。
+    #[test]
+    fn vendor_pair_shadows_valid_data_pair_by_design() {
+        let f = fx("shadow");
+        let models = f.vendor.join("models");
+        fs::create_dir_all(&models).unwrap();
+        fs::write(models.join(SENSEVOICE.file), b"junk").unwrap();
+        fs::write(models.join(VAD.file), b"junk").unwrap();
+        let (m, _) = resolve(&f.vendor, Some(&f.data), &f.bin).unwrap();
+        assert_ne!(m, f.model);
+        assert!(m.starts_with(&f.vendor));
+        let _ = &f.vad;
     }
 }

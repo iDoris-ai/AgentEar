@@ -18,7 +18,7 @@
 //! （`clean_whisper`）。**不要试图合并它们**——合并意味着放松判据，而放松
 //! 判据的后果是日志被当成转写敲进用户的窗口。
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -108,6 +108,20 @@ pub struct Transcript {
     pub lang: Option<String>,
 }
 
+/// SenseVoice 模型对尚未安装/就绪。可识别的类型化错误：守护进程启动期只放行
+/// 这一种 preflight 失败（`downcast_ref`），其余（契约失败、引擎缺失等）仍致命。
+/// 文案不声称录音已保存：`--transcribe <file>` 与启动 preflight 时并没有录音。
+#[derive(Debug)]
+pub(crate) struct ModelPairNotReady;
+
+impl std::fmt::Display for ModelPairNotReady {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("识别模型尚未准备：请在设置里安装模型后重试（或重跑 --transcribe）")
+    }
+}
+
+impl std::error::Error for ModelPairNotReady {}
+
 impl Asr {
     /// `data_root` 用来读 `terms.json`，取里面的拉丁词当泰语 code-switch 的
     /// initial prompt。传 `None`（比如还没跑过 `--diagnose` 之外的一次性
@@ -132,11 +146,7 @@ impl Asr {
     /// 就绪，不缓存首次缺失。
     pub(crate) fn resolve_sensevoice_pair(&self) -> Result<(PathBuf, PathBuf)> {
         crate::builtin_models::resolve(&self.vendor, self.data_root.as_deref(), &self.bin)
-            .ok_or_else(|| {
-                anyhow!(
-                    "识别模型尚未准备：录音已保存；请在设置里安装模型后重试（或重跑 --transcribe）"
-                )
-            })
+            .ok_or_else(|| anyhow::Error::new(ModelPairNotReady))
     }
 
     /// 按选定的识别语言分派到对应引擎。
