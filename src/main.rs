@@ -202,7 +202,9 @@ fn main() -> Result<()> {
     // 永远走不到，见 PR #106 这次 commit 的描述）。判「没有子命令」要看
     // `args.len() <= 1`。
     let qwen3_is_daemon = args.len() <= 1;
-    let qwen3_recovery = if needs_asr_preflight(&args) {
+    // 恢复判定与后端对账独立于「要不要跑 preflight」：`--diagnose`/`--fetch-thai`
+    // 跳过 preflight，但仍要像 base 一样保留 speech_swift 并写恢复标记。
+    let qwen3_recovery = if needs_asr_preflight(&args) || reconciles_asr_backend(&args) {
         qwen3::recovery_decision(
             qwen3_recovery_gap,
             qwen3_recovery_marker.is_some(),
@@ -333,7 +335,7 @@ fn main() -> Result<()> {
             // 守护进程（无子命令）：模型未就绪不是致命错误——继续起 GUI/托盘，
             // 让用户看到「识别模型尚未准备」，而不是直接退出看不到界面。
             // 真正用到 ASR 时（worker 转写路径）再报一次这个错误。
-            Err(e) if args.len() <= 1 => {
+            Err(e) if args.len() <= 1 && is_model_pair_not_ready(&e) => {
                 log::warn!(
                     "ASR 后端 {} 依赖检查未通过，守护进程继续启动，识别暂不可用: {e:#}",
                     asr.name()
@@ -3019,6 +3021,19 @@ fn transcribe_lang(args: &[String], stored: asr::AsrLang) -> Result<asr::AsrLang
     }
 }
 
+/// 跳过 preflight 的 `--diagnose`/`--fetch-thai` 仍参与 Qwen3 恢复判定，
+/// 否则下面的退回会把用户的 speech_swift 持久化改成 builtin、丢掉恢复标记。
+fn reconciles_asr_backend(args: &[String]) -> bool {
+    args.iter()
+        .any(|a| a == "--diagnose" || a == "--fetch-thai")
+}
+
+/// 守护进程启动期只放行类型化的「模型对未就绪」；其他 preflight 错误
+/// （speech 契约失败、引擎二进制缺失等）必须仍然致命退出。
+fn is_model_pair_not_ready(e: &anyhow::Error) -> bool {
+    e.downcast_ref::<asr::ModelPairNotReady>().is_some()
+}
+
 fn vendor_root() -> Result<PathBuf> {
     if let Ok(p) = std::env::var("AGENTEAR_VENDOR") {
         return Ok(PathBuf::from(p));
@@ -3420,5 +3435,35 @@ mod host_wiring_tests {
         assert_eq!(turn_error(&wrapped).kind, "privacy_denied", "被 context 包一层也认得出");
         assert_eq!(turn_error(&anyhow::anyhow!("TTS 边车请求失败")).kind, "tts_unavailable");
         assert_eq!(turn_error(&anyhow::anyhow!("别的")).kind, "internal");
+    }
+
+    /// 守护进程只放行类型化的「模型对未就绪」；其他 preflight 错误必须仍然致命，
+    /// 即使文案里恰好出现「尚未准备」也不行（不靠字符串猜）。
+    #[test]
+    fn only_typed_model_pair_error_is_tolerated_by_daemon() {
+        assert!(is_model_pair_not_ready(&anyhow::Error::new(
+            asr::ModelPairNotReady
+        )));
+        assert!(is_model_pair_not_ready(
+            &anyhow::Error::new(asr::ModelPairNotReady).context("包了一层上下文")
+        ));
+        for msg in [
+            "识别模型尚未准备",
+            "`speech transcribe` 不认 --context",
+            "内置 ASR 不可用",
+        ] {
+            assert!(!is_model_pair_not_ready(&anyhow::anyhow!(msg)));
+        }
+    }
+
+    /// `--diagnose`/`--fetch-thai` 跳过 preflight，但仍参与 Qwen3 恢复判定。
+    #[test]
+    fn diagnose_and_fetch_thai_still_reconcile_backend() {
+        let a = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert!(reconciles_asr_backend(&a(&["agentear", "--diagnose"])));
+        assert!(reconciles_asr_backend(&a(&["agentear", "--fetch-thai"])));
+        let other = a(&["agentear", "--match-command", "x"]);
+        assert!(!reconciles_asr_backend(&other));
+        assert!(!needs_asr_preflight(&a(&["agentear", "--diagnose"])));
     }
 }

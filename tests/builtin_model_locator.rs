@@ -419,3 +419,185 @@ fn transcribe_lang_invalid_value_keeps_original_error() {
 
     let _ = fs::remove_dir_all(&base);
 }
+
+// ---------------------------------------------------------------------------
+// R2（外部评审 CHANGES_REQUESTED @ 9aaf849）：守护进程 preflight 放行范围、
+// `--diagnose`/`--fetch-thai` 的 Qwen3 恢复、tiny+完整 sha 的负例。
+// 全部在隔离的 HOME/PATH/AGENTEAR_DATA/AGENTEAR_VENDOR 下跑，带超时，不碰
+// 用户配置、麦克风、真实模型。
+// ---------------------------------------------------------------------------
+
+use std::process::Stdio;
+use std::time::{Duration, Instant};
+
+/// 隔离环境跑二进制：HOME/PATH 都指向临时目录，超时就杀掉并算失败，
+/// 防止守护进程真的起起来占着麦克风。
+fn run_isolated(
+    base: &Path,
+    vendor: &Path,
+    data: &Path,
+    path_dirs: &[&Path],
+    args: &[&str],
+) -> std::process::Output {
+    let home = base.join("home");
+    fs::create_dir_all(&home).unwrap();
+    let path = std::env::join_paths(path_dirs.iter().map(|p| p.as_os_str())).unwrap();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_agentear"))
+        .args(args)
+        .env_clear()
+        .env("HOME", &home)
+        .env("PATH", path)
+        .env("AGENTEAR_VENDOR", vendor)
+        .env("AGENTEAR_DATA", data)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("跑二进制失败");
+    let t0 = Instant::now();
+    loop {
+        if child.try_wait().unwrap().is_some() {
+            return child.wait_with_output().unwrap();
+        }
+        if t0.elapsed() > Duration::from_secs(20) {
+            let _ = child.kill();
+            let out = child.wait_with_output().unwrap();
+            panic!(
+                "超时：进程没有退出（守护进程被放行起来了？）\n{}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+/// 假 `speech`：`--help` 正常、含 transcribe；`transcribe --help` 缺 `--context`。
+fn fake_speech_missing_context(dir: &Path) {
+    fs::create_dir_all(dir).unwrap();
+    let p = dir.join("speech");
+    fs::write(
+        &p,
+        "#!/bin/sh\nif [ \"$1\" = transcribe ]; then echo '--engine --language'; else echo 'transcribe'; fi\n",
+    )
+    .unwrap();
+    fs::set_permissions(&p, fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+/// 评审条件 1：配置 speech_swift、`speech --help` 正常但契约缺 `--context`，
+/// 无参守护进程必须非零退出（不能被「模型对未就绪」的放行吞掉）。
+#[test]
+fn daemon_exits_nonzero_when_speech_swift_contract_fails() {
+    let base = std::env::temp_dir().join(format!("agentear-r2-contract-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&base);
+    let vendor = fixture_vendor(&base);
+    let data = base.join("data");
+    fs::create_dir_all(&data).unwrap();
+    fs::write(
+        data.join("config.json"),
+        r#"{"asr_backend":"speech_swift","qwen3_model":"0.6b"}"#,
+    )
+    .unwrap();
+    let bin = base.join("fakebin");
+    fake_speech_missing_context(&bin);
+
+    let out = run_isolated(&base, &vendor, &data, &[&bin], &[]);
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !out.status.success(),
+        "契约失败时守护进程必须非零退出：{err}"
+    );
+    assert!(err.contains("--context"), "要报出契约缺的参数：{err}");
+
+    let _ = fs::remove_dir_all(&base);
+}
+
+/// 评审条件 2：用户 Qwen3 权重+安装记录都在、运行时缺失、PATH 上没有 speech，
+/// `--diagnose` 不得把 speech_swift 改成 builtin，且要写
+/// `runtime-recovering.json`（与 base 一致）。
+#[test]
+fn diagnose_and_fetch_thai_keep_speech_swift_and_write_recovery_marker() {
+    // `--fetch-thai` 会真下载 574 MB，进程级不能跑；它与 `--diagnose` 共用
+    // `reconciles_asr_backend` 这一个判定，由 main.rs 单测钉住。
+    for flag in ["--diagnose"] {
+        let tag = flag.trim_start_matches('-');
+        let base = std::env::temp_dir().join(format!("agentear-r2-{tag}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        let vendor = fixture_vendor(&base);
+        let data = base.join("data");
+        let qroot = data.join("models/qwen3");
+        let mdir = qroot.join("cache/qwen3-speech/models/aufklarer/Qwen3-ASR-0.6B-MLX-4bit");
+        fs::create_dir_all(&mdir).unwrap();
+        // 0.6B 的 6 个文件，体积同 `qwen3::FILES_06B`（稀疏文件，不真占盘）。
+        for (name, bytes) in [
+            ("config.json", 7187u64),
+            ("merges.txt", 1671853),
+            ("model.safetensors", 708236945),
+            ("model.safetensors.index.json", 71814),
+            ("tokenizer_config.json", 12487),
+            ("vocab.json", 2776833),
+        ] {
+            sparse_file(&mdir.join(name), bytes);
+        }
+        fs::write(
+            qroot.join("Qwen3-ASR-0.6B-MLX-4bit.installed"),
+            "bc441bd1e4295c1f42d9879f056049a925b6e013",
+        )
+        .unwrap();
+        fs::write(
+            data.join("config.json"),
+            r#"{"asr_backend":"speech_swift","qwen3_model":"0.6b"}"#,
+        )
+        .unwrap();
+        let empty = base.join("emptybin");
+        fs::create_dir_all(&empty).unwrap();
+
+        let _ = run_isolated(&base, &vendor, &data, &[&empty], &[flag]);
+
+        let cfg = fs::read_to_string(data.join("config.json")).unwrap();
+        assert!(
+            cfg.contains("speech_swift"),
+            "{flag}：asr_backend 必须保持 speech_swift：{cfg}"
+        );
+        assert!(
+            qroot.join("runtime-recovering.json").exists(),
+            "{flag}：必须写 runtime-recovering.json"
+        );
+
+        let _ = fs::remove_dir_all(&base);
+    }
+}
+
+/// 评审 Low：tiny 文件 + **完整合法的 sha 字段**（真实 spec 的 sha），
+/// 记录体积 == 实际体积 == 10/8，但 != 当前 spec 体积——只违反「记录体积对 spec」。
+#[test]
+fn transcribe_rejects_tiny_record_with_full_valid_sha_fields() {
+    let base = std::env::temp_dir().join(format!("agentear-r2-tinysha-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&base);
+    let vendor = fixture_vendor(&base);
+    let data = base.join("data");
+    let models = data.join("models");
+    fs::create_dir_all(&models).unwrap();
+    write_config(&data, "auto");
+
+    fs::write(models.join("sensevoice-small-q8.gguf"), b"tiny-model").unwrap();
+    fs::write(models.join("fsmn-vad.gguf"), b"tiny-vad").unwrap();
+    let bin_fp = sha256_hex16(&fs::read(vendor.join("bin/llama-funasr-sensevoice")).unwrap());
+    fs::write(
+        models.join("sensevoice-pair.installed"),
+        format!(
+            r#"{{"sensevoice_bytes":10,"vad_bytes":8,"sensevoice_sha256":"{SENSEVOICE_SHA256}","vad_sha256":"{VAD_SHA256}","bin_fingerprint":"{bin_fp}"}}"#
+        ),
+    )
+    .unwrap();
+
+    let wav = base.join("synthetic.wav");
+    fs::write(&wav, b"RIFF....WAVEfmt ").unwrap();
+    let out = run(&vendor, &data, &["--transcribe", wav.to_str().unwrap()]);
+    assert!(
+        !out.status.success(),
+        "tiny 文件+完整合法 sha 字段必须被拒（记录体积 != spec）：{:?}",
+        out.status
+    );
+    assert!(!base.join("called").exists(), "sentinel 必须是 0 次调用");
+
+    let _ = fs::remove_dir_all(&base);
+}
