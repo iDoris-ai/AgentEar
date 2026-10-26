@@ -17,6 +17,7 @@
 //! 耳机后列表就是错的。走 `NSMenuDelegate::menuNeedsUpdate:`，每次展开前
 //! 重新枚举——这也是 AppKit 里做动态菜单的正规姿势。
 
+use std::cell::Cell;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Mutex, OnceLock};
@@ -244,6 +245,10 @@ const TAG_ASR_ENGINE_BASE: isize = 900;
 const TAG_QWEN3_DL_BASE: isize = 950;
 /// SenseVoice+VAD 下载组一行的按钮（下载/取消/重试）。独立于 Qwen3 的几档。
 const TAG_SV_PAIR_DL: isize = 960;
+/// 设置窗口里泰语模型那一行的按钮（下载 / 重试）。
+/// 下拉框再点一次「已经选中的泰语」不会触发 action，失败后靠这个按钮重试。
+/// ⚠️ 必须 < `TAG_DEVICE_BASE`（1000），否则会被设备区吞掉。
+const TAG_THAI_RETRY: isize = 961;
 /// `+0` 是「系统默认」，`+1..` 对应 `DEVICE_SNAPSHOT` 的下标。
 const TAG_DEVICE_BASE: isize = 1000;
 
@@ -841,9 +846,83 @@ fn list_voices(cfg: &config::Config, root: &std::path::Path) -> Vec<String> {
     names
 }
 
+/// 把界面语言选成泰语时，同时去要泰语识别（模型没装就下载）。
+///
+/// 英语和中文不连带改识别：同事把界面改回英文之后，泰语识别还留着。
+fn ui_choice_also_selects_thai(want: Lang) -> bool {
+    want == Lang::Th
+}
+
+/// 设置窗口「识别语言」下拉框该停在哪一项。`0` = 自动，`1` = 泰语。
+///
+/// 模型还没就绪时配置里仍是 Auto——下载的那几分钟里不能让每次录音都去
+/// 调一个还没装好的引擎。但用户刚刚点了泰语：下拉框必须停在泰语上，
+/// 否则看起来像没选中，进度也写在那一项的标题里。
+fn asr_lang_popup_index(asr_lang: AsrLang, state: download::State, wants_thai: bool) -> usize {
+    if asr_lang == AsrLang::Thai && state == download::State::Ready {
+        return 1;
+    }
+    if wants_thai && state != download::State::Ready {
+        return 1;
+    }
+    0
+}
+
+/// 泰语那一行右边的按钮。下载中和验证中不给「取消」：
+/// 泰语下载器没有单独的取消入口，显示一个点了没反应的 Cancel 是假按钮。
+fn thai_row_button(lang: Lang, state: download::State) -> Option<&'static str> {
+    match state {
+        download::State::Downloading(_) | download::State::Verifying | download::State::Ready => {
+            None
+        }
+        other => i18n::qwen3_button(lang, other),
+    }
+}
+
+/// 菜单和设置窗口共用这一条：选自动，或选泰语。
+///
+/// 选泰语时模型没装好就**先下载、先不改 `asr_lang`**。下载要几分钟，
+/// 期间把识别语言设成泰语的话，每次录音都会失败，而失败只写在日志里。
+/// 配置在下载完成并通过加载冒烟之后才提交，见 `on_thai_installed`。
+fn choose_recognition(want_thai: bool) {
+    if !want_thai {
+        // 取消意图和落配置必须在同一把锁里，否则下载线程可能
+        // 已经读到了 true、正卡在两步之间，随后把 Thai 写回去。
+        let mut intent = THAI_INTENT.lock().unwrap();
+        *intent = false;
+        config::update(|c| c.asr_lang = AsrLang::Auto);
+        drop(intent);
+        log::info!("识别语言改为自动（中/英/日/韩/粤，下次录音生效）");
+        refresh_thai_settings(config::get().ui_lang);
+        return;
+    }
+    match download::state(&download::THAI) {
+        download::State::Ready => {
+            config::update(|c| c.asr_lang = AsrLang::Thai);
+            log::info!("识别语言改为泰语（下次录音生效）");
+        }
+        download::State::Downloading(_) | download::State::Verifying => {
+            // 再点一次泰语 = 重新表达「下完就切」的意图
+            // （用户可能中途点过 Auto 又反悔）
+            *THAI_INTENT.lock().unwrap() = true;
+            log::info!("泰语模型正在下载/验证中，完成后会自动切过去");
+        }
+        _ => {
+            *THAI_INTENT.lock().unwrap() = true;
+            log::info!("开始下载泰语模型（574 MB）");
+            download::start(
+                &download::THAI,
+                crate::asr::verify_thai_model,
+                on_thai_installed,
+            );
+        }
+    }
+    refresh_thai_settings(config::get().ui_lang);
+}
+
 fn handle(tag: isize, mtm: MainThreadMarker) {
     // Qwen3 相关的 tag 先处理：900/950 段落在音色（800 + 下标）的理论范围里。
-    if handle_qwen3(tag) || handle_a24(tag) || handle_sv_pair(tag) {
+    if handle_qwen3(tag) || handle_a24(tag) || handle_sv_pair(tag) || handle_thai_retry(tag) {
         return;
     }
     // 模式切换单独处理：它的副作用不止改配置（要掐播放、要开关会话）。
@@ -1015,49 +1094,18 @@ fn handle(tag: isize, mtm: MainThreadMarker) {
             let want = Lang::ALL[(t - TAG_UI_LANG_BASE) as usize];
             config::update(|c| c.ui_lang = want);
             // 不需要重启：菜单每次展开都走 menuNeedsUpdate: 重建，
-            // 菜单栏标题由 0.5s 定时器刷新。但**当前这个已经打开的菜单
-            // 不会原地重绘**——点完它就关了，下次展开才是新语言。
+            // 菜单栏标题由 0.5s 定时器刷新。设置窗口也由那个定时器整页重画
+            // （不能在这次点击的回调里拆掉正在发 action 的下拉框）。
+            // **当前这个已经打开的菜单不会原地重绘**——点完它就关了。
             log::info!("界面语言改为 {}（下次展开菜单生效）", want.endonym());
-        }
-        TAG_ASR_LANG_BASE => {
-            // 取消意图和落配置必须在**同一把锁**里，否则下载线程可能
-            // 已经读到了 true、正卡在两步之间，随后把 Thai 写回去。
-            let mut intent = THAI_INTENT.lock().unwrap();
-            *intent = false;
-            config::update(|c| c.asr_lang = AsrLang::Auto);
-            drop(intent);
-            log::info!("识别语言改为自动（中/英/日/韩/粤，下次录音生效）");
-        }
-        t if t == TAG_ASR_LANG_BASE + 1 => {
-            match download::state(&download::THAI) {
-                download::State::Ready => {
-                    config::update(|c| c.asr_lang = AsrLang::Thai);
-                    log::info!("识别语言改为泰语（下次录音生效）");
-                }
-                download::State::Downloading(_) | download::State::Verifying => {
-                    // 再点一次泰语 = 重新表达「下完就切」的意图
-                    // （用户可能中途点过 Auto 又反悔）
-                    *THAI_INTENT.lock().unwrap() = true;
-                    log::info!("泰语模型正在下载/验证中，完成后会自动切过去");
-                }
-                // 没下过、或者上次失败了 —— 两种都是「点一下开始下」。
-                //
-                // ⚠️ **这里故意不改 `asr_lang`。** 下载要几分钟，
-                // 期间把识别语言设成泰语的话，用户这几分钟里每次录音
-                // 都会失败，而失败只写在日志里。
-                // 配置在下载完成**并通过加载冒烟之后**才提交，
-                // 见 `asr::finish_thai_install`。
-                _ => {
-                    *THAI_INTENT.lock().unwrap() = true;
-                    log::info!("开始下载泰语模型（574 MB）");
-                    download::start(
-                        &download::THAI,
-                        crate::asr::verify_thai_model,
-                        on_thai_installed,
-                    );
-                }
+            // 泰语同事在英语界面里点「ไทย」：模型没装就马上下，装好再切识别。
+            // 改回英文或中文不连带改识别。
+            if ui_choice_also_selects_thai(want) {
+                choose_recognition(true);
             }
         }
+        TAG_ASR_LANG_BASE => choose_recognition(false),
+        t if t == TAG_ASR_LANG_BASE + 1 => choose_recognition(true),
         t if t >= TAG_DEVICE_BASE => {
             let idx = (t - TAG_DEVICE_BASE) as usize;
             let chosen = if idx == 0 {
@@ -1135,6 +1183,15 @@ fn handle_qwen3(tag: isize) -> bool {
     false
 }
 
+/// 设置窗口泰语模型那一行的「下载 / 重试」。和识别语言里点泰语是同一条路。
+fn handle_thai_retry(tag: isize) -> bool {
+    if tag != TAG_THAI_RETRY {
+        return false;
+    }
+    choose_recognition(true);
+    true
+}
+
 /// SenseVoice+VAD 下载组这一行的按钮。没有引擎可切，只管下载本身。
 fn handle_sv_pair(tag: isize) -> bool {
     if tag != TAG_SV_PAIR_DL {
@@ -1203,6 +1260,14 @@ thread_local! {
     /// 设置窗口里 SenseVoice+VAD 下载组那一行，同样由 0.5 s 定时器活刷新。
     static SV_ROW: std::cell::RefCell<Option<(Retained<NSTextField>, Retained<NSButton>)>> =
         const { std::cell::RefCell::new(None) };
+    /// 设置窗口「识别语言」下拉框。下载百分比写在泰语那一项的标题上，要活刷新。
+    static ASR_LANG_POPUP: std::cell::RefCell<Option<Retained<NSPopUpButton>>> =
+        const { std::cell::RefCell::new(None) };
+    /// 设置窗口里泰语模型那一行（状态 + 下载/重试）。
+    static THAI_ROW: std::cell::RefCell<Option<(Retained<NSTextField>, Retained<NSButton>)>> =
+        const { std::cell::RefCell::new(None) };
+    /// 这次设置窗口内容是用哪种界面语言画的。和配置不一致时整页重画。
+    static SETTINGS_BUILT_LANG: Cell<Option<Lang>> = const { Cell::new(None) };
 }
 
 /// 配对 / 撤销正在后台跑（代跑 CLI 可能要几秒，不能卡主线程）。
@@ -1304,6 +1369,8 @@ struct Qwen3Rows {
 
 /// 560 而不是原来的 420：Qwen3 那一行要放下「下载中 34%（840 / 2468 MB）」+ 一个按钮。
 const SETTINGS_WIDTH: f64 = 560.0;
+/// 设置窗口左侧标题列。要放下英文 "Recognition Language" 和泰文「ภาษาที่ใช้ถอดความ」。
+const SETTINGS_CAPTION_W: f64 = 230.0;
 const ROW_H: f64 = 26.0;
 const ROW_GAP: f64 = 12.0;
 const MARGIN: f64 = 20.0;
@@ -1352,6 +1419,74 @@ fn action_button(
     b.setFrame(rect(MARGIN, y, SETTINGS_WIDTH - 2.0 * MARGIN, ROW_H));
     b.setTag(tag);
     b
+}
+
+/// 下拉框左边的短标题。宽度收住，避免画到下拉框底下。
+fn settings_caption(mtm: MainThreadMarker, text: &str, y: f64) -> Retained<NSTextField> {
+    let f = NSTextField::labelWithString(&NSString::from_str(text), mtm);
+    f.setFrame(rect(MARGIN, y, SETTINGS_CAPTION_W - 8.0, ROW_H));
+    f
+}
+
+fn wire_popup(popup: &NSPopUpButton, target: &MenuTarget) {
+    unsafe {
+        popup.setTarget(Some(AsRef::<AnyObject>::as_ref(target)));
+        popup.setAction(Some(sel!(onPopup:)));
+    }
+}
+
+fn popup_on_row(mtm: MainThreadMarker, y: f64) -> Retained<NSPopUpButton> {
+    let x = MARGIN + SETTINGS_CAPTION_W;
+    NSPopUpButton::initWithFrame_pullsDown(
+        NSPopUpButton::alloc(mtm),
+        rect(x, y, SETTINGS_WIDTH - MARGIN - x, ROW_H),
+        false,
+    )
+}
+
+fn empty_menu_item(mtm: MainThreadMarker, tag: isize) -> Retained<NSMenuItem> {
+    let it = unsafe {
+        NSMenuItem::initWithTitle_action_keyEquivalent(
+            NSMenuItem::alloc(mtm),
+            &NSString::from_str(""),
+            None,
+            &NSString::from_str(""),
+        )
+    };
+    it.setTag(tag);
+    it
+}
+
+/// 界面语言。选项永远用各自的语言名（English / 中文 / ไทย）。
+fn ui_lang_popup(
+    mtm: MainThreadMarker,
+    target: &MenuTarget,
+    lang: Lang,
+    y: f64,
+) -> Retained<NSPopUpButton> {
+    let popup = popup_on_row(mtm, y);
+    let menu = NSMenu::init(NSMenu::alloc(mtm));
+    for (i, l) in Lang::ALL.iter().enumerate() {
+        let it = empty_menu_item(mtm, TAG_UI_LANG_BASE + i as isize);
+        it.setTitle(&NSString::from_str(l.endonym()));
+        menu.addItem(&it);
+    }
+    popup.setMenu(Some(&menu));
+    wire_popup(&popup, target);
+    let idx = Lang::ALL.iter().position(|l| *l == lang).unwrap_or(0);
+    popup.selectItemAtIndex(idx as isize);
+    popup
+}
+
+/// 识别语言。标题由 `refresh_thai_settings` 填，因为泰语那一项带着下载进度。
+fn asr_lang_popup(mtm: MainThreadMarker, target: &MenuTarget, y: f64) -> Retained<NSPopUpButton> {
+    let popup = popup_on_row(mtm, y);
+    let menu = NSMenu::init(NSMenu::alloc(mtm));
+    menu.addItem(&empty_menu_item(mtm, TAG_ASR_LANG_BASE));
+    menu.addItem(&empty_menu_item(mtm, TAG_ASR_LANG_BASE + 1));
+    popup.setMenu(Some(&menu));
+    wire_popup(&popup, target);
+    popup
 }
 
 fn info_label(mtm: MainThreadMarker, text: &str, y: f64) -> Retained<NSTextField> {
@@ -1475,12 +1610,12 @@ fn build_settings_content(
         None
     };
 
-    // 行数固定：勾选×3 + 边车状态(可能为空) + 保留期 + 4 个按钮。
-    // 边车状态那一行**即使是空文案也占位**——用固定行数换布局代码简单，
-    // 空标签不可见，视觉上跟"少一行"没区别。
-    // + 语音识别（下拉框）+ 两个 Qwen3 模型各一行
-    // + Agent24 一行（状态 + 连接/断开按钮）
-    let rows = 3 + 1 + 1 + 3 + 1 + 4;
+    // 行数必须和下面 `next_row()` 的次数一致。少算一行，最底下的按钮会被裁出窗口
+    // （SenseVoice 那一行加进来时就少算过一次）。
+    // 界面语言 + 识别语言 + 泰语模型状态
+    // + 勾选×3 + 边车（空文案也占位）+ SenseVoice
+    // + 语音识别下拉 + 每个 Qwen3 一行 + Agent24 + 保留期 + 4 个按钮
+    let rows = 3 + 3 + 1 + 1 + 1 + crate::qwen3::Qwen3Model::ALL.len() + 1 + 1 + 4;
     let content_h = MARGIN * 2.0 + rows as f64 * ROW_H + (rows - 1) as f64 * ROW_GAP;
     window.setContentSize(NSSize::new(SETTINGS_WIDTH, content_h));
 
@@ -1492,6 +1627,47 @@ fn build_settings_content(
         y -= ROW_H + ROW_GAP;
         cur
     };
+
+    SETTINGS_BUILT_LANG.set(Some(lang));
+
+    {
+        // 界面语言放最上面：新安装默认 English，泰语同事认自己的语言名「ไทย」。
+        // 点「ไทย」会顺手开始下泰语模型（见 `ui_choice_also_selects_thai`）。
+        let row_y = next_row();
+        content.addSubview(&settings_caption(
+            mtm,
+            i18n::t(lang, Key::LanguageSection),
+            row_y,
+        ));
+        content.addSubview(&ui_lang_popup(mtm, &target, lang, row_y));
+    }
+    {
+        let row_y = next_row();
+        content.addSubview(&settings_caption(
+            mtm,
+            i18n::t(lang, Key::AsrLangSection),
+            row_y,
+        ));
+        let popup = asr_lang_popup(mtm, &target, row_y);
+        content.addSubview(&popup);
+        ASR_LANG_POPUP.with(|p| *p.borrow_mut() = Some(popup));
+    }
+    {
+        let row_y = next_row();
+        let label = info_label(mtm, "", row_y);
+        label.setFrame(rect(
+            MARGIN + 18.0,
+            row_y,
+            SETTINGS_WIDTH - 2.0 * MARGIN - 18.0 - 110.0,
+            ROW_H,
+        ));
+        let b = action_button(mtm, &target, "", TAG_THAI_RETRY, row_y);
+        b.setFrame(rect(SETTINGS_WIDTH - MARGIN - 104.0, row_y, 104.0, ROW_H));
+        content.addSubview(&label);
+        content.addSubview(&b);
+        THAI_ROW.with(|r| *r.borrow_mut() = Some((label, b)));
+        refresh_thai_settings(lang);
+    }
 
     content.addSubview(&checkbox(
         mtm,
@@ -1705,6 +1881,46 @@ fn refresh_qwen3_rows(lang: Lang) {
     });
 }
 
+/// 刷新设置窗口里的识别语言下拉框和泰语模型那一行。窗口没打开时什么也不做。
+fn refresh_thai_settings(lang: Lang) {
+    let state = download::state(&download::THAI);
+    let wants_thai = *THAI_INTENT.lock().unwrap();
+    let asr_lang = config::get().asr_lang;
+    ASR_LANG_POPUP.with(|p| {
+        let p = p.borrow();
+        let Some(popup) = p.as_ref() else {
+            return;
+        };
+        if let Some(menu) = popup.menu() {
+            if let Some(it) = menu.itemAtIndex(0) {
+                it.setTitle(&NSString::from_str(i18n::t(lang, Key::AsrLangAuto)));
+            }
+            if let Some(it) = menu.itemAtIndex(1) {
+                it.setTitle(&NSString::from_str(&i18n::thai_option(lang, state)));
+            }
+        }
+        let want = asr_lang_popup_index(asr_lang, state, wants_thai) as isize;
+        if popup.indexOfSelectedItem() != want {
+            popup.selectItemAtIndex(want);
+        }
+    });
+    THAI_ROW.with(|r| {
+        let r = r.borrow();
+        let Some((label, button)) = r.as_ref() else {
+            return;
+        };
+        label.setStringValue(&NSString::from_str(&i18n::thai_option(lang, state)));
+        match thai_row_button(lang, state) {
+            Some(t) => {
+                button.setTitle(&NSString::from_str(t));
+                button.setHidden(false);
+                button.setEnabled(true);
+            }
+            None => button.setHidden(true),
+        }
+    });
+}
+
 /// 刷新设置窗口里 SenseVoice+VAD 那一行；文案复用 qwen3 的通用函数。
 fn refresh_sv_row(lang: Lang) {
     SV_ROW.with(|r| {
@@ -1793,9 +2009,27 @@ pub fn install(mtm: MainThreadMarker) -> Option<Tray> {
                 // 设置窗口开着时刷新 Qwen3 的下载进度（关着就跳过，省事）
                 let visible = SETTINGS_WINDOW.with(|w| w.borrow().as_ref().is_some_and(|w| w.isVisible()));
                 if visible {
-                    refresh_qwen3_rows(config::get().ui_lang);
-                    refresh_a24_row(config::get().ui_lang);
-                    refresh_sv_row(config::get().ui_lang);
+                    let lang = config::get().ui_lang;
+                    // 界面语言变了就整页重画。不能在点击回调里做：那会拆掉
+                    // 正在发 action 的下拉框。
+                    let stale = SETTINGS_BUILT_LANG.with(|c| c.get() != Some(lang));
+                    if stale {
+                        SETTINGS_WINDOW.with(|slot| {
+                            let slot = slot.borrow();
+                            if let Some(window) = slot.as_ref() {
+                                window.setTitle(&NSString::from_str(i18n::t(
+                                    lang,
+                                    Key::SettingsTitle,
+                                )));
+                                build_settings_content(mtm, window, &config::get(), lang);
+                            }
+                        });
+                    } else {
+                        refresh_qwen3_rows(lang);
+                        refresh_a24_row(lang);
+                        refresh_sv_row(lang);
+                        refresh_thai_settings(lang);
+                    }
                 }
                 if let Some(button) = item_for_timer.button(mtm) {
                     // 每次都重读语言，这样切换后标题最多 0.5s 就跟上
@@ -2000,6 +2234,63 @@ mod tests {
             *QWEN3_INTENT.lock().unwrap_or_else(|e| e.into_inner()),
             Small
         ));
+    }
+
+    /// 新安装：界面英语、识别自动。点了泰语之后，模型还没就绪也要停在泰语那一项上。
+    #[test]
+    fn settings_start_in_english_and_keep_thai_selected_while_the_model_downloads() {
+        use download::Fail;
+        use download::State::{Absent, Downloading, Failed, Ready, Verifying};
+        assert_eq!(Lang::default(), Lang::En, "新安装的界面语言是英语");
+        assert_eq!(AsrLang::default(), AsrLang::Auto);
+        assert!(!ui_choice_also_selects_thai(Lang::En));
+        assert!(!ui_choice_also_selects_thai(Lang::Zh));
+        assert!(
+            ui_choice_also_selects_thai(Lang::Th),
+            "点「ไทย」要连带去要泰语识别"
+        );
+        assert_eq!(asr_lang_popup_index(AsrLang::Auto, Absent, false), 0);
+        assert_eq!(
+            asr_lang_popup_index(AsrLang::Auto, Absent, true),
+            1,
+            "刚选泰语、进度还没报上来"
+        );
+        assert_eq!(asr_lang_popup_index(AsrLang::Auto, Downloading(7), true), 1);
+        assert_eq!(asr_lang_popup_index(AsrLang::Auto, Verifying, true), 1);
+        assert_eq!(
+            asr_lang_popup_index(AsrLang::Auto, Failed(Fail::Network), true),
+            1
+        );
+        assert_eq!(asr_lang_popup_index(AsrLang::Thai, Ready, false), 1);
+        assert_eq!(asr_lang_popup_index(AsrLang::Thai, Ready, true), 1);
+        assert_eq!(
+            asr_lang_popup_index(AsrLang::Auto, Downloading(7), false),
+            0,
+            "改回自动后不再停在泰语"
+        );
+        assert_eq!(
+            asr_lang_popup_index(AsrLang::Thai, Absent, false),
+            0,
+            "配置写着泰语但模型不在，不假装已选中"
+        );
+        assert!(TAG_THAI_RETRY < TAG_DEVICE_BASE, "重试按钮不能落进设备区");
+        assert_eq!(voice_index_for_tag(TAG_THAI_RETRY), None);
+        assert_eq!(thai_row_button(Lang::En, Absent), Some("Download"));
+        assert_eq!(
+            thai_row_button(Lang::En, Failed(Fail::Network)),
+            Some("Retry")
+        );
+        assert_eq!(
+            thai_row_button(Lang::En, Failed(Fail::Cancelled)),
+            Some("Resume")
+        );
+        assert_eq!(
+            thai_row_button(Lang::En, Downloading(1)),
+            None,
+            "没有取消入口，不能显示假的 Cancel"
+        );
+        assert_eq!(thai_row_button(Lang::En, Verifying), None);
+        assert_eq!(thai_row_button(Lang::En, Ready), None);
     }
 
     #[test]
