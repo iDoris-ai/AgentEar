@@ -1367,13 +1367,24 @@ struct Qwen3Rows {
     rows: Vec<(Retained<NSTextField>, Retained<NSButton>)>,
 }
 
-/// 560 而不是原来的 420：Qwen3 那一行要放下「下载中 34%（840 / 2468 MB）」+ 一个按钮。
-const SETTINGS_WIDTH: f64 = 560.0;
+/// 下半区两列并排之后，半宽按钮要放下英文
+/// "Edit Term List (applies next recording)"（约 230pt）再加按钮边。
+/// Qwen3 进度行（「下载中 34%（840 / 2468 MB）」+ 按钮）在这个宽度里仍然放得下。
+const SETTINGS_WIDTH: f64 = 620.0;
 /// 设置窗口左侧标题列。要放下英文 "Recognition Language" 和泰文「ภาษาที่ใช้ถอดความ」。
 const SETTINGS_CAPTION_W: f64 = 230.0;
+/// 下半区两列之间的缝。两列加起来不到整行，避免标题画进旁边的下拉框。
+const COL_GAP: f64 = 12.0;
 const ROW_H: f64 = 26.0;
 const ROW_GAP: f64 = 12.0;
 const MARGIN: f64 = 20.0;
+
+/// 下半区第 `col` 列（0 左，1 右）的原点与宽度。两列等宽，大约各占整行的一半，互不重叠。
+fn settings_column(col: u8) -> (f64, f64) {
+    let w = (SETTINGS_WIDTH - 2.0 * MARGIN - COL_GAP) / 2.0;
+    let x = MARGIN + f64::from(col) * (w + COL_GAP);
+    (x, w)
+}
 
 fn rect(x: f64, y: f64, w: f64, h: f64) -> NSRect {
     NSRect::new(NSPoint::new(x, y), NSSize::new(w, h))
@@ -1425,6 +1436,19 @@ fn action_button(
 fn settings_caption(mtm: MainThreadMarker, text: &str, y: f64) -> Retained<NSTextField> {
     let f = NSTextField::labelWithString(&NSString::from_str(text), mtm);
     f.setFrame(rect(MARGIN, y, SETTINGS_CAPTION_W - 8.0, ROW_H));
+    f
+}
+
+/// 半宽列上的标题。框定在本列里，不画进旁边那一列。
+fn column_caption(
+    mtm: MainThreadMarker,
+    text: &str,
+    x: f64,
+    y: f64,
+    w: f64,
+) -> Retained<NSTextField> {
+    let f = NSTextField::labelWithString(&NSString::from_str(text), mtm);
+    f.setFrame(rect(x, y, w, ROW_H));
     f
 }
 
@@ -1503,11 +1527,13 @@ fn retention_popup(
     target: &MenuTarget,
     lang: Lang,
     current_days: u32,
+    x: f64,
     y: f64,
+    w: f64,
 ) -> Retained<NSPopUpButton> {
     let popup = NSPopUpButton::initWithFrame_pullsDown(
         NSPopUpButton::alloc(mtm),
-        rect(MARGIN + 100.0, y, SETTINGS_WIDTH - 2.0 * MARGIN - 100.0, ROW_H),
+        rect(x, y, w, ROW_H),
         false,
     );
     let menu = NSMenu::init(NSMenu::alloc(mtm));
@@ -1566,6 +1592,8 @@ fn open_settings_window(mtm: MainThreadMarker) {
 
     window.center();
     window.makeKeyAndOrderFront(None);
+    // 打开时不要把第一项下拉框画成焦点环，否则看起来像停在「界面语言」上。
+    let _ = window.makeFirstResponder(None);
     // ⚠️ **不能用 `NSApplication::activate()`**：那是 macOS 14+ 才有的方法，
     // `Info.plist` 的 `LSMinimumSystemVersion` 写的是 11.0——真在老系统上
     // 跑会是「unrecognized selector」直接崩溃（codex 复查抓到的）。
@@ -1614,8 +1642,9 @@ fn build_settings_content(
     // （SenseVoice 那一行加进来时就少算过一次）。
     // 界面语言 + 识别语言 + 泰语模型状态
     // + 勾选×3 + 边车（空文案也占位）+ SenseVoice
-    // + 语音识别下拉 + 每个 Qwen3 一行 + Agent24 + 保留期 + 4 个按钮
-    let rows = 3 + 3 + 1 + 1 + 1 + crate::qwen3::Qwen3Model::ALL.len() + 1 + 1 + 4;
+    // + 语音识别/保留期标题行 + 控件行 + 每个 Qwen3 一行 + Agent24
+    // + 底部按钮两行（两两并排，不再各占一整行）
+    let rows = 3 + 3 + 1 + 1 + 2 + crate::qwen3::Qwen3Model::ALL.len() + 1 + 2;
     let content_h = MARGIN * 2.0 + rows as f64 * ROW_H + (rows - 1) as f64 * ROW_GAP;
     window.setContentSize(NSSize::new(SETTINGS_WIDTH, content_h));
 
@@ -1721,10 +1750,37 @@ fn build_settings_content(
         refresh_sv_row(lang);
     }
     {
-        let row_y = next_row();
-        content.addSubview(&info_label(mtm, i18n::t(lang, Key::AsrEngineSection), row_y));
-        let popup = asr_engine_popup(mtm, &target, lang, row_y);
+        // 语音识别和保留期并排：标题在上、下拉框在下，各占半行。
+        // 以前标题用整行宽的 label、下拉框从 x=120 画起，英文会叠在一起。
+        let y_cap = next_row();
+        let y_ctl = next_row();
+        let (x0, w0) = settings_column(0);
+        let (x1, w1) = settings_column(1);
+        content.addSubview(&column_caption(
+            mtm,
+            i18n::t(lang, Key::AsrEngineSection),
+            x0,
+            y_cap,
+            w0,
+        ));
+        content.addSubview(&column_caption(
+            mtm,
+            i18n::t(lang, Key::RetentionSection),
+            x1,
+            y_cap,
+            w1,
+        ));
+        let popup = asr_engine_popup(mtm, &target, x0, y_ctl, w0);
         content.addSubview(&popup);
+        content.addSubview(&retention_popup(
+            mtm,
+            &target,
+            lang,
+            cfg.retention_days,
+            x1,
+            y_ctl,
+            w1,
+        ));
         let mut rows = Vec::new();
         for (i, _m) in crate::qwen3::Qwen3Model::ALL.iter().enumerate() {
             let y = next_row();
@@ -1752,48 +1808,61 @@ fn build_settings_content(
         refresh_a24_row(lang);
     }
     {
-        let row_y = next_row();
-        content.addSubview(&info_label(mtm, i18n::t(lang, Key::RetentionSection), row_y));
-        content.addSubview(&retention_popup(mtm, &target, lang, cfg.retention_days, row_y));
+        let y = next_row();
+        let (x0, w0) = settings_column(0);
+        let (x1, w1) = settings_column(1);
+        let left = action_button(
+            mtm,
+            &target,
+            i18n::t(lang, Key::OpenTerms),
+            TAG_OPEN_TERMS,
+            y,
+        );
+        left.setFrame(rect(x0, y, w0, ROW_H));
+        let right = action_button(
+            mtm,
+            &target,
+            i18n::t(lang, Key::OpenCommands),
+            TAG_OPEN_COMMANDS,
+            y,
+        );
+        right.setFrame(rect(x1, y, w1, ROW_H));
+        content.addSubview(&left);
+        content.addSubview(&right);
     }
-    content.addSubview(&action_button(
-        mtm,
-        &target,
-        i18n::t(lang, Key::OpenTerms),
-        TAG_OPEN_TERMS,
-        next_row(),
-    ));
-    content.addSubview(&action_button(
-        mtm,
-        &target,
-        i18n::t(lang, Key::OpenCommands),
-        TAG_OPEN_COMMANDS,
-        next_row(),
-    ));
-    content.addSubview(&action_button(
-        mtm,
-        &target,
-        i18n::t(lang, Key::OpenDataDir),
-        TAG_OPEN_DATA,
-        next_row(),
-    ));
-    content.addSubview(&action_button(
-        mtm,
-        &target,
-        i18n::t(lang, Key::ViewLog),
-        TAG_OPEN_LOG,
-        next_row(),
-    ));
+    {
+        let y = next_row();
+        let (x0, w0) = settings_column(0);
+        let (x1, w1) = settings_column(1);
+        let left = action_button(
+            mtm,
+            &target,
+            i18n::t(lang, Key::OpenDataDir),
+            TAG_OPEN_DATA,
+            y,
+        );
+        left.setFrame(rect(x0, y, w0, ROW_H));
+        let right = action_button(mtm, &target, i18n::t(lang, Key::ViewLog), TAG_OPEN_LOG, y);
+        right.setFrame(rect(x1, y, w1, ROW_H));
+        content.addSubview(&left);
+        content.addSubview(&right);
+    }
 
     window.setContentView(Some(&content));
 }
 
 /// 「语音识别」下拉框：SenseVoice / Qwen3 0.6B / Qwen3 1.7B。
 /// 条目标题在 `refresh_qwen3_rows` 里刷（装没装好会变）。
-fn asr_engine_popup(mtm: MainThreadMarker, target: &MenuTarget, _lang: Lang, y: f64) -> Retained<NSPopUpButton> {
+fn asr_engine_popup(
+    mtm: MainThreadMarker,
+    target: &MenuTarget,
+    x: f64,
+    y: f64,
+    w: f64,
+) -> Retained<NSPopUpButton> {
     let popup = NSPopUpButton::initWithFrame_pullsDown(
         NSPopUpButton::alloc(mtm),
-        rect(MARGIN + 100.0, y, SETTINGS_WIDTH - 2.0 * MARGIN - 100.0, ROW_H),
+        rect(x, y, w, ROW_H),
         false,
     );
     let menu = NSMenu::init(NSMenu::alloc(mtm));
@@ -2057,6 +2126,19 @@ pub fn run(mtm: MainThreadMarker) -> ! {
 mod tests {
     use super::*;
     use crate::config::TalkMode;
+
+    #[test]
+    fn settings_columns_are_half_width_and_do_not_overlap() {
+        let (x0, w0) = settings_column(0);
+        let (x1, w1) = settings_column(1);
+        assert!(x0 >= MARGIN);
+        assert!(x0 + w0 <= x1, "左列画进了右列: {x0}+{w0} vs {x1}");
+        assert!((w0 - w1).abs() < f64::EPSILON);
+        let full = SETTINGS_WIDTH - 2.0 * MARGIN;
+        assert!(w0 <= full * 0.5, "列宽应当不超过整行的一半");
+        assert!(w0 > full * 0.45, "列宽应当接近整行的一半");
+        assert!(x1 + w1 <= SETTINGS_WIDTH - MARGIN + 0.01);
+    }
 
     /// #97 评审：后台配对/撤销 panic 后，忙碌标志必须复位，否则按钮永久灰掉。
     #[test]
