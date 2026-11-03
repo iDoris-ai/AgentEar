@@ -19,7 +19,7 @@
 
 use std::cell::Cell;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering};
 use std::sync::{Mutex, OnceLock};
 
 use objc2::rc::Retained;
@@ -48,7 +48,8 @@ pub enum Status {
 
 static STATUS: AtomicU8 = AtomicU8::new(0);
 /// 录音时长，单位秒。让菜单栏能显示「● 12s」而不只是「● 」。
-static SECS: AtomicU8 = AtomicU8::new(0);
+/// 用 `u32`：10 分钟和 15 分钟都会超过 `u8` 的 255，停在 255 会让菜单冻在 4 分 15 秒。
+static SECS: AtomicU32 = AtomicU32::new(0);
 
 /// 数据目录，供「打开数据目录 / 查看日志」两项使用。
 static DATA_ROOT: OnceLock<PathBuf> = OnceLock::new();
@@ -249,6 +250,10 @@ const TAG_SV_PAIR_DL: isize = 960;
 /// 下拉框再点一次「已经选中的泰语」不会触发 action，失败后靠这个按钮重试。
 /// ⚠️ 必须 < `TAG_DEVICE_BASE`（1000），否则会被设备区吞掉。
 const TAG_THAI_RETRY: isize = 961;
+/// 设置窗口「录音上限」：`+0` 5 分钟，`+1` 10 分钟，`+2` 15 分钟。
+/// ⚠️ 必须 < `TAG_DEVICE_BASE`（1000），否则会被设备区吞掉。
+const TAG_RECORD_LIMIT_BASE: isize = 970;
+const RECORD_LIMIT_KEYS: [Key; 3] = [Key::RecordLimit5, Key::RecordLimit10, Key::RecordLimit15];
 /// `+0` 是「系统默认」，`+1..` 对应 `DEVICE_SNAPSHOT` 的下标。
 const TAG_DEVICE_BASE: isize = 1000;
 
@@ -264,7 +269,7 @@ pub fn set(s: Status) {
 }
 
 pub fn set_secs(v: u32) {
-    SECS.store(v.min(255) as u8, Ordering::Relaxed);
+    SECS.store(v, Ordering::Relaxed);
 }
 
 pub fn set_data_root(p: PathBuf) {
@@ -435,7 +440,7 @@ fn populate(menu: &NSMenu, mtm: MainThreadMarker, target: &MenuTarget) {
         1 => menu.addItem(&item(
             mtm,
             target,
-            &i18n::stop_recording(lang, SECS.load(Ordering::Relaxed) as u32),
+            &i18n::stop_recording(lang, SECS.load(Ordering::Relaxed)),
             TAG_TOGGLE,
             false,
         )),
@@ -1090,6 +1095,14 @@ fn handle(tag: isize, mtm: MainThreadMarker) {
             config::update(|c| c.retention_days = days);
             log::info!("原始音频保留期改为 {days} 天（0 = 永不清理）");
         }
+        t if (TAG_RECORD_LIMIT_BASE
+            ..TAG_RECORD_LIMIT_BASE + crate::asr::RECORD_LIMIT_SECS.len() as isize)
+            .contains(&t) =>
+        {
+            let secs = crate::asr::RECORD_LIMIT_SECS[(t - TAG_RECORD_LIMIT_BASE) as usize];
+            config::update(|c| c.record_limit_secs = secs);
+            log::info!("录音上限改为 {secs} 秒（下一轮录音生效）");
+        }
         t if (TAG_UI_LANG_BASE..TAG_UI_LANG_BASE + Lang::ALL.len() as isize).contains(&t) => {
             let want = Lang::ALL[(t - TAG_UI_LANG_BASE) as usize];
             config::update(|c| c.ui_lang = want);
@@ -1371,6 +1384,9 @@ struct Qwen3Rows {
 /// "Edit Term List (applies next recording)"（约 230pt）再加按钮边。
 /// Qwen3 进度行（「下载中 34%（840 / 2468 MB）」+ 按钮）在这个宽度里仍然放得下。
 const SETTINGS_WIDTH: f64 = 620.0;
+/// 录音上限这一行的标题列。比普通标题宽，用来放下
+/// "Recording limit (default 5 min)" 和泰文「จำกัดเวลาอัด (ค่าเริ่มต้น 5 นาที)」。
+const RECORD_LIMIT_CAPTION_W: f64 = 300.0;
 /// 设置窗口左侧标题列。要放下英文 "Recognition Language" 和泰文「ภาษาที่ใช้ถอดความ」。
 const SETTINGS_CAPTION_W: f64 = 230.0;
 /// 下半区两列之间的缝。两列加起来不到整行，避免标题画进旁边的下拉框。
@@ -1561,6 +1577,44 @@ fn retention_popup(
     popup
 }
 
+/// 录音上限。标题在左，下拉框从更宽的标题列右边开始，避免英文
+/// "Recording limit (default 5 min)" 画进选项里。
+fn record_limit_popup(
+    mtm: MainThreadMarker,
+    target: &MenuTarget,
+    lang: Lang,
+    current_secs: u32,
+    y: f64,
+) -> Retained<NSPopUpButton> {
+    let x = MARGIN + RECORD_LIMIT_CAPTION_W;
+    let popup = NSPopUpButton::initWithFrame_pullsDown(
+        NSPopUpButton::alloc(mtm),
+        rect(x, y, SETTINGS_WIDTH - MARGIN - x, ROW_H),
+        false,
+    );
+    let menu = NSMenu::init(NSMenu::alloc(mtm));
+    for (i, key) in RECORD_LIMIT_KEYS.iter().enumerate() {
+        let it = unsafe {
+            NSMenuItem::initWithTitle_action_keyEquivalent(
+                NSMenuItem::alloc(mtm),
+                &NSString::from_str(i18n::t(lang, *key)),
+                None,
+                &NSString::from_str(""),
+            )
+        };
+        it.setTag(TAG_RECORD_LIMIT_BASE + i as isize);
+        menu.addItem(&it);
+    }
+    popup.setMenu(Some(&menu));
+    wire_popup(&popup, target);
+    let idx = crate::asr::RECORD_LIMIT_SECS
+        .iter()
+        .position(|s| *s == current_secs)
+        .unwrap_or(0);
+    popup.selectItemAtIndex(idx as isize);
+    popup
+}
+
 /// 弹出（或调到前台）设置窗口。**每次都重建内容**——跟菜单
 /// `menuNeedsUpdate:` 同一个做法：设置窗口不常开，重建的成本远低于
 /// 维护一份「点开后还要不要跟着配置活刷新」的状态。
@@ -1640,11 +1694,7 @@ fn build_settings_content(
 
     // 行数必须和下面 `next_row()` 的次数一致。少算一行，最底下的按钮会被裁出窗口
     // （SenseVoice 那一行加进来时就少算过一次）。
-    // 界面语言 + 识别语言 + 泰语模型状态
-    // + 勾选×3 + 边车（空文案也占位）+ SenseVoice
-    // + 语音识别/保留期标题行 + 控件行 + 每个 Qwen3 一行 + Agent24
-    // + 底部按钮两行（两两并排，不再各占一整行）
-    let rows = 3 + 3 + 1 + 1 + 2 + crate::qwen3::Qwen3Model::ALL.len() + 1 + 2;
+    let rows = settings_row_count();
     let content_h = MARGIN * 2.0 + rows as f64 * ROW_H + (rows - 1) as f64 * ROW_GAP;
     window.setContentSize(NSSize::new(SETTINGS_WIDTH, content_h));
 
@@ -1714,6 +1764,22 @@ fn build_settings_content(
         cfg.record_cue,
         next_row(),
     ));
+    {
+        let row_y = next_row();
+        let caption = NSTextField::labelWithString(
+            &NSString::from_str(i18n::t(lang, Key::RecordLimitSection)),
+            mtm,
+        );
+        caption.setFrame(rect(MARGIN, row_y, RECORD_LIMIT_CAPTION_W - 8.0, ROW_H));
+        content.addSubview(&caption);
+        content.addSubview(&record_limit_popup(
+            mtm,
+            &target,
+            lang,
+            cfg.record_limit_secs,
+            row_y,
+        ));
+    }
     content.addSubview(&checkbox(
         mtm,
         &target,
@@ -2122,6 +2188,17 @@ pub fn run(mtm: MainThreadMarker) -> ! {
     unreachable!("NSApplication::run 不应返回")
 }
 
+/// 设置窗口的内容行数。必须和 `build_settings_content` 里 `next_row()` 的次数一致。
+fn settings_row_count() -> usize {
+    // 界面语言、识别语言、泰语状态
+    // + 开机启动、录音提示音、录音上限、术语纠错
+    // + 边车 + SenseVoice
+    // + 语音识别/保留期的标题行和控件行
+    // + 每个 Qwen3 一行 + Agent24
+    // + 底部按钮两行
+    3 + 4 + 1 + 1 + 2 + crate::qwen3::Qwen3Model::ALL.len() + 1 + 2
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2138,6 +2215,29 @@ mod tests {
         assert!(w0 <= full * 0.5, "列宽应当不超过整行的一半");
         assert!(w0 > full * 0.45, "列宽应当接近整行的一半");
         assert!(x1 + w1 <= SETTINGS_WIDTH - MARGIN + 0.01);
+    }
+
+    /// 比 v0.28.1 多一行录音上限。少算一行会把底部按钮裁出窗口。
+    #[test]
+    fn settings_window_counts_the_record_limit_row() {
+        let v0281 = 3 + 3 + 1 + 1 + 2 + crate::qwen3::Qwen3Model::ALL.len() + 1 + 2;
+        assert_eq!(settings_row_count(), v0281 + 1);
+    }
+
+    #[test]
+    fn record_limit_tags_stay_below_the_device_range() {
+        assert_eq!(RECORD_LIMIT_KEYS.len(), crate::asr::RECORD_LIMIT_SECS.len());
+        let end = TAG_RECORD_LIMIT_BASE + RECORD_LIMIT_KEYS.len() as isize;
+        assert!(TAG_RECORD_LIMIT_BASE > TAG_THAI_RETRY);
+        assert!(end <= TAG_DEVICE_BASE, "录音上限的 tag 会被设备区吞掉");
+    }
+
+    /// 10 分钟和 15 分钟都超过 255。停在 255 时菜单会冻在 4 分 15 秒。
+    #[test]
+    fn recording_clock_keeps_counting_past_four_minutes() {
+        set_secs(900);
+        assert_eq!(SECS.load(Ordering::Relaxed), 900);
+        set_secs(0);
     }
 
     /// #97 评审：后台配对/撤销 panic 后，忙碌标志必须复位，否则按钮永久灰掉。
