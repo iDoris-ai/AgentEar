@@ -688,6 +688,13 @@ static PLAYING: std::sync::Mutex<Option<Player>> = std::sync::Mutex::new(None);
 static INTERRUPTS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// 打断计数器的当前值。调用方记下开始时的值，事后比对。
+/// 每次 [`stop_playback`] 调用都加一（含没在播的时候）。
+static STOP_EPOCH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+pub fn stop_epoch() -> u64 {
+    STOP_EPOCH.load(std::sync::atomic::Ordering::SeqCst)
+}
+
 pub fn interrupts() -> u64 {
     INTERRUPTS.load(std::sync::atomic::Ordering::SeqCst)
 }
@@ -696,6 +703,9 @@ pub fn interrupts() -> u64 {
 ///
 /// 返回 `true` 表示确实掐掉了东西。没在播时是 no-op，调用方不必先查状态。
 pub fn stop_playback() -> bool {
+    // 不管有没有在播都记一笔：宿主 speak 还在等边车 / 合成时收到停止，
+    // 那时没有播放句柄可掐，靠这个让它醒来后别再开播。
+    STOP_EPOCH.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     let Ok(mut slot) = PLAYING.lock() else {
         return false;
     };
@@ -1738,39 +1748,37 @@ fn start_tts_reaper() {
 /// 进 `SPAWNED` 之后再看一眼「正在用」：拉起方会先占住 inflight，再 `spawn`，
 /// 这样不会把刚拉起来的进程收掉。
 fn reap_idle_tts(limit: Duration) {
-    let kids: Vec<std::process::Child> = {
-        let mut guard = SPAWNED.lock().unwrap_or_else(|e| e.into_inner());
-        let (inflight, idle) = {
-            let g = TTS_USE.lock().unwrap_or_else(|e| e.into_inner());
-            (g.inflight, g.last.map(|t| t.elapsed()))
-        };
-        let conversation = crate::config::get().talk_mode == crate::config::TalkMode::Conversation;
-        if tts_reap_reason(inflight, idle, limit, conversation).is_none() {
-            return;
+    // 判定、摘除、杀进程全程握着 TTS_USE：新请求的 `TtsInflight::enter` 会等到
+    // 这里做完，不会出现「刚探活成功就被杀」。锁序固定为 SPAWNED → TTS_USE。
+    let mut guard = SPAWNED.lock().unwrap_or_else(|e| e.into_inner());
+    let usage = TTS_USE.lock().unwrap_or_else(|e| e.into_inner());
+    let conversation = crate::config::get().talk_mode == crate::config::TalkMode::Conversation;
+    if tts_reap_reason(usage.inflight, usage.last.map(|t| t.elapsed()), limit, conversation).is_none() {
+        return;
+    }
+    let mut kept = Vec::with_capacity(guard.len());
+    let mut kids = Vec::new();
+    for (name, child) in guard.drain(..) {
+        if name == "TTS" {
+            kids.push(child);
+        } else {
+            kept.push((name, child));
         }
-        let mut kept = Vec::with_capacity(guard.len());
-        let mut taken = Vec::new();
-        for (name, child) in guard.drain(..) {
-            if name == "TTS" {
-                taken.push(child);
-            } else {
-                kept.push((name, child));
-            }
-        }
-        *guard = kept;
-        taken
-    };
+    }
+    *guard = kept;
     if kids.is_empty() {
         return;
     }
     for mut child in kids {
         let pid = child.id() as i32;
         log::info!("空闲超时：关掉我们拉起的 TTS 边车（pid {pid}）");
+        // 先从信号槽位注销，再回收：wait 返回后 pid 就可能被系统复用。
+        unregister_pid(pid);
         let _ = child.kill();
         let _ = child.wait();
-        unregister_pid(pid);
     }
     // 换过端口的覆盖还指着刚杀掉的进程。清掉，下次按配置地址重新判断。
+    // 仍握着 TTS_USE，并发的拉起（也要先 enter）写不进新覆盖。
     clear_override("TTS");
     remove_run_entry("TTS");
 }
@@ -1930,18 +1938,26 @@ pub fn ensure_tts(cfg: &crate::config::Config) -> Result<(), TtsBootError> {
         return Ok(());
     }
     let _hold = TtsInflight::enter();
-    match STARTUP.wait(READY_TIMEOUT) {
-        StartupWait::TimedOut => {
+    // 拿到启动闸才往下：对话模式的拉起线程占着时先等它；我们占着时，
+    // 对话模式那边 `try_begin` 失败、不会再拉第二份。
+    let waited_from = Instant::now();
+    let deadline = waited_from + READY_TIMEOUT;
+    loop {
+        if STARTUP.try_begin() {
+            break;
+        }
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() || STARTUP.wait(left) == StartupWait::TimedOut {
             log::warn!(
-                "宿主播报等对话模式正在拉起的边车，等满 {:?} 还没结束——这次不重复拉 TTS",
+                "宿主播报等边车拉起，等满 {:?} 还没结束——这次不重复拉 TTS",
                 READY_TIMEOUT
             );
             return Err(TtsBootError::StartTimeout);
         }
-        StartupWait::Finished(d) => {
-            log::info!("宿主播报先等对话模式的边车拉起：等了 {:.1}s", d.as_secs_f32());
-        }
-        StartupWait::NotStarting => {}
+    }
+    let _done = StartupDone;
+    if waited_from.elapsed() > Duration::from_millis(50) {
+        log::info!("宿主播报先等边车拉起：等了 {:.1}s", waited_from.elapsed().as_secs_f32());
     }
     let Some(spec) = sidecar_specs(cfg).into_iter().find(|s| s.name == "TTS") else {
         return Ok(());
@@ -2636,7 +2652,7 @@ pub fn answer(engines: &Engines, cfg: &crate::config::Config, user_text: &str, l
 
 /// 合成 + 播放，返回播放时长。
 pub fn speak(engines: &Engines, text: &str, lang: TalkLang) -> Result<Duration> {
-    speak_then(engines, text, lang, &mut || {})
+    speak_then(engines, text, lang, &|| false, &mut || {})
 }
 
 /// 同 [`speak`]，但在**合成成功、即将播放**时调一次 `on_begin`。
@@ -2647,11 +2663,16 @@ pub fn speak_then(
     engines: &Engines,
     text: &str,
     lang: TalkLang,
+    cancelled: &dyn Fn() -> bool,
     on_begin: &mut dyn FnMut(),
 ) -> Result<Duration> {
     let started = Instant::now();
     let wav = engines.tts.synthesize(text, lang)?;
     let synth = started.elapsed();
+    if cancelled() {
+        log::info!("合成完成时这条播报已被停止，不开播");
+        return Ok(Duration::ZERO);
+    }
     crate::timings::note_tts_first(synth);
     log::info!(
         "通话 TTS（{}）{:.2}s，{} 字节",
@@ -3294,6 +3315,13 @@ mod tests {
         assert_eq!(ensure_tts(&cfg), Err(TtsBootError::StartFailed), "命令起不来");
         let cfg = tts_cfg_on_dead_port(true, &["/usr/bin/true"]);
         assert_eq!(ensure_tts(&cfg), Err(TtsBootError::StartFailed), "进程马上退出");
+    }
+
+    #[test]
+    fn stop_playback_bumps_the_stop_epoch_even_when_nothing_is_playing() {
+        let before = stop_epoch();
+        stop_playback();
+        assert!(stop_epoch() > before, "冷启动等待期间的停止要靠它被看见");
     }
 
     #[test]

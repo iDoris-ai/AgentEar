@@ -1613,13 +1613,15 @@ pub fn default_player() -> Player {
             "th-TH" => TalkLang::Th,
             _ => TalkLang::Zh,
         };
+        // 开始等边车之前记下停止计数：等待 / 合成期间收到停止，醒来后不再开播。
+        let epoch = talk::stop_epoch();
         if let Err(boot) = talk::ensure_tts(&cfg) {
             log::warn!("宿主播报：TTS 边车没有拉起来（{}）", boot.reason());
             return PlayOutcome::Failed(boot.reason());
         }
         let engines = talk::Engines::from_config(&cfg);
         let before = talk::interrupts();
-        match talk::speak_then(&engines, &s.text, lang, on_begin) {
+        match talk::speak_then(&engines, &s.text, lang, &|| talk::stop_epoch() != epoch, on_begin) {
             Ok(_) if talk::interrupts() != before => PlayOutcome::Interrupted,
             Ok(_) => PlayOutcome::Completed,
             Err(e) => {
