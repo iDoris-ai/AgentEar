@@ -1476,13 +1476,9 @@ impl CommandCenter {
             HostCommand::Speak(s) => {
                 if self.playing.is_none() && !self.turn_active {
                     self.playing = Some(s.clone());
-                    (
-                        Ack::Started,
-                        vec![
-                            Effect::Emit("speech", speech_payload("started", Some(&s.command_id), None)),
-                            Effect::Play(s),
-                        ],
-                    )
+                    // `started` 不在这里发。播放器要等边车就绪、合成完成、
+                    // 真正开播时才发。Ack::Started 只表示「现在就播，没有排队」。
+                    (Ack::Started, vec![Effect::Play(s)])
                 } else {
                     self.queue.push_back(s);
                     (Ack::Queued, Vec::new())
@@ -1542,7 +1538,7 @@ impl CommandCenter {
             let (state, reason) = match outcome {
                 PlayOutcome::Completed => ("completed", None),
                 PlayOutcome::Interrupted => ("stopped", Some("barge_in")),
-                PlayOutcome::Failed => ("failed", Some("tts_unavailable")),
+                PlayOutcome::Failed(reason) => ("failed", Some(reason)),
             };
             fx.push(Effect::Emit("speech", speech_payload(state, Some(command_id), reason)));
         }
@@ -1567,10 +1563,7 @@ impl CommandCenter {
         match self.queue.pop_front() {
             Some(s) => {
                 self.playing = Some(s.clone());
-                vec![
-                    Effect::Emit("speech", speech_payload("started", Some(&s.command_id), None)),
-                    Effect::Play(s),
-                ]
+                vec![Effect::Play(s)]
             }
             None => Vec::new(),
         }
@@ -1584,12 +1577,12 @@ impl CommandCenter {
     }
 }
 
-/// 一次宿主播报的结果。
+/// 一次宿主播报的结果。`Failed` 的字符串原样写进 `speech.reason`。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PlayOutcome {
     Completed,
     Interrupted,
-    Failed,
+    Failed(&'static str),
 }
 
 static CENTER: std::sync::OnceLock<Mutex<CommandCenter>> = std::sync::OnceLock::new();
@@ -1600,11 +1593,14 @@ pub fn center() -> &'static Mutex<CommandCenter> {
 
 /// 播放器：给定一条 speak，合成并播放，返回结果。默认用 `talk` 的引擎；
 /// 测试 / fake 宿主可以换成不出声的实现。
-pub type Player = Arc<dyn Fn(&SpeakCmd) -> PlayOutcome + Send + Sync>;
+///
+/// 第二个参数在**真正开始播放**时调一次。合成失败或边车拉不起来时不要调。
+pub type Player = Arc<dyn Fn(&SpeakCmd, &mut dyn FnMut()) -> PlayOutcome + Send + Sync>;
 
-/// 默认播放器：按 speak 的 lang/voice/style 合成，走 `talk::play_blocking`（可被按键掐断）。
+/// 默认播放器：TTS 没在跑就按对话模式那套逻辑拉起来，再合成，
+/// 走 `talk::play_blocking`（可被按键掐断）。
 pub fn default_player() -> Player {
-    Arc::new(|s: &SpeakCmd| {
+    Arc::new(|s: &SpeakCmd, on_begin: &mut dyn FnMut()| {
         let mut cfg = crate::config::get();
         if let Some(v) = &s.voice {
             cfg.tts_voice = Some(v.clone());
@@ -1617,14 +1613,18 @@ pub fn default_player() -> Player {
             "th-TH" => TalkLang::Th,
             _ => TalkLang::Zh,
         };
+        if let Err(boot) = talk::ensure_tts(&cfg) {
+            log::warn!("宿主播报：TTS 边车没有拉起来（{}）", boot.reason());
+            return PlayOutcome::Failed(boot.reason());
+        }
         let engines = talk::Engines::from_config(&cfg);
         let before = talk::interrupts();
-        match talk::speak(&engines, &s.text, lang) {
+        match talk::speak_then(&engines, &s.text, lang, on_begin) {
             Ok(_) if talk::interrupts() != before => PlayOutcome::Interrupted,
             Ok(_) => PlayOutcome::Completed,
             Err(e) => {
                 log::warn!("宿主播报合成/播放失败：{e:#}");
-                PlayOutcome::Failed
+                PlayOutcome::Failed("tts_unavailable")
             }
         }
     })
@@ -1644,7 +1644,14 @@ pub fn run_effects(fx: Vec<Effect>, player: &Player) {
             Effect::Play(s) => {
                 let player = player.clone();
                 std::thread::spawn(move || {
-                    let outcome = player(&s);
+                    let mut began = false;
+                    let id = s.command_id.clone();
+                    let outcome = player(&s, &mut || {
+                        if !began {
+                            began = true;
+                            emit("speech", speech_payload("started", Some(&id), None));
+                        }
+                    });
                     let next = center()
                         .lock()
                         .unwrap_or_else(|p| p.into_inner())

@@ -119,7 +119,10 @@ impl Kernel {
 /// 测试用的命令处理：真 `handle_rpc_request` + 不出声的播放器。
 fn quiet_handler() -> Handler {
     Arc::new(|method, params| {
-        let player: host::Player = Arc::new(|_s: &host::SpeakCmd| host::PlayOutcome::Completed);
+        let player: host::Player = Arc::new(|_s: &host::SpeakCmd, on_begin: &mut dyn FnMut()| {
+            on_begin();
+            host::PlayOutcome::Completed
+        });
         host::handle_rpc_request(method, params, &player).map_err(|e| (e.code, e.message))
     })
 }

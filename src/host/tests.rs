@@ -699,18 +699,22 @@ fn speak_plays_now_when_idle_and_queues_when_busy() {
     let (ack, fx) = c.handle(speak("a"));
     assert_eq!(ack, Ack::Started);
     assert_eq!(plays(&fx), ["a"]);
-    assert_eq!(speech_states(&fx), [("a".into(), "started".into())]);
+    assert!(speech_states(&fx).is_empty(), "started 改到真正开播时再发，这里只有 Play");
     let (ack, fx) = c.handle(speak("b"));
     assert_eq!(ack, Ack::Queued);
     assert!(fx.is_empty());
-    // a 放完 → completed + 开始放 b
+    // a 放完 → completed + 开始放 b（b 的 started 也不在这一拍）
     let fx = c.on_played("a", PlayOutcome::Completed);
-    assert_eq!(speech_states(&fx), [("a".into(), "completed".into()), ("b".into(), "started".into())]);
+    assert_eq!(speech_states(&fx), [("a".into(), "completed".into())]);
     assert_eq!(plays(&fx), ["b"]);
     // b 失败 → failed(带 reason)，队列空
-    let fx = c.on_played("b", PlayOutcome::Failed);
+    let fx = c.on_played("b", PlayOutcome::Failed("tts_unavailable"));
     assert_eq!(speech_states(&fx), [("b".into(), "failed:tts_unavailable".into())]);
     assert!(c.playing().is_none());
+    // 拉起超时用自己的 reason，不再一律 tts_unavailable
+    c.handle(speak("c"));
+    let fx = c.on_played("c", PlayOutcome::Failed("start_timeout"));
+    assert_eq!(speech_states(&fx), [("c".into(), "failed:start_timeout".into())]);
 }
 
 #[test]
@@ -796,7 +800,7 @@ fn every_speech_effect_is_a_valid_event() {
     all.extend(c.handle(speak("a")).1);
     c.handle(speak("b"));
     all.extend(c.on_played("a", PlayOutcome::Completed));
-    all.extend(c.on_played("b", PlayOutcome::Failed));
+    all.extend(c.on_played("b", PlayOutcome::Failed("tts_unavailable")));
     c.handle(speak("c"));
     c.handle(speak("d"));
     all.extend(c.handle(stop("s")).1);
@@ -827,8 +831,9 @@ fn inbound_commands_drive_playback_and_report_back() {
     attach(fake.clone());
     let played: Arc<StdMutex<Vec<String>>> = Arc::new(StdMutex::new(Vec::new()));
     let rec = played.clone();
-    let player: Player = Arc::new(move |s: &SpeakCmd| {
+    let player: Player = Arc::new(move |s: &SpeakCmd, on_begin: &mut dyn FnMut()| {
         rec.lock().unwrap().push(s.text.clone());
+        on_begin();
         PlayOutcome::Completed
     });
     let cmd = |id: &str, text: &str| {
@@ -867,6 +872,40 @@ fn inbound_commands_drive_playback_and_report_back() {
             ("c2".into(), "completed".into()),
         ]
     );
+    for e in fake.events() {
+        assert_event_valid(&e);
+    }
+}
+
+/// 边车拉不起来时播放器不调用 on_begin：宿主只能看到 failed，不能先看到 started。
+#[test]
+fn host_speak_failure_does_not_emit_started() {
+    let _g = global_lock();
+    let fake = Arc::new(FakeHost::new());
+    attach(fake.clone());
+    let player: Player = Arc::new(|_s: &SpeakCmd, _on_begin: &mut dyn FnMut()| {
+        PlayOutcome::Failed("start_timeout")
+    });
+    let cmd = json!({"schema": "agentear.command/1", "command_id": "c9", "type": "speak",
+                     "payload": {"text": "你好", "lang": "zh-CN"}});
+    assert_eq!(handle_inbound(&cmd, &player)["status"], "started", "回执仍表示已收下，不是播报开始");
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while fake.events_of("speech").is_empty() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(flush(Duration::from_secs(2)));
+    let speech: Vec<(String, String, String)> = fake
+        .events_of("speech")
+        .iter()
+        .map(|e| {
+            (
+                e["payload"]["command_id"].as_str().unwrap().into(),
+                e["payload"]["state"].as_str().unwrap().into(),
+                e["payload"]["reason"].as_str().unwrap_or("").into(),
+            )
+        })
+        .collect();
+    assert_eq!(speech, [("c9".into(), "failed".into(), "start_timeout".into())]);
     for e in fake.events() {
         assert_event_valid(&e);
     }
@@ -954,8 +993,9 @@ fn silent_player() -> (Player, Arc<StdMutex<Vec<String>>>) {
     let played: Arc<StdMutex<Vec<String>>> = Arc::new(StdMutex::new(Vec::new()));
     let rec = played.clone();
     (
-        Arc::new(move |s: &SpeakCmd| {
+        Arc::new(move |s: &SpeakCmd, on_begin: &mut dyn FnMut()| {
             rec.lock().unwrap().push(s.command_id.clone());
+            on_begin();
             PlayOutcome::Completed
         }),
         played,
