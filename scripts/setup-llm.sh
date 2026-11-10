@@ -32,7 +32,8 @@ echo "==> Python 环境（${VENV}）"
 mkdir -p "$ENV_DIR"
 [ -d "$VENV" ] || uv venv "$VENV" --python 3.11 >/dev/null
 # mlx-dspark 带 mlx / mlx-lm。装在自己的 venv 里，不碰系统 Python。
-uv pip install --python "$VENV/bin/python" -q mlx-dspark huggingface_hub
+# T3.5.5：钉版本（2026-11-10 取自实测在用的 venv）。升级 = 改这里 + 重跑 benchmarks-m2 的复现。
+uv pip install --python "$VENV/bin/python" -q mlx==0.32.2 mlx-dspark==0.18.0 huggingface_hub==1.29.0
 
 echo "==> 模型 ${HF_REPO}（约 7.7 GB）"
 # ⚠️ **用 curl 逐文件，不用 snapshot_download。**
@@ -54,15 +55,14 @@ ENDPOINTS=("${HF_ENDPOINT:-https://huggingface.co}" "https://huggingface.co")
 
 mkdir -p "$MODEL_DIR"
 
-# 先拿 revision。钉住它，两个 shard 才保证来自同一次提交——
-# 混了不同 revision 的分片，加载时报的错会指向张量形状，跟真正的原因无关。
-HF_REV=""
-for ep in "${ENDPOINTS[@]}"; do
-  HF_REV="$(curl -sfL --max-time 60 "${ep}/api/models/${HF_REPO}" \
-    | "$VENV/bin/python" -c 'import json,sys; print(json.load(sys.stdin)["sha"])' 2>/dev/null)" && break
-done
-[ -n "$HF_REV" ] || die "拿不到 ${HF_REPO} 的 revision（试过 ${ENDPOINTS[*]}）"
-echo "    revision ${HF_REV}"
+# T3.5.5：revision 钉死成常量，不再问 API 要 HEAD。
+# 旧写法下「同一条命令」在不同日子装到的是不同权重。这个 commit 是
+# mlx-community/Ornith-1.0-9B-6bit 的 HEAD（上游 2026-06-28 之后没动过，
+# 2026-11-10 复核）。两个 shard 必然来自同一次提交。
+# 升级 = 改常量 + 重跑 benchmarks-m2 + 更新 docs/upstream-pins.md。
+HF_REV="${AGENTEAR_LLM_REV:-a2800933352a607ffbb1f814295fc3ff8e10ad69}"
+[ "${#HF_REV}" -eq 40 ] || die "revision 必须是完整 40 位 commit：${HF_REV}"
+echo "    revision ${HF_REV}（钉死）"
 
 hf_get() {  # hf_get <文件名> <是否必需>
   local rel="$1" required="$2" dest="$MODEL_DIR/$1" ep
