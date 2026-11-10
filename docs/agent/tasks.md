@@ -968,7 +968,10 @@
   与已入库的 `qwen3-asr-2026-09-08.tsv` 做配对 bootstrap，报差值置信区间。
 - **拿到区间之后**，才可以使用「未检出差异」「非劣」这类措辞。
 
-### T3.5.3 逐组件许可证表  `READY`
+### T3.5.3 逐组件许可证表  `DONE`（2026-11-10，结果见 [`docs/licenses.md`](../licenses.md)）
+- **结果摘要**：表已出；随包/再分发的缺口（SenseVoice 权重实为 FunASR 模型协议而非 Apache、tarball 缺许可全文、NOTICE 缺条目）
+  与未核实项（Ornith、FSMN-VAD、FunctionGemma、PersonaPlex、IndexTTS2 限制）都列在文末；后续修 NOTICE / 补 tarball 声明另开任务。
+- ⚠️ 下面「VoiceChat 11B 仅研究用途」一句核实后**不成立**：HF 卡是 OpenMDW-1.1（宽松），见 licenses.md §4。
 - **为什么**：speech-swift 仓库代码是 Apache-2.0，
   **但模型权重各自授权**——同一批里 VoiceChat 11B 就是仅研究用途。
 - 逐项列：Qwen3-ASR / VoxCPM2 / IndexTTS2 / Smart Turn / LocalVQE /
