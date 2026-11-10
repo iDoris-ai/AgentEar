@@ -112,6 +112,14 @@ pub enum Key {
     LaunchAtLogin,
     /// 录音开始/结束提示音开关（`cue.rs`）。
     RecordCue,
+    /// 设置窗口：单次录音最长多久。标题里写明默认是 5 分钟。
+    RecordLimitSection,
+    /// 5 分钟，默认档。选项文字里也要写「默认」。
+    RecordLimit5,
+    /// 10 分钟。
+    RecordLimit10,
+    /// 15 分钟。设置里最长的一档。
+    RecordLimit15,
     /// 设置窗口「语音识别」那一行的标签（SenseVoice / Qwen3-ASR 二选一）。
     AsrEngineSection,
     /// 「语音识别」下拉框里随包的那一项。
@@ -301,6 +309,15 @@ pub fn t(lang: Lang, key: Key) -> &'static str {
             "录音提示音（开始 / 结束时嘟一声）",
             "เสียงแจ้งเตือนการอัด (เริ่ม / หยุด)",
         ),
+        K::RecordLimitSection => pick(
+            lang,
+            "Recording limit (default 5 min)",
+            "录音上限（默认 5 分钟）",
+            "จำกัดเวลาอัด (ค่าเริ่มต้น 5 นาที)",
+        ),
+        K::RecordLimit5 => pick(lang, "5 min (default)", "5 分钟（默认）", "5 นาที (ค่าเริ่มต้น)"),
+        K::RecordLimit10 => pick(lang, "10 min", "10 分钟", "10 นาที"),
+        K::RecordLimit15 => pick(lang, "15 min", "15 分钟", "15 นาที"),
         K::Agent24Connect => pick(lang, "Connect to Agent24", "连接 Agent24", "เชื่อมต่อ Agent24"),
         K::Agent24Disconnect => pick(lang, "Disconnect from Agent24", "断开 Agent24", "ยกเลิกการเชื่อมต่อ Agent24"),
         K::ResumeStandalone => pick(
@@ -484,7 +501,7 @@ fn fail_reason(lang: Lang, f: crate::download::Fail) -> &'static str {
 mod tests {
     use super::*;
 
-    const ALL_KEYS: [Key; 36] = [
+    const ALL_KEYS: [Key; 40] = [
         Key::AsrEngineSection,
         Key::AsrEngineSenseVoice,
         Key::Qwen3Resident,
@@ -518,6 +535,10 @@ mod tests {
         Key::SettingsTitle,
         Key::LaunchAtLogin,
         Key::RecordCue,
+        Key::RecordLimitSection,
+        Key::RecordLimit5,
+        Key::RecordLimit10,
+        Key::RecordLimit15,
         Key::Agent24Connect,
         Key::Agent24Disconnect,
         Key::ResumeStandalone,
@@ -630,6 +651,26 @@ mod tests {
                 thai_option(lang, State::Downloading(42)).contains("42"),
                 "{lang:?} 丢了百分比"
             );
+        }
+    }
+
+    /// 设置里要写明默认是 5 分钟。10 分钟和 15 分钟不能也标成默认。
+    #[test]
+    fn record_limit_copy_says_five_minutes_is_the_default() {
+        assert!(t(Lang::Zh, Key::RecordLimitSection).contains("默认"));
+        assert!(t(Lang::Zh, Key::RecordLimit5).contains("默认"));
+        assert!(t(Lang::En, Key::RecordLimitSection)
+            .to_ascii_lowercase()
+            .contains("default"));
+        assert!(t(Lang::En, Key::RecordLimit5)
+            .to_ascii_lowercase()
+            .contains("default"));
+        assert!(t(Lang::Th, Key::RecordLimitSection).contains("ค่าเริ่มต้น"));
+        assert!(t(Lang::Th, Key::RecordLimit5).contains("ค่าเริ่มต้น"));
+        for key in [Key::RecordLimit10, Key::RecordLimit15] {
+            assert!(!t(Lang::Zh, key).contains("默认"), "{key:?}");
+            assert!(!t(Lang::En, key).to_ascii_lowercase().contains("default"), "{key:?}");
+            assert!(!t(Lang::Th, key).contains("ค่าเริ่มต้น"), "{key:?}");
         }
     }
 

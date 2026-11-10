@@ -53,11 +53,30 @@ pub fn engine_fingerprint() -> Option<String> {
     Some(format!("{:x}", h.finalize())[..16].to_string())
 }
 
-/// 单段送入 ASR 的时长上限。
+/// 单段录音的默认时长上限（秒）。
 ///
-/// M0 实测 RSS 随音频长度线性增长约 0.52 MB/s，约 54 分钟破 2 GiB。
-/// M1 的快捷键录音通常只有几十秒，这里只作为兜底护栏。
+/// 设置里还可以选 10 分钟和 15 分钟（[`RECORD_LIMIT_SECS`]）。
+/// 真正停录音的是 `config.record_limit_secs`，不是这个常量。
+///
+/// M0 实测 SenseVoice 的 RSS 大约每秒涨 0.52 MB，约 54 分钟才到 2 GiB。
+/// 5 分钟是快捷键录音的默认护栏，不是 SenseVoice 的内存墙。
+/// 松键前提前退出时，这一整段还没提交的录音会丢掉，所以默认不放得更长。
 pub const MAX_SEGMENT_SECS: f32 = 300.0;
+
+/// 设置里允许的录音上限，单位秒：5 / 10 / 15 分钟。第一项是默认。
+pub const RECORD_LIMIT_SECS: [u32; 3] = [300, 600, 900];
+
+/// 默认 5 分钟。和 [`MAX_SEGMENT_SECS`] 是同一个数。
+pub const DEFAULT_RECORD_LIMIT_SECS: u32 = RECORD_LIMIT_SECS[0];
+
+/// 只接受三档。别的数（0、999、手改坏的配置）退回默认 5 分钟。
+pub fn record_limit_secs(raw: u32) -> u32 {
+    if RECORD_LIMIT_SECS.contains(&raw) {
+        raw
+    } else {
+        DEFAULT_RECORD_LIMIT_SECS
+    }
+}
 
 /// 识别语言的选择。**和界面语言（`i18n::Lang`）分开存**：
 /// 识别切成泰语不会改菜单文字；界面改成英文或中文也不会把识别改回去。
@@ -679,6 +698,19 @@ fn write_synthetic_probe(path: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn record_limit_is_three_tiers_and_defaults_to_five_minutes() {
+        assert_eq!(RECORD_LIMIT_SECS, [300, 600, 900]);
+        assert_eq!(DEFAULT_RECORD_LIMIT_SECS, 300);
+        assert_eq!(MAX_SEGMENT_SECS, DEFAULT_RECORD_LIMIT_SECS as f32);
+        assert_eq!(record_limit_secs(300), 300);
+        assert_eq!(record_limit_secs(600), 600);
+        assert_eq!(record_limit_secs(900), 900);
+        assert_eq!(record_limit_secs(0), 300);
+        assert_eq!(record_limit_secs(999), 300);
+        assert_eq!(record_limit_secs(448), 300);
+    }
 
     /// PR1 RED1：temp vendor 只有 bin fixture、没有模型/VAD 时，
     /// `Asr::new` 也要能造出定位对象——模型的有无留给 preflight/transcribe

@@ -1302,10 +1302,11 @@ fn worker(
                 log::info!("● 录音中 {:.0}s", session.duration_secs());
                 last_heartbeat = Instant::now();
             }
-            if session.duration_secs() > asr::MAX_SEGMENT_SECS {
+            let limit = config::get().record_limit_secs as f32;
+            if session.duration_secs() > limit {
                 log::warn!(
-                    "录音超过 {:.0} 秒上限，自动停止（见 ADR-0001 §5）",
-                    asr::MAX_SEGMENT_SECS
+                    "录音超过 {:.0} 秒上限，自动停止（设置里的录音上限，默认 {:.0} 秒）",
+                    limit, asr::MAX_SEGMENT_SECS
                 );
                 state = finish(state, &store, asr.as_ref())?;
                 continue;

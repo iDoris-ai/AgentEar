@@ -4,26 +4,29 @@
 # 被改过的文件要带上「已被修改」的说明；下面两处改动里，AudioServer.swift 的
 # hunk 已经在文件内加了这样一条注释（"---- Modified by AgentEar ----"）。
 #
-# ## 改了什么、为什么（T3.5.9 第 1/2 步，docs/data/qwen3-memory-2026-10/README.md）
+# ## 改了什么、为什么
 #
-# speech-server 的 Qwen3-ASR 转写路径（Sources/AudioServer/AudioServer.swift 的
-# `dispatchTranscribe`）每次请求后不释放 MLX 用过的 Metal 缓冲区。0.6B 档（我们的
-# 默认模型）又恰好没有上游给 1.7B 准备的那层缓存上限保护（只套在
-# `if modelSize == .large` 里）。结果是常驻服务越用越涨：实测 25 段真实录音后
-# 从 3.4 GB 涨到 47–50 GB，逼近 swap，30 秒的录音要转 97–237 秒
-# （jason 2026-10-02 原话「越用越慢，一句话要好几分钟」）。
+# 两件事，都在 Sources/AudioServer/AudioServer.swift 的 `dispatchTranscribe`
+# `qwen3-asr` 分支。
 #
-# 这个补丁加一个**默认不生效**的环境变量开关：
-#   - `AGENTEAR_MLX_CACHE_MB=<N>`：给 MLX 设一个 N MB 的缓存上限
-#     （`MLX.Memory.cacheLimit`），且本次请求结束后 `MLX.Memory.clearCache()`。
-#     AgentEar 自己起 speech-server 时传 256（见 src/qwen3.rs 的
-#     `AGENTEAR_MLX_CACHE_MB` 常量，取值依据同 TTS 边车 v0.17.0）。
-#   - `AGENTEAR_MLX_CLEAR_ONLY=1`：只清缓存、不设上限（留着给以后排障用）。
-#   - 两个都不设：**原版行为完全不变**——这是为什么同一个二进制能用来做
-#     「补丁 / 不补丁」的对照实验（见上面那份 README）。
+# 1. Metal 缓存（T3.5.9，docs/data/qwen3-memory-2026-10/README.md）。
+#    这条路径每次请求后不释放 MLX 用过的 Metal 缓冲区。0.6B 档又没有上游给
+#    1.7B 准备的缓存上限。常驻服务会从几 GB 涨到几十 GB。
+#    补丁加两个默认不生效的环境变量：
+#      - `AGENTEAR_MLX_CACHE_MB=<N>`：缓存上限 N MB，请求结束 `clearCache()`。
+#        AgentEar 起服务时传 256（src/qwen3.rs 的 `AGENTEAR_MLX_CACHE_MB`）。
+#      - `AGENTEAR_MLX_CLEAR_ONLY=1`：只清缓存、不设上限。
+#    两个都不设时，缓存行为和上游一致。
 #
-# Package.swift 的那一行只是把 `MLX` 产品加进 AudioServer target 的依赖——
-# 用 `MLX.Memory` 之前必须先能 import 到它。
+# 2. 解码长度。上游 `Qwen3DecodingOptions.maxTokens` 默认 448。写满就停，
+#    HTTP 仍是 200。282 秒的一段录音回来正好 448 个 token，停在半句。
+#    AgentEar 录音上限默认 5 分钟，设置里可选 10 或 15 分钟。
+#    这里把 maxTokens 定成 6144，盖住最长的 15 分钟。上游后来给大约 15 分钟
+#    用的是 4096，按他们的语速余量大约两成，所以这里留得更宽。
+#    短句遇到 EOS 会提前停。三条返回都传同一份 options。
+#    这一项不看环境变量。
+#
+# Package.swift 的那一行只是把 `MLX` 产品加进 AudioServer target 的依赖。
 #
 # ## 怎么生成 / 复现
 #
@@ -34,11 +37,13 @@
 # 打包进 AgentEar 分发的运行时见 scripts/build-speech-runtime.sh（T3.5.9 方案 B-lite：
 # 自己编译 speech-server、只换这一个二进制，`mlx.metallib` 等其余文件原样用官方发布包的）。
 #
-# ## 实测结果摘要（25 段真实录音 ×3 轮，详见上面的 README）
+# ## 实测
 #
-# 不开这个开关：末态 47–49 GB（与未修改的官方二进制一致，50 GB）。
-# 开（256 MB）：末态 ≈ 865 MB，请求中峰值 2.36–2.43 GB。速度未检出差异，
-# 转写文字逐字一致（这个补丁不改转写结果，只改内存生命周期）。
+# 缓存开关（25 段真实录音 ×3 轮，详见上面的 README）：不开时末态 47–49 GB；
+# 开 256 MB 时末态 ≈ 865 MB。那次对照的句子都短，文字逐字一致。
+# 解码：同一段 281.75 秒的录音，448 个 token 停在半句；上限抬到 448 以上之后
+# 整段是 736 个 token，在 EOS 停下。6144 是为 15 分钟档留的余量，
+# 没有拿 15 分钟的录音重测过。
 
 diff --git a/Package.swift b/Package.swift
 index c16593e..7fa17dd 100644
@@ -64,25 +69,34 @@ index c841518..94e7277 100644
  import Qwen3TTS
  import Qwen3TTSCoreML
  import CosyVoiceTTS
-@@ -1686,6 +1687,21 @@ func dispatchTranscribe(
+@@ -1686,6 +1687,29 @@ func dispatchTranscribe(
          return (try? model.transcribeAudio(audio16k, sampleRate: 16000, language: language)) ?? ""
      case "qwen3-asr":
          let model = try await state.loadQwen3ASR(modelId: variant.modelId)
-+        // ---- Modified by AgentEar (https://github.com/iDoris-ai/AgentEar), T3.5.9 ----
-+        // 原版这条路径每次请求后不释放 MLX 用过的 Metal 缓冲区，常驻服务会越用越涨
-+        // （0.6B 没有上游给 1.7B 准备的缓存上限保护）。两个环境变量都不设时行为与
-+        // 原版完全一致；详见 patches/speech-swift-v0.0.28-agentear.patch 顶部说明。
+-        return try model.transcribeCheckingCancellation(audio: audio16k, sampleRate: 16000)
++        // ---- Modified by AgentEar (https://github.com/iDoris-ai/AgentEar) ----
++        // Metal 缓存：AGENTEAR_MLX_CACHE_MB / AGENTEAR_MLX_CLEAR_ONLY。
++        // 两个都不设时，缓存行为和上游一致。
++        // maxTokens：上游默认 448。写满就停，HTTP 仍是 200。
++        // 282 秒的一段录音回来正好 448 个 token，停在半句。
++        // 录音上限默认 5 分钟（300 秒），设置里可选 10 或 15 分钟。
++        // 6144 盖住最长的 15 分钟。上游给大约 15 分钟用的是 4096，余量大约两成。
++        // 遇到 EOS 会提前停，短句结果不变。三条返回都传同一份 options。
 +        let env = ProcessInfo.processInfo.environment
++        let asrOptions = Qwen3DecodingOptions(maxTokens: 6144)
 +        if let mb = env["AGENTEAR_MLX_CACHE_MB"], let n = Int(mb) {
 +            MLX.Memory.cacheLimit = n * 1024 * 1024
 +            defer { MLX.Memory.clearCache() }
-+            return try model.transcribeCheckingCancellation(audio: audio16k, sampleRate: 16000)
++            return try model.transcribeCheckingCancellation(
++                audio: audio16k, sampleRate: 16000, options: asrOptions)
 +        }
 +        if env["AGENTEAR_MLX_CLEAR_ONLY"] != nil {
 +            defer { MLX.Memory.clearCache() }
-+            return try model.transcribeCheckingCancellation(audio: audio16k, sampleRate: 16000)
++            return try model.transcribeCheckingCancellation(
++                audio: audio16k, sampleRate: 16000, options: asrOptions)
 +        }
 +        // ---- end AgentEar modification ----
-         return try model.transcribeCheckingCancellation(audio: audio16k, sampleRate: 16000)
++        return try model.transcribeCheckingCancellation(
++            audio: audio16k, sampleRate: 16000, options: asrOptions)
      default:
          throw RealtimeDispatchError.engineNotEnabled(kind: "ASR", engine: variant.engine)
