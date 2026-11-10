@@ -177,7 +177,17 @@ else
   echo "!! 修复：scripts/make-signing-cert.sh" >&2
   SIGN_ID="-"
 fi
-codesign --force --deep --sign "$SIGN_ID" "$APP" 2>&1 | sed 's/^/    /'
+# App Store 包才带沙箱。直接安装的签名包不开：沙箱会把数据关进容器，
+# 也会限制子进程，和现在这份本机安装包不是同一条分发路径。
+# ⚠️ 这只是把签名分支备好；现有 bundle 还过不了 MAS 审核，见 docs/app-store.md。
+if [ "${AGENTEAR_DISTRIBUTION:-}" = "app-store" ]; then
+  echo "==> App Store 沙箱（assets/entitlements/AppStore.entitlements）"
+  codesign --force --deep --options runtime \
+    --entitlements "$ROOT/assets/entitlements/AppStore.entitlements" \
+    --sign "$SIGN_ID" "$APP" 2>&1 | sed 's/^/    /'
+else
+  codesign --force --deep --sign "$SIGN_ID" "$APP" 2>&1 | sed 's/^/    /'
+fi
 
 # 打印 designated requirement。它跨重建是否稳定，决定了要不要重新授权。
 echo "    designated requirement:"

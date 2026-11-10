@@ -2957,13 +2957,45 @@ fn args_after<'a>(args: &'a [String], flag: &str) -> Vec<&'a str> {
     out
 }
 
-pub(crate) fn data_root() -> Result<PathBuf> {
-    if let Ok(p) = std::env::var("AGENTEAR_DATA") {
-        return Ok(PathBuf::from(p));
+/// `AGENTEAR_DATA` 优先。App Sandbox 里没有这个变量时，数据放进该应用的容器，
+/// 不写真实的 `~/.agentear`（沙箱会拒绝）。未开沙箱时路径不变。
+///
+/// ⚠️ 沙箱进程里 `HOME` 本身通常**已经是**容器的 `Data` 目录（未核实，见
+/// `docs/app-store.md`）；此时再拼一遍 `Library/Containers/<id>/Data` 会嵌套成
+/// 容器套容器。所以 `home` 已经落在容器里就直接用 `home/.agentear`。
+pub(crate) fn resolve_data_root(
+    override_path: Option<&str>,
+    sandbox_id: Option<&str>,
+    home: &std::path::Path,
+) -> PathBuf {
+    if let Some(p) = override_path {
+        if !p.is_empty() {
+            return PathBuf::from(p);
+        }
     }
-    Ok(dirs::home_dir()
-        .context("找不到 home 目录")?
-        .join(".agentear"))
+    if let Some(id) = sandbox_id {
+        if !id.is_empty() {
+            let container = std::path::Path::new("Library/Containers")
+                .join(id)
+                .join("Data");
+            if home.ends_with(&container) {
+                return home.join(".agentear");
+            }
+            return home.join(container).join(".agentear");
+        }
+    }
+    home.join(".agentear")
+}
+
+pub(crate) fn data_root() -> Result<PathBuf> {
+    let home = dirs::home_dir().context("找不到 home 目录")?;
+    let override_path = std::env::var("AGENTEAR_DATA").ok();
+    let sandbox_id = std::env::var("APP_SANDBOX_CONTAINER_ID").ok();
+    Ok(resolve_data_root(
+        override_path.as_deref(),
+        sandbox_id.as_deref(),
+        &home,
+    ))
 }
 
 /// vendor/ 里放 ASR 二进制和模型。
@@ -3395,6 +3427,36 @@ mod host_wiring_tests {
         // 这一轮已经收过表，不能再收第二次
         assert!(timings::finish("ok").is_none());
         host::detach(&cfg);
+    }
+
+    #[test]
+    fn sandboxed_data_root_stays_in_the_container() {
+        let home = std::path::Path::new("/Users/example");
+        assert_eq!(
+            resolve_data_root(None, None, home),
+            home.join(".agentear"),
+            "没开沙箱时仍用原来的数据目录"
+        );
+        assert_eq!(
+            resolve_data_root(Some(""), Some(""), home),
+            home.join(".agentear"),
+            "空字符串等于没设"
+        );
+        assert_eq!(
+            resolve_data_root(None, Some("ai.idoris.agentear"), home),
+            home.join("Library/Containers/ai.idoris.agentear/Data/.agentear")
+        );
+        // HOME 已经是容器目录时不能再嵌套一层
+        let in_container = home.join("Library/Containers/ai.idoris.agentear/Data");
+        assert_eq!(
+            resolve_data_root(None, Some("ai.idoris.agentear"), &in_container),
+            in_container.join(".agentear")
+        );
+        assert_eq!(
+            resolve_data_root(Some("/tmp/override"), Some("ai.idoris.agentear"), home),
+            std::path::PathBuf::from("/tmp/override"),
+            "显式数据目录优先于沙箱容器"
+        );
     }
 
     #[test]

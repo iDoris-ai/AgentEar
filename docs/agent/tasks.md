@@ -1354,3 +1354,8 @@
 ### T6.1.4 P4 流式优化  `BLOCKED`（等 Agent24 的流式 model callback）
 - 支持取消、分句播报和背压，不改 P0 的语义。**验收**：首字起播中位数 ≤3.0 秒，n≥10，只报中位数和极值。
 
+### T7.1 Mac App Store 分发：沙箱底座 + 可行性审计  `PR_OPEN`（2026-11-10，分支 `feat/app-store-sandbox`）
+- 做法：`assets/entitlements/AppStore.entitlements`；`bundle.sh` 的 `AGENTEAR_DISTRIBUTION=app-store` 签名分支；`resolve_data_root`（沙箱数据进容器，HOME 已在容器时不嵌套）；审计结论见 `docs/app-store.md`。
+- 结论：现状不能原样上 MAS，4 个硬阻塞（右 Command/CGEventTap、自动 ⌘V、运行时下载 speech-server、Python 边车）；可行子集 = 输入法模式 + 随包 SenseVoice + 组合键 + 剪贴板。
+- 下一步：阶段 1 沙箱原型（真机验证标「未核实」的项）。默认构建行为不变。
+
