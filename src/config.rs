@@ -134,6 +134,18 @@ fn lenient_record_cue<'de, D: Deserializer<'de>>(d: D) -> Result<bool, D::Error>
     Ok(serde_json::from_value(v).unwrap_or_else(|_| default_record_cue()))
 }
 
+fn default_record_limit_secs() -> u32 {
+    crate::asr::DEFAULT_RECORD_LIMIT_SECS
+}
+
+/// 只接受 300 / 600 / 900。坏值退回 300，不能退回 0（那会一开录就停）。
+fn lenient_record_limit<'de, D: Deserializer<'de>>(d: D) -> Result<u32, D::Error> {
+    let v = serde_json::Value::deserialize(d)?;
+    Ok(serde_json::from_value::<u32>(v)
+        .map(crate::asr::record_limit_secs)
+        .unwrap_or_else(|_| default_record_limit_secs()))
+}
+
 /// 默认的拉起命令：**空**。
 ///
 /// ⚠️ 曾经默认成 `env!("CARGO_MANIFEST_DIR")/scripts/serve-llm.sh`，
@@ -170,6 +182,9 @@ pub struct Config {
     /// 录音开始/结束提示音（`cue.rs`）。设置窗口里的「录音提示音」。
     #[serde(deserialize_with = "lenient_record_cue")]
     pub record_cue: bool,
+    /// 单次录音最长秒数。只允许 300 / 600 / 900，默认 300（5 分钟）。
+    #[serde(deserialize_with = "lenient_record_limit")]
+    pub record_limit_secs: u32,
     /// 输入设备名。`None` = 跟随系统默认。
     ///
     /// 存名字而不是索引：设备顺序会随插拔变化，索引存下来就指错了。
@@ -577,6 +592,7 @@ impl Default for Config {
             auto_paste: default_auto_paste(),
             launch_at_login: default_launch_at_login(),
             record_cue: default_record_cue(),
+            record_limit_secs: default_record_limit_secs(),
             input_device: None,
             trigger: Trigger::RightCommand,
             retention_days: default_retention_days(),
@@ -1013,6 +1029,29 @@ mod tests {
         assert!(!c.auto_paste);
         let c: Config = serde_json::from_str(r#"{"record_cue": false}"#).unwrap();
         assert!(!c.record_cue);
+    }
+
+    /// 录音上限默认 5 分钟。缺字段、写坏、写成 0 都退回 300，不连累别的字段。
+    #[test]
+    fn record_limit_defaults_to_five_minutes_and_rejects_other_values() {
+        assert_eq!(Config::default().record_limit_secs, 300);
+        let c: Config = serde_json::from_str("{}").unwrap();
+        assert_eq!(c.record_limit_secs, 300);
+        let c: Config = serde_json::from_str(r#"{"record_limit_secs": 600}"#).unwrap();
+        assert_eq!(c.record_limit_secs, 600);
+        let c: Config =
+            serde_json::from_str(r#"{"record_limit_secs": 900, "auto_paste": false}"#).unwrap();
+        assert_eq!(c.record_limit_secs, 900);
+        assert!(!c.auto_paste);
+        for bad in [
+            r#"{"record_limit_secs": 999, "auto_paste": false}"#,
+            r#"{"record_limit_secs": "十分钟", "auto_paste": false}"#,
+            r#"{"record_limit_secs": 0, "auto_paste": false}"#,
+        ] {
+            let c: Config = serde_json::from_str(bad).unwrap();
+            assert_eq!(c.record_limit_secs, 300, "{bad}");
+            assert!(!c.auto_paste, "{bad}");
+        }
     }
 
     #[test]

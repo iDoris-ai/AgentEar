@@ -16,6 +16,9 @@
 //!    Toolchain 现编 `.metallib` 的麻烦）。产物发布在 AgentEar 自己的 GitHub
 //!    release 上（`speech-runtime-<版本>` 这个 tag），`RUNTIME_URL` 指向那里，
 //!    不再指向 `soniqo/speech-swift` 的 release。
+//!    同一份补丁还把 Qwen3 的 `maxTokens` 从 448 改成 6144，盖住设置里最长的
+//!    15 分钟。短句遇到 EOS 会提前停。已发布的 [`SPEECH_VERSION`] 仍是 `.1`，
+//!    新二进制要等 tarball 发出去再改版本号，否则安装器会去下一个还不存在的包。
 //! 2. **模型权重**：0.6B / 1.7B 两档，**直接从 Hugging Face 下载**，
 //!    钉在某个 commit（`resolve/<revision>/`），逐文件 sha256 校验，
 //!    按 speech 认的布局 `$QWEN3_ASR_CACHE_DIR/qwen3-speech/models/<org>/<repo>/`
@@ -89,9 +92,10 @@ const RUNTIME_BYTES: u64 = 99_502_348;
 const RUNTIME_UNPACKED_BYTES: u64 = 420_000_000;
 /// 常驻服务的 Metal 缓存上限（MB），传给打了补丁的 `speech-server`
 /// （`AGENTEAR_MLX_CACHE_MB` 环境变量，见 `patches/speech-swift-v0.0.28-agentear.patch`）。
-/// 不设这个变量时补丁版行为与官方版一致（即不限）——**AgentEar 自己起
+/// 不设这个变量时，**缓存**与官方版一致（即不限）——**AgentEar 自己起
 /// speech-server 时必须显式传它**，取值依据与 TTS 边车 v0.17.0 一致（256 MB 折中：
 /// 留一点够复用、又不会无限长；设成 0 反而更慢）。
+/// 解码上限不看这个变量：补丁把 `maxTokens` 从 448 改成 6144。
 ///
 /// 实测依据：`docs/data/qwen3-memory-2026-10/README.md`——25 段真实录音 ×3 轮，
 /// 设了这个变量后末态 ≈ 865 MB（不设时 47–49 GB）。
@@ -1582,7 +1586,8 @@ mod tests {
     }
 
     /// `AGENTEAR_MLX_CACHE_MB` 必须真的被传给每一个 speech 子进程——这是
-    /// 补丁生效的唯一开关（不设 = 补丁版行为等同官方版，常驻服务照样会涨到几十 GB）。
+    /// 缓存上限生效的开关（不设 = 缓存行为等同官方版，常驻服务照样会涨到几十 GB）。
+    /// 解码上限不靠这个变量。
     #[test]
     fn speech_command_always_sets_the_cache_limit_env() {
         let cmd = speech_command(Path::new("/tmp/does-not-matter"));
@@ -1592,6 +1597,38 @@ mod tests {
             .and_then(|(_, v)| v)
             .map(|v| v.to_string_lossy().to_string());
         assert_eq!(val, Some(AGENTEAR_MLX_CACHE_MB.to_string()));
+    }
+
+    /// 常驻转写的解码上限必须盖住设置里最长的 15 分钟。
+    /// 上游默认 448 在一段 282 秒的录音上正好写满，HTTP 仍是 200，后半段被丢掉。
+    /// 只数补丁里新增的行，被删掉的旧调用不算。
+    #[test]
+    fn speech_server_patch_raises_qwen3_max_tokens_for_a_full_recording() {
+        let patch = include_str!("../patches/speech-swift-v0.0.28-agentear.patch");
+        let added: Vec<&str> = patch
+            .lines()
+            .filter(|l| l.starts_with('+') && !l.starts_with("+++"))
+            .collect();
+        let calls = added
+            .iter()
+            .filter(|l| l.contains("transcribeCheckingCancellation("))
+            .count();
+        let with_options = added
+            .iter()
+            .filter(|l| l.contains("options: asrOptions"))
+            .count();
+        assert_eq!(calls, 3, "三条返回都要传解码选项");
+        assert_eq!(with_options, 3);
+        assert!(
+            added
+                .iter()
+                .any(|l| l.contains("Qwen3DecodingOptions(maxTokens: 6144)")),
+            "解码上限要盖住 15 分钟档"
+        );
+        assert!(
+            !added.iter().any(|l| l.contains("maxTokens: 448")),
+            "新增行里不能再把 448 当成生效的上限"
+        );
     }
 
     /// pid 被复用时不能误杀：命令行必须真的是我们 qwen3 运行时根目录下的

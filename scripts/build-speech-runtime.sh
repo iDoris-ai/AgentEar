@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # T3.5.9 方案 B-lite：从上游 speech-swift 的 PINNED 源码自己编 speech-server，
-# 打上 patches/speech-swift-v0.0.28-agentear.patch（修「常驻越用越涨」那个内存
-# 泄漏），然后把官方发布包里的 speech-server 换成我们编的这个，其余文件
-# （speech CLI、mlx.metallib、各个 bundle）原样用官方的——不需要装 Metal
-# Toolchain（我们自己的机器没装，mlx.metallib 要靠 Metal Toolchain 现编）。
+# 打上 patches/speech-swift-v0.0.28-agentear.patch（Metal 缓存上限，以及
+# Qwen3 maxTokens 448→6144），然后把官方发布包里的 speech-server 换成我们编的
+# 这个，其余文件（speech CLI、mlx.metallib、各个 bundle）原样用官方的——不需要装
+# Metal Toolchain（我们自己的机器没装，mlx.metallib 要靠 Metal Toolchain 现编）。
 #
 # 产物就是「官方 tarball 的平替版」：同样的顶层布局，`src/qwen3.rs::unpack_runtime`
 # 不用改一行就能解开它。
@@ -11,7 +11,7 @@
 # 用法：scripts/build-speech-runtime.sh [输出目录]
 #   WORK_DIR   克隆 + 编译用的临时目录（默认 mktemp，成功后保留以便排障，失败也保留）
 #
-# 产物：$OUT/speech-macos-arm64-v0.0.28-agentear.1.tar.gz（打印 sha256 / 大小 / 解包后大小）
+# 产物：$OUT/speech-macos-arm64-v0.0.28-agentear.<修订号>.tar.gz（打印 sha256 / 大小 / 解包后大小）
 
 set -euo pipefail
 
@@ -35,7 +35,10 @@ OFFICIAL_BYTES=99089736
 
 # 我们发布的 agentear 补丁版的「修订号」。换补丁内容（不换上游版本）时只加这个数字；
 # 换上游版本（SPEECH_VERSION）时连 UPSTREAM_TAG 一起改。
-AGENTEAR_REV="1"
+# .2：Qwen3 解码上限 448→6144，盖住设置里最长的 15 分钟。
+# src/qwen3.rs 的 SPEECH_VERSION 仍指向已发布的 .1。这个 tarball 发出去之前不要改它，
+# 否则安装器会去下还不存在的 asset，然后退回 SenseVoice。
+AGENTEAR_REV="2"
 OUT_NAME="speech-macos-arm64-${UPSTREAM_TAG}-agentear.${AGENTEAR_REV}.tar.gz"
 
 die() { echo "!! $*" >&2; exit 1; }
@@ -122,10 +125,16 @@ cat > "$PATCH_NOTE" <<EOF
 AgentEar 仓库里的 \`patches/speech-swift-v0.0.28-agentear.patch\`
 （https://github.com/iDoris-ai/AgentEar/blob/main/patches/speech-swift-v0.0.28-agentear.patch）。
 
-补丁内容一句话：原版 Qwen3-ASR 转写路径每次请求后不释放 MLX 的 Metal 缓冲区，
-常驻服务长时间跑会涨到几十 GB；补丁加一个默认不生效的环境变量开关
-（\`AGENTEAR_MLX_CACHE_MB\`），AgentEar 自己起 speech-server 时才会设它。
-不设这个环境变量时，这个二进制与官方版本行为完全一致。
+补丁做了两件事：
+
+1. 缓存。原版 Qwen3-ASR 转写路径每次请求后不释放 MLX 的 Metal 缓冲区，
+   常驻服务长时间跑会涨到几十 GB。补丁加一个默认不生效的环境变量
+   （\`AGENTEAR_MLX_CACHE_MB\`）。不设它时，缓存行为和官方版一致。
+   AgentEar 自己起 speech-server 时才会设它。
+2. 解码长度。Qwen3 的 \`maxTokens\` 从上游默认的 448 改成 6144。
+   448 大约两分钟就写满，HTTP 仍是 200，后半段被丢掉。
+   6144 盖住设置里最长的 15 分钟。短句遇到 EOS 会提前停。
+   这一项不看环境变量，编进二进制里。
 
 上游许可证（Apache License 2.0）随补丁的源码仓库一起适用，见
 https://github.com/soniqo/speech-swift/blob/${UPSTREAM_TAG}/LICENSE。
