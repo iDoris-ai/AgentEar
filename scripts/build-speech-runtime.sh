@@ -112,6 +112,42 @@ log "把 speech-server 换成我们自己编的那个（其余文件原样用官
 cp "$BUILT_BIN" "$STAGE/speech-server"
 chmod +x "$STAGE/speech-server"
 
+# FU-23：随 tarball 附上许可文本（Apache-2.0 §4(a)(c)(d)、MIT「所有副本都带声明」）。
+# 来源是构建用的源码树：speech-swift 自己的 LICENSE / ThirdPartyNotices，以及
+# swift build 拉下来的各依赖 checkout（mlx-swift、mlx-swift-lm 等）的 LICENSE / NOTICE。
+# 官方包里的 mlx.metallib 来自 ml-explore/mlx（MIT），它的源码在 mlx-swift 的子树里，
+# 下面的 find 会一并收走（深度放宽到 4 层）。
+LIC_DIR="$STAGE/LICENSES"
+rm -rf "$LIC_DIR"
+mkdir -p "$LIC_DIR/speech-swift"
+[ -f "$SRC/LICENSE" ] || die "构建源码树里没有 speech-swift 的 LICENSE：$SRC/LICENSE"
+cp "$SRC/LICENSE" "$LIC_DIR/speech-swift/LICENSE"
+[ -d "$SRC/ThirdPartyNotices" ] && cp -R "$SRC/ThirdPartyNotices" "$LIC_DIR/speech-swift/ThirdPartyNotices"
+LIC_COUNT=0
+if [ -d "$SRC/.build/checkouts" ]; then
+  for dep in "$SRC/.build/checkouts/"*/; do
+    [ -d "$dep" ] || continue
+    name="$(basename "$dep")"
+    mkdir -p "$LIC_DIR/${name}"
+    # 仓库根的 LICENSE*/NOTICE*，以及 mlx-swift 里 vendored 的 mlx 等子树（深度 <=4）
+    find "$dep" -maxdepth 4 -type f \( -iname 'LICENSE' -o -iname 'LICENSE.*' -o -iname 'LICENCE*' -o -iname 'NOTICE' -o -iname 'NOTICE.*' \) 2>/dev/null |
+    while IFS= read -r f; do
+      rel="${f#"$dep"}"
+      mkdir -p "$LIC_DIR/${name}/$(dirname "$rel")"
+      cp "$f" "$LIC_DIR/${name}/${rel}"
+    done
+    if [ -z "$(find "$LIC_DIR/${name}" -type f 2>/dev/null | head -1)" ]; then
+      echo "    警告：依赖 ${name} 的 checkout 里没找到 LICENSE/NOTICE 文件（FU-23：需人工补）" >&2
+      rmdir "$LIC_DIR/${name}" 2>/dev/null || true
+    else
+      LIC_COUNT=$((LIC_COUNT + 1))
+    fi
+  done
+else
+  echo "    警告：没有 ${SRC}/.build/checkouts，依赖许可文本没收集到（FU-23）" >&2
+fi
+log "已收集许可文本：speech-swift + ${LIC_COUNT} 个依赖 checkout → LICENSES/"
+
 PATCH_NOTE="$STAGE/AGENTEAR-PATCH.md"
 cat > "$PATCH_NOTE" <<EOF
 # 这个运行时包里改了什么
@@ -136,8 +172,10 @@ AgentEar 仓库里的 \`patches/speech-swift-v0.0.28-agentear.patch\`
    6144 盖住设置里最长的 15 分钟。短句遇到 EOS 会提前停。
    这一项不看环境变量，编进二进制里。
 
-上游许可证（Apache License 2.0）随补丁的源码仓库一起适用，见
-https://github.com/soniqo/speech-swift/blob/${UPSTREAM_TAG}/LICENSE。
+上游许可证（Apache License 2.0）全文与各静态链接依赖（mlx-swift 等，MIT 或
+Apache-2.0）的许可/声明文件已随本包放在 \`LICENSES/\` 目录下
+（speech-swift 的 \`LICENSE\`、\`ThirdPartyNotices/\`，以及构建时拉取的各依赖）。
+在线版：https://github.com/soniqo/speech-swift/blob/${UPSTREAM_TAG}/LICENSE。
 按 Apache-2.0 §4(b)，被改过的源文件（\`Sources/AudioServer/AudioServer.swift\`）
 已经在文件内标注了修改说明，补丁文件开头也有完整的改动说明。
 
