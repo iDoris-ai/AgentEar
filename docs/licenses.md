@@ -1,6 +1,6 @@
 # 逐组件许可证表（T3.5.3）
 
-**核实日期：2026-11-10。** 核实方式：读 HuggingFace 模型卡与 `api/models/<repo>` 的许可元数据、
+**核实日期：2026-11-10；FU-23 修订（2026-11-11）重读了 SenseVoice / Ornith / VoiceChat / 泰语模型的一手来源。** 核实方式：读 HuggingFace 模型卡与 `api/models/<repo>` 的许可元数据、
 读 GitHub 上的 LICENSE / README、读 PyPI 元数据。本文**不是法律意见**。
 
 读法：
@@ -17,17 +17,17 @@
 
 | 组件 | 代码许可 | 权重许可 | 再分发义务 | 商用限制 | 来源（修订） |
 |---|---|---|---|---|---|
-| **SenseVoiceSmall q8**（`sensevoice-small-q8.gguf`） | 上游代码 MIT（QwenAudio/SenseVoice） | ⚠️ **官方权重是「FunASR Model Open Source License Agreement v1.1」，不是 Apache-2.0**。我们用的 GGUF 转换版 HF 页写 `apache-2.0`，与官方权重的条款**对不上** | 必须**注明出处与作者，并保留模型名称**（协议 §2.2）。协议 §4.2：不得无端诋毁/恶意抹黑该模型，否则许可自动失效；§6：协议可被单方修订 | ⚠️ **商用是否允许：未最终确认。** 协议 §3 字面写「仅作为参考和学习使用」；SenseVoice 维护者在 [issue #334](https://github.com/QwenAudio/SenseVoice/issues/334#issuecomment-5083546605) 的早期回复称 §3 只是免责、不是非商用限制，README 也照此转述，但该回复已被加注（2026-09-22）**「不是许可方最终确认」**，issue 重新打开，仍待许可方/核心维护者确认。该说明也只覆盖官方权重，不覆盖第三方转换；GGUF 的 `apache-2.0` 标注由谁授权，**未核实** | 协议文本：[FunASR MODEL_LICENSE @58830eca](https://github.com/modelscope/FunASR/blob/58830eca4012644aac0c3218c3ccc7d98f003fda/MODEL_LICENSE)；官方卡：[FunAudioLLM/SenseVoiceSmall @3847d57](https://huggingface.co/FunAudioLLM/SenseVoiceSmall)（`license: other / model-license`）；GGUF：[FunAudioLLM/SenseVoiceSmall-GGUF @90c1c61](https://huggingface.co/FunAudioLLM/SenseVoiceSmall-GGUF)（`apache-2.0`）；SenseVoice [README License 节](https://github.com/QwenAudio/SenseVoice#license) |
+| **SenseVoiceSmall q8**（`sensevoice-small-q8.gguf`） | 上游代码 MIT（QwenAudio/SenseVoice） | ⚠️ **官方权重是「FunASR Model Open Source License Agreement v1.1」，不是 Apache-2.0**。我们用的 GGUF 转换版 HF 页写 `apache-2.0`，与官方权重的条款**对不上** | 必须**注明出处与作者，并保留模型名称**（协议 §2.2）。协议 §4.2：不得无端诋毁/恶意抹黑该模型，否则许可自动失效；§6：协议可被单方修订 | ⚠️ **商用是否允许：未最终确认。** 协议 §3 字面写「[FunASR 软件]仅作为参考和学习使用，不对您使用或修改[FunASR 软件]造成的任何直接或间接损失承担任何责任」（英文版：“[FunASR Software] is provided for reference and learning purposes only, and Alibaba Group assumes no responsibility for any direct or indirect losses…”；2026-11-11 重读 @58830eca 原文）；SenseVoice 维护者在 [issue #334](https://github.com/QwenAudio/SenseVoice/issues/334#issuecomment-5083546605) 的早期回复称 §3 只是免责、不是非商用限制，README 也照此转述，但该回复已被加注（2026-09-22）**「不是许可方最终确认」**，issue 重新打开，仍待许可方/核心维护者确认。该说明也只覆盖官方权重，不覆盖第三方转换；GGUF 的 `apache-2.0` 标注由谁授权，**未核实** | 协议文本：[FunASR MODEL_LICENSE @58830eca](https://github.com/modelscope/FunASR/blob/58830eca4012644aac0c3218c3ccc7d98f003fda/MODEL_LICENSE)；官方卡：[FunAudioLLM/SenseVoiceSmall @3847d57](https://huggingface.co/FunAudioLLM/SenseVoiceSmall)（`license: other / model-license`）；GGUF：[FunAudioLLM/SenseVoiceSmall-GGUF @90c1c61](https://huggingface.co/FunAudioLLM/SenseVoiceSmall-GGUF)（`apache-2.0`）；SenseVoice [README License 节](https://github.com/QwenAudio/SenseVoice#license) |
 | **FSMN-VAD**（`fsmn-vad.gguf`） | 同上（FunASR，MIT） | HF GGUF 页写 `apache-2.0`；**上游 FSMN-VAD 权重的原始许可我没查**，很可能同属 FunASR 模型协议 | 同 SenseVoice 一行的保守处理：注明出处 + 保留模型名 | **未核实**（上游原模型卡没读） | [FunAudioLLM/fsmn-vad-GGUF @6840bae](https://huggingface.co/FunAudioLLM/fsmn-vad-GGUF) |
 | **llama-funasr-sensevoice**（推理二进制） | ✅ MIT（FunASR 仓库级 LICENSE；`runtime/llama.cpp` 子目录是否另有声明**未核实**） | — | 保留 MIT 版权声明（NOTICE 已有） | 无 | [modelscope/FunASR](https://github.com/modelscope/FunASR)，release tag `runtime-llamacpp-v0.1.9`（tag 对象 `d10aedff3c50`） |
-| **whisper-cli**（泰语引擎，2.5 MB 静态链接） | ✅ whisper.cpp MIT（GitHub API：MIT；本机构建 commit `7de8dd78`，`v1.7.6-121`） | — | 保留 MIT 声明。⚠️ **现有 `NOTICE` 没有列 whisper.cpp**（只列了 FunASR runtime / SenseVoice / FSMN-VAD / 音色库）——见 §6.5 | 无 | [ggml-org/whisper.cpp](https://github.com/ggml-org/whisper.cpp) |
+| **whisper-cli**（泰语引擎，2.5 MB 静态链接） | ✅ whisper.cpp MIT（GitHub API：MIT；本机构建 commit `7de8dd78`，`v1.7.6-121`） | — | 保留 MIT 声明。✅ `NOTICE` 已于 FU-23 修订（2026-11-11）补上 whisper.cpp（版权行 “Copyright (c) 2023-2026 The ggml authors”）——见 §6.5 | 无 | [ggml-org/whisper.cpp](https://github.com/ggml-org/whisper.cpp) |
 | **默认音色库**（`assets/talk-voices/*.wav`，2 条） | — | 见 §6.4：VoxCPM2 生成物，非真人录音 | 见 §6.4 | 见 §6.4 | `assets/talk-voices/*.json` 的 `source` 字段 |
 
 ## 2. 按需下载（用户在设置/菜单里选了才下，不进安装包）
 
 | 组件 | 代码许可 | 权重许可 | 再分发义务 | 商用限制 | 来源（修订） |
 |---|---|---|---|---|---|
-| **泰语 Whisper**：`biodatlab/distill-whisper-th-large-v3` 转 GGML q5_0（**我们自己托管**在 GitHub release `models-th-v1`） | whisper.cpp MIT | ✅ 上游卡 `license: mit`。⚠️ 微调数据列了 Common Voice v13、Gowajee、SLSCU、Thai Elderly Speech Corpus，**这些数据集各自的许可及其对衍生权重的影响，未核实**；其基座（distil-large-v3 / Whisper）的许可链也**未核实** | 我们是**再分发转换产物**：要随产物给出 MIT 声明与版权归属。release 正文写了「MIT、版权归 biodatlab」，但**没有附 MIT 许可全文**（只有一句话）——保守起见应补 | MIT 本身无限制；数据集链上的限制未核实 | [biodatlab/distill-whisper-th-large-v3 @62df42c](https://huggingface.co/biodatlab/distill-whisper-th-large-v3)；托管：[iDoris-ai/AgentEar release models-th-v1](https://github.com/iDoris-ai/AgentEar/releases/tag/models-th-v1)；常量见 `src/download.rs` 的 `THAI` |
+| **泰语 Whisper**：`biodatlab/distill-whisper-th-large-v3` 转 GGML q5_0（**我们自己托管**在 GitHub release `models-th-v1`） | whisper.cpp MIT | ✅ 上游卡 `license: mit`。⚠️ 微调数据列了 Common Voice v13、Gowajee、SLSCU、Thai Elderly Speech Corpus，**这些数据集各自的许可及其对衍生权重的影响，未核实**；其基座（distil-large-v3 / Whisper）的许可链也**未核实**。2026-11-11 补查：biodatlab 的另两个 Thonburian 仓库 `whisper-th-medium-combined`（@eebf842）、`whisper-th-large-v3-combined`（@ba7197f）HF 元数据为 `apache-2.0`，**我们没有使用它们**（ADR-0004 评估过） | 我们是**再分发转换产物**：要随产物给出 MIT 声明与版权归属。release 正文写了「MIT、版权归 biodatlab」，但**没有附 MIT 许可全文**（只有一句话）——保守起见应补 | MIT 本身无限制；数据集链上的限制未核实 | [biodatlab/distill-whisper-th-large-v3 @62df42c](https://huggingface.co/biodatlab/distill-whisper-th-large-v3)；托管：[iDoris-ai/AgentEar release models-th-v1](https://github.com/iDoris-ai/AgentEar/releases/tag/models-th-v1)；常量见 `src/download.rs` 的 `THAI` |
 | **Qwen3-ASR 0.6B（MLX 4bit）** `aufklarer/Qwen3-ASR-0.6B-MLX-4bit` | speech-swift Apache-2.0（见下行） | ✅ `apache-2.0`，基座 `Qwen/Qwen3-ASR-0.6B` 也是 `apache-2.0`，二者一致 | Apache-2.0 §4：再分发要带许可副本与版权声明。我们**不托管**权重（用户端直接从 HF 拉，钉 commit + 逐文件 sha），所以我们本身不是再分发者；分发者是 HF | 无 | [aufklarer/…0.6B-MLX-4bit @bc441bd](https://huggingface.co/aufklarer/Qwen3-ASR-0.6B-MLX-4bit)；基座 [Qwen/Qwen3-ASR-0.6B @5eb1441](https://huggingface.co/Qwen/Qwen3-ASR-0.6B) |
 | **Qwen3-ASR 1.7B（MLX 8bit）** `aufklarer/Qwen3-ASR-1.7B-MLX-8bit` | 同上 | ✅ `apache-2.0`；基座 `Qwen/Qwen3-ASR-1.7B` `apache-2.0` | 同上 | 无 | [aufklarer/…1.7B-MLX-8bit @e5450a2](https://huggingface.co/aufklarer/Qwen3-ASR-1.7B-MLX-8bit)；基座 [@7278e1e](https://huggingface.co/Qwen/Qwen3-ASR-1.7B) |
 | **speech-swift 运行时（上游）** `soniqo/speech-swift` v0.0.28（commit `231f8eb9f097`） | ✅ Apache-2.0（GitHub API + 仓库 `LICENSE`） | — | 同下行 | 无 | [soniqo/speech-swift @v0.0.28](https://github.com/soniqo/speech-swift/tree/v0.0.28) |
@@ -43,7 +43,7 @@
 |---|---|---|---|---|---|
 | **VoxCPM2 4bit / 8bit**（`mlx-community/VoxCPM2-4bit`、`-8bit`） | OpenBMB/VoxCPM Apache-2.0 | ✅ mlx-community 两份都 `apache-2.0`，基座 `openbmb/VoxCPM2` 卡写 `apache-2.0`，并明确 “free for commercial use” | 用户自取，我们不分发 | 许可本身无商用限制（卡写 free for commercial use）。⚠️ 但模型卡 Limitations 写明：**严禁用于冒充、欺诈、虚假信息；AI 生成内容应明确标注**——是否构成许可条件需法务判断，至少是我们产品必须遵守的使用要求（语音输出应考虑标注） | [4bit @dc9e5c1](https://huggingface.co/mlx-community/VoxCPM2-4bit)、[8bit @d527258](https://huggingface.co/mlx-community/VoxCPM2-8bit)、[基座 @7936080](https://huggingface.co/openbmb/VoxCPM2) |
 | **MiniCPM5-2B（MLX 4bit）** `mlx-community/MiniCPM5-2B-mlx-4Bit` | OpenBMB/MiniCPM Apache-2.0 | ✅ `apache-2.0`；基座卡明写 “model weights are released under Apache-2.0” | 同上 | 无 | [mlx-community @86ad518](https://huggingface.co/mlx-community/MiniCPM5-2B-mlx-4Bit)、[openbmb/MiniCPM5-2B @42433e9](https://huggingface.co/openbmb/MiniCPM5-2B) |
-| **Ornith-1.0-9B（MLX 6bit）** `mlx-community/Ornith-1.0-9B-6bit` | — | ⚠️ 元数据 `license: mit`，但：① 量化版卡的 `license_link` 指向 `deepreinforce-ai/Ornith-1.0-9B/blob/main/LICENSE`，**该路径 404（Entry not found）**；② 基座仓库 `ornith-ai/Ornith-1.0-9B` 的文件列表里**没有 LICENSE 文件**，只有元数据标签 `license:mit`；③ 量化版 `base_model` 写 `deepreinforce-ai/…`，量化标签写 `ornith-ai/…`，仓库归属有改名/迁移痕迹 | 若 MIT 成立：保留 MIT 声明。**实际许可文本我没读到** | 若 MIT 成立则无；**未核实** | [mlx-community @a280093](https://huggingface.co/mlx-community/Ornith-1.0-9B-6bit)、[ornith-ai/Ornith-1.0-9B @83dc1f5](https://huggingface.co/ornith-ai/Ornith-1.0-9B) |
+| **Ornith-1.0-9B（MLX 6bit）** `mlx-community/Ornith-1.0-9B-6bit` | — | ⚠️ **只有声明，没有许可文本**（2026-11-11 重核）：HF 元数据 `license: mit`，基座 README 正文写 “MIT licensed, globally accessible, and free from regional limitations”；但 ① 基座 `ornith-ai/Ornith-1.0-9B` 与量化版 `mlx-community/Ornith-1.0-9B-6bit` 的文件列表里**都没有 LICENSE 文件**（HF API `siblings`）；② 两份卡的 `license_link` 都指向 `deepreinforce-ai/Ornith-1.0-9B/blob/main/LICENSE`，跟随重定向后落到 `ornith-ai/…/blob/main/LICENSE`，**HTTP 404**；③ 仓库归属有改名/迁移痕迹（`deepreinforce-ai` → `ornith-ai`）。**所以：声明为 MIT，但没有任何可引用的许可全文与版权人署名行。保守处理：不要当作「已确认可再分发」** | MIT 的核心义务是随附版权与许可声明——**没有许可文本可附**。**我们不随包分发它**（见下：`scripts/bundle.sh` 的体积守卫禁止 `vendor/models` 出现大权重，仅允许 SenseVoice / FSMN-VAD 两个 gguf；权重由用户自己 `scripts/setup-*.sh` 从 HF 下载），所以目前没有再分发义务触发；**任何把它打进包或自己托管的动作，都要先拿到上游许可文本** | 若 MIT 成立则无；**许可文本未核实** | [mlx-community @a280093](https://huggingface.co/mlx-community/Ornith-1.0-9B-6bit)、[ornith-ai/Ornith-1.0-9B @83dc1f5](https://huggingface.co/ornith-ai/Ornith-1.0-9B) |
 | **mlx / mlx-lm / mlx-audio**（Python 包） | ✅ mlx MIT（PyPI 0.32.4 许可字段 MIT）；✅ mlx-lm MIT（GitHub API；PyPI 许可字段为空）；mlx-audio MIT（GitHub API；PyPI 许可字段为空，⚠️ GitHub 上 `Blaizzy/mlx-audio` 现在重定向到 `Neywa-Labs/mlx-audio`，项目主页是 neywalabs.ai，**所有者变更我没追查**） | — | 用户 `pip install`，我们不分发 | 无 | [mlx](https://github.com/ml-explore/mlx)、[mlx-lm](https://github.com/ml-explore/mlx-lm)、[mlx-audio](https://github.com/Blaizzy/mlx-audio)，PyPI 0.6.5（mlx-audio） |
 | **mlx-community/OmniVoice-bf16**（ADR-0005 评估过，未进默认） | — | ⚠️ **无许可标注**（HF 元数据 `license: None`；README 取不到，返回 “Entry not found”） | — | **未核实 → 不得进入默认方案** | [@8fb0b75](https://huggingface.co/mlx-community/OmniVoice-bf16) |
 
@@ -58,7 +58,7 @@
 | **PersonaPlex 7B**（`nvidia/personaplex-7b-v1`、`NVIDIA/personaplex`） | ✅ MIT（GitHub API + README “The present code is provided under the MIT license”） | ⚠️ README：权重按 **NVIDIA Open Model License**；HF 卡 `license: other / nvidia-open-model-license`，**门控（自动批准）**。条款原文**我没读**。基座 `kyutai/moshiko-pytorch-bf16` 的许可也未核实 | **未核实** | **未核实** | [NVIDIA/personaplex](https://github.com/NVIDIA/personaplex)；[HF @fdaf409](https://huggingface.co/nvidia/personaplex-7b-v1) |
 | **VoiceChat 11B**（`nvidia/NVIDIA-NemotronLabs-VoiceChat-11B`） | 未查 | ⚠️ **与我们现有文档矛盾**：ADR-0007 写“OpenMDW 1.1 **仅研究用途**”，但 **OpenMDW-1.1 全文是宽松许可**：允许无限制使用/复制/修改/分发，含版权与专利；分发时保留协议副本与来源声明；对**输出**不设限；有诉讼终止条款（专利或版权）。HF 卡 `license: openmdw-1.1`。卡上“targeted for researchers, developers…”是**适用对象描述**，不是许可限制 | 分发时保留协议副本与原有版权/来源声明（全文无编号条款，见以 “If you distribute…” 开头的段落）；专利**或版权**诉讼会终止全部授权（对方先起诉的反诉除外） | 按 OpenMDW-1.1 文本**无商用限制**。⚠️ 但卡上还引用了其他数据/组件，**其附加条款未逐项查**；且 ADR-0007 里「仅英文」「RTF 1.13」等技术结论与许可无关、本文不动 | [HF @443794e](https://huggingface.co/nvidia/NVIDIA-NemotronLabs-VoiceChat-11B)；[OpenMDW-1.1 全文](https://github.com/OpenMDW/OpenMDW/blob/main/1.1/LICENSE.OpenMDW-1.1) |
 
-> **VoiceChat 的措辞建议**：ADR-0007 里「仅研究用途」应改为「许可 OpenMDW-1.1（宽松）；不进 V1 的原因是仅英文 + 达不到实时，不是许可」。本 PR 不改 ADR，只在此标出。
+> **VoiceChat（FU-23 已改）**：2026-11-11 重读 HF 卡：`license: openmdw-1.1`，「GOVERNING TERMS: The use of this model is governed by the OpenMDW License Agreement, version 1.1」；仓库自带 `LICENSE`（“permission is hereby granted, free of charge, to deal in the Model Materials without restriction…”）。ADR-0007 已加修订注、CLAUDE.md 同句已更正（ADR 原文保留，修订注标 2026-11-11）。
 
 ## 5. Rust 依赖（`Cargo.lock`，`cargo metadata --locked`，2026-11-10，agentear v0.28.1）
 
@@ -107,7 +107,9 @@
 且 SenseVoice README 明说「转换版可能写了不同条款，要单独核对」。
 
 按 v1.1 文本，发行时我们**至少应**：注明出处与作者、保留模型名称（`SenseVoiceSmall`）。⚠️ **商用是否允许尚无许可方的最终确认**（见 §1 表；§3 字面是「仅作参考和学习」），而它是**随包默认 ASR**，所以这是本表里优先级最高的一项：建议由 jason 向许可方（FunASR/Alibaba）发问或换用许可清晰的 ASR 作随包默认。
-**建议**：把 NOTICE 里的许可改写为「FunASR Model Open Source License Agreement v1.1（官方权重）；转换版 HF 页标注 Apache-2.0」，并附协议文本链接。这改的是 `NOTICE`，不在本文档 PR 的范围里。
+**已改（FU-23，2026-11-11）**：`NOTICE` 已改写为「FunASR Model Open Source License Agreement v1.1（官方权重）；转换版 HF 页标注 Apache-2.0 但对不上」，附协议链接与 §2.2 使用要求，并标注商用待确认。
+
+**⚠️ 待决（需 jason 处理）：SenseVoiceSmall 商用是否允许，未获许可方确认。** 在拿到确认前，本文不下「可商用」结论；备选是换用许可清晰的 ASR 作随包默认。
 
 ### 6.3 我们再分发「打过补丁的 speech-server」要承担什么义务
 
@@ -123,7 +125,7 @@
 | 静态链接的依赖（mlx-swift、mlx-swift-lm、WhisperKit 等 MIT；其余 Apache-2.0） | 各自要求保留版权声明/许可文本；MIT 的核心义务就是「所有副本都带上版权与许可声明」 | ⚠️ **缺**：这些声明在我们托管的 tarball 里一条都没有 |
 | 我们的补丁本身 | 采用什么许可？ | `patches/…agentear.patch` 在仓库内受仓库 Apache-2.0 约束；补丁头写明「不是我们自己的代码——这是对上游的修改」。✅ 兼容 |
 
-**行动项（不在本 PR 内做）**：给 `scripts/build-speech-runtime.sh` 的打包步骤加一步，把上游 `LICENSE`（@v0.0.28）、mlx 与 Swift 依赖的许可文本放进 tarball（例如 `LICENSES/`），并发新的 `speech-runtime-<版本>`；同时补 `NOTICE` 里 whisper.cpp、speech-swift、MLX、泰语模型的条目。官方未打补丁的 `speech` CLI、`mlx.metallib` 等我们也在再分发，**同样要带声明**。
+**FU-23 已做（只改脚本，未重新打包、未发 release）**：`scripts/build-speech-runtime.sh` 现在会把 speech-swift 的 `LICENSE` / `ThirdPartyNotices/` 与 `.build/checkouts/*/` 下各依赖（含 mlx-swift 及其 vendored mlx）的 LICENSE / NOTICE 复制进 tarball 的 `LICENSES/`，`AGENTEAR-PATCH.md` 同步改写。**下次构建运行时生效**；已发布的 `speech-runtime-v0.0.28-agentear.1`（及待发的 `.2` 构建产物如用旧脚本）不带。NOTICE 已补 whisper.cpp / speech-swift / MLX / 泰语模型。**原行动项原文**：给 `scripts/build-speech-runtime.sh` 的打包步骤加一步，把上游 `LICENSE`（@v0.0.28）、mlx 与 Swift 依赖的许可文本放进 tarball（例如 `LICENSES/`），并发新的 `speech-runtime-<版本>`；同时补 `NOTICE` 里 whisper.cpp、speech-swift、MLX、泰语模型的条目。官方未打补丁的 `speech` CLI、`mlx.metallib` 等我们也在再分发，**同样要带声明**。
 
 ### 6.4 `assets/talk-voices/` 参考音频：来源与许可
 
@@ -132,10 +134,10 @@
 - 许可：生成器 VoxCPM2 为 Apache-2.0（卡明确可商用）；Apache-2.0 本身没有对模型**输出**设版权归属条款；但模型卡 Limitations 另写「严禁冒充、欺诈、虚假信息；AI 生成内容应明确标注」。这 2 条由模型自举生成、不是真人录音，**据我们所知**不涉及某个真人的录音版权/人格权，但 Apache-2.0 §7 排除了权属与不侵权保证，上游也未对输出作任何保证，所以这是**未被上游担保的推断**，不是已核实的结论。
 - 两个保留：① 「没有任何版权/人格权问题」的断言取决于 VoxCPM2 零样本生成时**确实没有隐式克隆训练集里某个真实说话人**——这一点模型卡没有保证，也没有任何测量支持，**未核实**（既不能说概率低，也不能说有）；② 作者本机的 `男声`（作者本人的声音）**不在仓库里也不得入库**（CLAUDE.md 已规定），不在本表范围。
 
-### 6.5 本次核实中发现的需要后续动作的文档问题（均未在本 PR 修改）
+### 6.5 本次核实中发现的需要后续动作的文档问题（FU-23 已处理 1、2、3 中的脚本部分；仍待：泰语 release 补许可全文、Ornith 许可文本、SenseVoice 商用确认）
 
-1. `NOTICE`：SenseVoiceSmall 许可标注应改为 FunASR Model License v1.1；缺 whisper.cpp、泰语模型、speech-swift、MLX 条目。
-2. `docs/decisions/0007-realtime-voice-architecture.md`：VoiceChat 11B「OpenMDW 1.1 仅研究用途」与 OpenMDW-1.1 全文不符。
+1. （已改）`NOTICE`：SenseVoiceSmall 许可标注应改为 FunASR Model License v1.1；缺 whisper.cpp、泰语模型、speech-swift、MLX 条目。
+2. （已改）`docs/decisions/0007-realtime-voice-architecture.md`：VoiceChat 11B「OpenMDW 1.1 仅研究用途」与 OpenMDW-1.1 全文不符。
 3. 泰语模型 release 与 speech 运行时 tarball 都没有随附许可全文。
 4. Ornith 的许可文本要找上游确认。
 

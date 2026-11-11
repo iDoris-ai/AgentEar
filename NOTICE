@@ -14,15 +14,67 @@ FunASR llama.cpp runtime  (`llama-funasr-sensevoice`)
 --------------------------------------------------------------------------------
 
 SenseVoiceSmall  (`sensevoice-small-q8.gguf`)
-  来源：https://huggingface.co/FunAudioLLM/SenseVoiceSmall-GGUF
-  上游模型：https://github.com/QwenAudio/SenseVoice
-  许可：Apache License 2.0
+  来源：https://huggingface.co/FunAudioLLM/SenseVoiceSmall-GGUF（GGUF 转换版）
+  上游模型：https://huggingface.co/FunAudioLLM/SenseVoiceSmall
+            https://github.com/QwenAudio/SenseVoice
+  许可：FunASR Model Open Source License Agreement v1.1（官方权重；
+        Copyright (C) 2023-2028 Alibaba Group）
+        协议原文：https://github.com/modelscope/FunASR/blob/main/MODEL_LICENSE
+        官方 HF 卡标注 `license: other / model-license`。
+        GGUF 转换版的 HF 页标注 Apache-2.0，但与官方权重的协议对不上，
+        不能当作权重许可依据（FU-23，见 docs/licenses.md）。
+  使用要求（协议 §2.2）：使用/复制/修改/分发时须注明来源与作者信息，并保留模型名称
+        （SenseVoiceSmall）。
+  ⚠️ 商用是否允许：协议 §3 写「[FunASR 软件]仅作为参考和学习使用」，许可方尚未最终
+        确认其是否限制商用；待确认，见 docs/licenses.md §6.2。
 
 --------------------------------------------------------------------------------
 
 FSMN-VAD  (`fsmn-vad.gguf`)
   来源：https://huggingface.co/FunAudioLLM/fsmn-vad-GGUF
-  许可：Apache License 2.0
+  许可：该 HF 页标注 Apache License 2.0；上游 FSMN-VAD 权重的原始许可未核实，
+        可能同属 FunASR Model Open Source License Agreement v1.1（同上，须注明
+        来源与作者、保留模型名称）。见 docs/licenses.md。
+
+--------------------------------------------------------------------------------
+
+whisper.cpp  (`whisper-cli`，泰语引擎，随包)
+  来源：https://github.com/ggml-org/whisper.cpp
+  许可：MIT License（https://github.com/ggml-org/whisper.cpp/blob/master/LICENSE）
+  Copyright (c) 2023-2026 The ggml authors
+
+--------------------------------------------------------------------------------
+
+泰语 Whisper 模型  (按需下载，不随包；我们转成 GGML q5_0 并托管在
+                    https://github.com/iDoris-ai/AgentEar/releases/tag/models-th-v1)
+  上游模型：https://huggingface.co/biodatlab/distill-whisper-th-large-v3
+            （Thonburian Whisper 系列，biodatlab；
+            论文引用见该模型卡）
+  许可：MIT License（HF 卡 `license: mit`；版权归 biodatlab）
+  ⚠️ 其微调数据集与基座（distil-large-v3 / Whisper）的许可链未核实；
+        biodatlab 的另两个 Thonburian 仓库
+        （whisper-th-medium-combined、whisper-th-large-v3-combined）标注 Apache-2.0，
+        但我们没有使用它们。
+
+--------------------------------------------------------------------------------
+
+speech-swift  (Qwen3-ASR 可选运行时，按需下载，不随包；我们托管打过补丁的版本
+               https://github.com/iDoris-ai/AgentEar/releases/tag/speech-runtime-v0.0.28-agentear.1)
+  来源：https://github.com/soniqo/speech-swift  （tag v0.0.28）
+  许可：Apache License 2.0（https://github.com/soniqo/speech-swift/blob/v0.0.28/LICENSE）
+  修改声明：其中的 `speech-server` 由我们从上游 pinned 源码编译，并应用补丁
+        patches/speech-swift-v0.0.28-agentear.patch（修改文件
+        Sources/AudioServer/AudioServer.swift）；其余文件为上游官方发布包原样。
+  说明：该运行时包含并静态链接 MLX（见下）及 speech-swift 的其他 Swift 依赖。
+        运行时 tarball 自下次构建起附带 LICENSES/ 目录（scripts/build-speech-runtime.sh）；
+        已发布的 `.1` 包尚未带。
+
+--------------------------------------------------------------------------------
+
+MLX  (`mlx.metallib`，以及 speech-server 静态链接的 mlx-swift / mlx-swift-lm)
+  来源：https://github.com/ml-explore/mlx 、https://github.com/ml-explore/mlx-swift
+  许可：MIT License（ml-explore/mlx、ml-explore/mlx-swift；mlx-swift-lm 同为 MIT，
+        依据各仓库 GitHub 许可元数据）
 
 --------------------------------------------------------------------------------
 
