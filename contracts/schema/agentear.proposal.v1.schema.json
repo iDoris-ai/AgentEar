@@ -47,7 +47,7 @@
       "required": ["type", "name"],
       "properties": {
         "type": { "const": "builtin" },
-        "name": { "enum": ["style", "tone", "mode", "note"], "description": "本机可逆动作（src/commands.rs BuiltinAction 白名单）。" },
+        "name": { "enum": ["style", "tone", "mode", "note", "translate"], "description": "本机可逆动作（src/commands.rs BuiltinAction 白名单）。" },
         "value": { "type": "string" }
       }
     },

@@ -186,6 +186,10 @@ pub struct OpenAiCompat {
     /// 所以默认 `None` = 不写这个键——独立版默认那条路的请求体一个字节都不变。
     /// 直连 iDoris 时要写：它是网关，得知道要哪个模型。
     model: Option<String>,
+    /// 请求体里的 `max_tokens`。默认 160（对话回答要短）；翻译要按输入长度放大，
+    /// 否则长句译到一半被截断（`extract_content` 会把 `finish_reason != stop` 拒掉，
+    /// 但那样这一轮的翻译就白白失败了）。
+    max_tokens: u32,
 }
 
 impl OpenAiCompat {
@@ -195,7 +199,13 @@ impl OpenAiCompat {
             transport,
             timeout_secs,
             model: None,
+            max_tokens: 160,
         }
+    }
+
+    pub fn with_max_tokens(mut self, max_tokens: u32) -> Self {
+        self.max_tokens = max_tokens.max(1);
+        self
     }
 
     pub fn with_model(mut self, model: Option<String>) -> Self {
@@ -210,7 +220,7 @@ impl OpenAiCompat {
                 {"role": "system", "content": system},
                 {"role": "user", "content": user},
             ],
-            "max_tokens": 160,
+            "max_tokens": self.max_tokens,
             "temperature": 0.3,
         });
         if stream {
@@ -2004,6 +2014,50 @@ pub fn ensure_sidecars_async(cfg: &crate::config::Config) {
     if let Err(e) = spawned {
         STARTUP.end();
         log::error!("起边车检查线程失败：{e}——这次不拉边车");
+    }
+}
+
+/// 输入法模式开了翻译：**只**保证 LLM 边车（不碰 TTS）。后台线程，菜单和启动都不卡。
+///
+/// 和 [`ensure_sidecars_async`] 的区别：那个遇到闸被占就放弃（对话模式自己那条
+/// 拉起已经包含 LLM）；这里闸可能被**宿主播报的 TTS 拉起**（[`ensure_tts`]）占着，
+/// 放弃的话 LLM 就没人拉了——所以在后台线程里**有界地等**闸（最多
+/// [`READY_TIMEOUT`]），拿到再拉。等的是后台线程，不挡任何人，也没有环形等待
+/// （持闸方只会往前走到就绪/超时，不会反过来等我们）。
+///
+/// 「只收自己拉起的」由 [`ensure_one`] 的登记表保证，用户手工起的 LLM 一律不动。
+/// 拉起命令为空时（默认）只连不拉，日志里会打出该跑哪条命令——翻译失败时原文照常上屏。
+pub fn ensure_llm_async(cfg: &crate::config::Config) {
+    let Some(spec) = sidecar_specs(cfg).into_iter().find(|s| s.name == "LLM") else {
+        log::info!("翻译：LLM 引擎不是外部边车（mock），不拉边车");
+        return;
+    };
+    let cfg = cfg.clone();
+    let spawned = std::thread::Builder::new()
+        .name("translate-llm".into())
+        .spawn(move || {
+            let deadline = Instant::now() + READY_TIMEOUT;
+            loop {
+                if STARTUP.try_begin() {
+                    break;
+                }
+                let left = deadline.saturating_duration_since(Instant::now());
+                if left.is_zero() || STARTUP.wait(left) == StartupWait::TimedOut {
+                    log::warn!("翻译：等别处拉边车等满 {READY_TIMEOUT:?}，这次不重复拉 LLM");
+                    return;
+                }
+            }
+            let _done = StartupDone;
+            match ensure_one(&cfg, spec) {
+                Ok(()) => log::info!("翻译：LLM 边车就绪"),
+                Err(e) => log::warn!(
+                    "翻译：LLM 边车不可用（{}）——翻译会失败，原文照常上屏",
+                    e.reason()
+                ),
+            }
+        });
+    if let Err(e) = spawned {
+        log::error!("起翻译 LLM 检查线程失败：{e}");
     }
 }
 

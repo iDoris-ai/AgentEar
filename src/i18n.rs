@@ -56,6 +56,12 @@ pub enum Key {
     /// 模式这一节：输入法 / 对话。**放在最上面**——它决定按一下键会发生什么，
     /// 是这份菜单里唯一会改变「主行为」的开关。
     ModeSection,
+    /// 输入法输出（翻译输入）子菜单标题与四个选项。只在输入法模式下生效。
+    TranslateSection,
+    TranslateOff,
+    TranslateEn,
+    TranslateZh,
+    TranslateTh,
     /// 说话这一栏（语系/语气/音色）的父项。三项只在对话模式有意义，
     /// 但**不做条件隐藏**——菜单里少一项比多一项更容易让人以为功能没了。
     SpeechSection,
@@ -178,6 +184,11 @@ pub fn t(lang: Lang, key: Key) -> &'static str {
         K::Transcribing => pick(lang, "◌ Transcribing…", "◌ 转写中……", "◌ กำลังถอดความ…"),
         K::TitleTranscribing => pick(lang, "◌ ASR", "◌ 转写中", "◌ ถอดความ"),
         K::ModeSection => pick(lang, "Mode", "模式", "โหมด"),
+        K::TranslateSection => pick(lang, "Input output", "输入法输出", "ผลลัพธ์การพิมพ์"),
+        K::TranslateOff => pick(lang, "Original", "原文", "ต้นฉบับ"),
+        K::TranslateEn => pick(lang, "→ English", "→ 英文", "→ อังกฤษ"),
+        K::TranslateZh => pick(lang, "→ Chinese", "→ 中文", "→ จีน"),
+        K::TranslateTh => pick(lang, "→ Thai", "→ 泰语", "→ ไทย"),
         K::SpeechSection => pick(lang, "Voice Output", "说话", "เสียงพูด"),
         K::StyleSection => pick(lang, "Language", "语言", "ภาษา"),
         K::DialectSection => pick(lang, "Dialect / Accent", "方言 / 口音", "สำเนียง"),
@@ -501,7 +512,12 @@ fn fail_reason(lang: Lang, f: crate::download::Fail) -> &'static str {
 mod tests {
     use super::*;
 
-    const ALL_KEYS: [Key; 40] = [
+    const ALL_KEYS: [Key; 45] = [
+        Key::TranslateSection,
+        Key::TranslateOff,
+        Key::TranslateEn,
+        Key::TranslateZh,
+        Key::TranslateTh,
         Key::AsrEngineSection,
         Key::AsrEngineSenseVoice,
         Key::Qwen3Resident,

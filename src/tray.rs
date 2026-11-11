@@ -219,6 +219,9 @@ const TAG_RETENTION_BASE: isize = 200;
 const TAG_UI_LANG_BASE: isize = 300;
 const TAG_ASR_LANG_BASE: isize = 400;
 const TAG_MODE_BASE: isize = 500;
+/// 「输入法输出」（翻译）子菜单：550 + `InputTranslate::ALL` 下标。
+/// 留在模式（500..）与语系（600..）之间的空档里，两边的 `checked_sub` 解码都撞不上它。
+const TAG_TRANSLATE_BASE: isize = 550;
 const TAG_STYLE_BASE: isize = 600;
 const TAG_TONE_BASE: isize = 700;
 const TAG_VOICE_BASE: isize = 800;
@@ -315,10 +318,14 @@ fn title(lang: Lang) -> String {
     //
     // 放在**后面**而不是前面：前面那个 🎙 表达「我在录音」这件更急的事，
     // 不能因为切模式就把它挤走。
-    let base = match config::get().talk_mode {
+    let cfg_now = config::get();
+    let base = match cfg_now.talk_mode {
         config::TalkMode::Conversation => format!("{base}💬"),
         config::TalkMode::InputMethod => base,
     };
+    // **翻译标记**：输入法模式下开了翻译才加（`→EN`）。默认状态不多背字符；
+    // 对话模式不翻译，所以那里也不显示（标记要如实反映「这一轮会不会翻译」）。
+    let base = format!("{base}{}", translate_marker(cfg_now.talk_mode, cfg_now.input_translate));
     // **待确认标记**：比模式标记更急（它有时限），所以放最后、
     // 而且和模式标记用的是不同的符号，一眼能分辨是「等问题」还是「等确认」。
     // **停听标记**：与宿主断开、没回独立模式（B5）。它意味着「按键也不录」，
@@ -332,6 +339,19 @@ fn title(lang: Lang) -> String {
         format!("{base}❓")
     } else {
         base
+    }
+}
+
+/// 菜单栏标题里的翻译标记。纯函数：只有「输入法模式 + 开了翻译」才非空。
+fn translate_marker(mode: config::TalkMode, tr: config::InputTranslate) -> &'static str {
+    if mode != config::TalkMode::InputMethod {
+        return "";
+    }
+    match tr {
+        config::InputTranslate::Off => "",
+        config::InputTranslate::En => "→EN",
+        config::InputTranslate::Zh => "→ZH",
+        config::InputTranslate::Th => "→TH",
     }
 }
 
@@ -501,6 +521,27 @@ fn populate(menu: &NSMenu, mtm: MainThreadMarker, target: &MenuTarget) {
             .collect(),
     );
     menu.addItem(&mode_item);
+
+    // —— 输入法输出（原文 / 翻译成英文 / 中文 / 泰语）——
+    //
+    // 紧跟在模式后面：它是输入法模式的输出属性。点一下立刻生效（每轮现读配置）。
+    // 不做条件隐藏：对话模式下它不起作用，但少一项比多一项更容易让人以为功能没了。
+    let translate_title = format!(
+        "{}: {}",
+        i18n::t(lang, Key::TranslateSection),
+        i18n::t(lang, translate_key(cfg.input_translate))
+    );
+    let translate_item = item(mtm, target, &translate_title, -1, false);
+    translate_item.setEnabled(true);
+    submenu(
+        mtm,
+        &translate_item,
+        translate_menu_entries(lang, cfg.input_translate)
+            .into_iter()
+            .map(|(title, tag, checked)| item(mtm, target, &title, tag, checked))
+            .collect(),
+    );
+    menu.addItem(&translate_item);
 
     // —— 说话（语系 / 语气 / 音色）——
     //
@@ -818,6 +859,38 @@ fn mode_for_tag(tag: isize) -> Option<config::TalkMode> {
         .and_then(|i| config::TalkMode::ALL.get(i).copied())
 }
 
+fn translate_key(t: config::InputTranslate) -> Key {
+    match t {
+        config::InputTranslate::Off => Key::TranslateOff,
+        config::InputTranslate::En => Key::TranslateEn,
+        config::InputTranslate::Zh => Key::TranslateZh,
+        config::InputTranslate::Th => Key::TranslateTh,
+    }
+}
+
+/// 「输入法输出」子菜单的纯内容 `(标题, tag, 是否勾选)`，顺序来自 `InputTranslate::ALL`
+/// ——和 `mode_menu_entries` 同一个道理：tag 与取值写反这种错，肉眼看菜单发现不了。
+fn translate_menu_entries(lang: Lang, current: config::InputTranslate) -> Vec<(String, isize, bool)> {
+    config::InputTranslate::ALL
+        .iter()
+        .enumerate()
+        .map(|(i, t)| {
+            (
+                i18n::t(lang, translate_key(*t)).to_string(),
+                TAG_TRANSLATE_BASE + i as isize,
+                current == *t,
+            )
+        })
+        .collect()
+}
+
+fn translate_for_tag(tag: isize) -> Option<config::InputTranslate> {
+    let index = tag.checked_sub(TAG_TRANSLATE_BASE)?;
+    usize::try_from(index)
+        .ok()
+        .and_then(|i| config::InputTranslate::ALL.get(i).copied())
+}
+
 /// 切模式。**副作用只有一份实现**，在 `crate::set_mode` 里
 /// （写配置 / 掐播放 / 拉起边车）。这里只做「点的是哪一项」的判断。
 fn set_talk_mode(mode: config::TalkMode) {
@@ -933,6 +1006,11 @@ fn handle(tag: isize, mtm: MainThreadMarker) {
     // 模式切换单独处理：它的副作用不止改配置（要掐播放、要开关会话）。
     if let Some(mode) = mode_for_tag(tag) {
         set_talk_mode(mode);
+        return;
+    }
+    // 翻译输出：副作用（写配置 / 拉 LLM 边车）只有一份实现，在 `crate::set_input_translate`。
+    if let Some(t) = translate_for_tag(tag) {
+        crate::set_input_translate(t);
         return;
     }
     // 语系 / 语气 / 音色：都只是改配置，下一轮生效（不需要重启任何东西）。
@@ -2302,6 +2380,65 @@ mod tests {
     }
 
     /// 三种语言的文案不能撞车：撞了就等于没有区分。
+    #[test]
+    fn translate_menu_tags_map_to_the_right_value_and_one_is_checked() {
+        use config::InputTranslate as T;
+        for current in T::ALL {
+            let entries = translate_menu_entries(Lang::En, *current);
+            assert_eq!(entries.len(), 4);
+            assert_eq!(entries.iter().filter(|e| e.2).count(), 1, "恰好一项勾选");
+            for (i, (title, tag, checked)) in entries.iter().enumerate() {
+                assert_eq!(translate_for_tag(*tag), Some(T::ALL[i]), "{title}：tag 解回的值必须是自己");
+                assert_eq!(*checked, T::ALL[i] == *current);
+            }
+        }
+        // 固定对应：原文 / 英 / 中 / 泰
+        let e = translate_menu_entries(Lang::Zh, T::Th);
+        assert_eq!(translate_for_tag(e[0].1), Some(T::Off));
+        assert_eq!(translate_for_tag(e[1].1), Some(T::En));
+        assert_eq!(translate_for_tag(e[2].1), Some(T::Zh));
+        assert_eq!(translate_for_tag(e[3].1), Some(T::Th));
+        assert!(e[3].2);
+    }
+
+    #[test]
+    fn translate_tags_do_not_collide_with_other_menus() {
+        for tag in [TAG_TRANSLATE_BASE - 1, TAG_TRANSLATE_BASE + 4, TAG_TRANSLATE_BASE + 49] {
+            assert_eq!(translate_for_tag(tag), None, "{tag}");
+        }
+        for t in 0..4 {
+            let tag = TAG_TRANSLATE_BASE + t;
+            assert_eq!(mode_for_tag(tag), None, "翻译 tag {tag} 不能被模式菜单认走");
+            assert!(tag.checked_sub(TAG_STYLE_BASE).map_or(true, |i| i < 0), "{tag} 不能落进语系段");
+        }
+        assert_eq!(translate_for_tag(TAG_MODE_BASE), None);
+        assert_eq!(translate_for_tag(TAG_STYLE_BASE), None);
+    }
+
+    #[test]
+    fn translate_marker_only_shows_when_it_will_actually_translate() {
+        use config::{InputTranslate as T, TalkMode as M};
+        assert_eq!(translate_marker(M::InputMethod, T::Off), "", "默认不多背字符");
+        assert_eq!(translate_marker(M::InputMethod, T::En), "→EN");
+        assert_eq!(translate_marker(M::InputMethod, T::Zh), "→ZH");
+        assert_eq!(translate_marker(M::InputMethod, T::Th), "→TH");
+        for t in T::ALL {
+            assert_eq!(translate_marker(M::Conversation, *t), "", "对话模式不翻译、不显示");
+        }
+    }
+
+    #[test]
+    fn translate_titles_exist_in_all_languages() {
+        for lang in Lang::ALL {
+            let titles: Vec<String> =
+                translate_menu_entries(lang, config::InputTranslate::Off).into_iter().map(|e| e.0).collect();
+            let mut uniq = titles.clone();
+            uniq.sort();
+            uniq.dedup();
+            assert_eq!(uniq.len(), 4, "{lang:?} 四项标题必须互不相同：{titles:?}");
+        }
+    }
+
     #[test]
     fn mode_titles_differ_per_language_and_per_mode() {
         for lang in Lang::ALL.iter().copied() {

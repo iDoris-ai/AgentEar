@@ -34,6 +34,7 @@ mod store;
 mod talk;
 mod terms;
 mod timings;
+mod translate;
 mod tray;
 
 use crate::kb::KbSink;
@@ -779,6 +780,36 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
+    // `--translate <文字> --to en|zh|th`：文字 → 翻译 → 打印，不上屏、不碰麦克风。
+    // 和守护进程走同一个 `translate::translate`，用于无人值守验证翻译链路。
+    if args.iter().any(|a| a == "--translate") {
+        let text = args_after(&args, "--translate")
+            .first()
+            .copied()
+            .ok_or_else(|| anyhow::anyhow!("--translate 后面要跟一段文字"))?
+            .to_string();
+        let to = flag_value(&args, "--to")
+            .ok_or_else(|| anyhow::anyhow!("--translate 需要 --to en|zh|th"))?;
+        let target = translate::Target::parse(to)
+            .ok_or_else(|| anyhow::anyhow!("--to 只认 en / zh / th，收到 {to:?}"))?;
+        println!(
+            "LLM @ {}（超时 {}s）",
+            cfg.talk_llm_url.as_deref().unwrap_or(talk::DEFAULT_LLM_URL),
+            translate::TRANSLATE_TIMEOUT_SECS
+        );
+        match translate::translate(&cfg, &text, target) {
+            Ok(out) => {
+                println!("\n原文：{text}\n译文（{}）：{out}", target.as_str());
+                return Ok(());
+            }
+            Err(why) => {
+                // 守护进程这时会把原文上屏；CLI 里如实报失败并以非零退出，方便脚本判断。
+                println!("\n原文：{text}\n没有译文：{why}（守护进程此时会原文上屏）");
+                std::process::exit(1);
+            }
+        }
+    }
+
     if args.iter().any(|a| a == "--say") {
         let text = args_after(&args, "--say")
             .first()
@@ -1157,6 +1188,10 @@ fn main() -> Result<()> {
         if cfg.talk_llm_engine == "mock" {
             log::warn!("对话用的是 mock 引擎：回答是本地写死的，不是模型产出");
         }
+    } else if let Some(t) = cfg.input_translate.target() {
+        // 输入法模式 + 开着翻译：只确保 LLM 边车（后台线程，不卡启动）。
+        log::info!("输入法输出：翻译成 {}（input_translate = {}）", t.as_str(), cfg.input_translate.as_str());
+        talk::ensure_llm_async(&cfg);
     }
 
     println!("\n╭─────────────────────────────────────────────╮");
@@ -1630,8 +1665,13 @@ fn finish(state: State, store: &store::Store, asr: &dyn engine::AsrEngine) -> Re
                     log::error!("加入投递队列失败，这条不会自动重试（可跑 --replay-kb 补投）: {e:#}");
                 }
             }
+            // —— 翻译输入（输入法模式的输出属性）——
+            //
+            // 只改「上屏的是哪段文字」：转写文件 / routes / kb / 指令表看到的永远是原文。
+            // **任何失败都退回原文**（`translate::text_to_deliver` 保证），日志写原因。
+            let delivered = deliver_text(store, &cfg, &committed.content_hash, &text);
             // 先进剪贴板再谈上屏。上屏失败还能手动 ⌘V，顺序反过来就没有退路了。
-            match copy_to_clipboard(&text) {
+            match copy_to_clipboard(&delivered.text) {
                 Ok(()) => {
                     let pasted = if paste::enabled() {
                         match paste::paste() {
@@ -1670,6 +1710,13 @@ fn finish(state: State, store: &store::Store, asr: &dyn engine::AsrEngine) -> Re
             // 开放式的句子本来就该由 LLM 理解，指令表只认用户声明过的那几条。
             //
             // ⚠️ **上屏/剪贴板在前面已经做完了**，所以指令轮次也不丢文字。
+            // 一次性翻译（「翻译成英文：……」）已经在上屏前执行完了，不再走指令表：
+            // 否则指令轮次会把同一句再执行一遍。
+            if delivered.consumed_by_translate_command {
+                timings::finish("ok");
+                tray::set(tray::Status::Idle);
+                return Ok(State::Idle);
+            }
             if cfg.commands_enabled {
                 match run_command_turn(store, &cfg, &text, &committed.content_hash) {
                     CommandTurn::Handled => {
@@ -1754,6 +1801,80 @@ fn finish(state: State, store: &store::Store, asr: &dyn engine::AsrEngine) -> Re
 
     tray::set(tray::Status::Idle);
     Ok(State::Idle)
+}
+
+/// 这一轮实际上屏的文字。
+struct Delivered {
+    text: String,
+    /// 命中了一次性翻译指令（「翻译成英文：……」），已经处理完，不再走指令表。
+    consumed_by_translate_command: bool,
+}
+
+/// 决定上屏哪段文字：
+///
+/// 1. **一次性翻译指令**（任何模式）：「翻译成英文：……」→ 只翻译槽位、上屏译文，
+///    不改配置。翻译失败时上屏**槽位原文**（用户要的是那段话，不是「翻译成英文」这几个字）。
+///    有待确认的向外动作时不判（这一轮是在答复它）。
+/// 2. **持续翻译**：输入法模式且 `input_translate != off` → 翻译整句。对话模式不翻译。
+/// 3. 其余：原文。
+///
+/// 译文另存 `derived/translations/`（失败只记日志）。
+fn deliver_text(store: &store::Store, cfg: &config::Config, content_hash: &str, text: &str) -> Delivered {
+    let plain = |t: &str| Delivered { text: t.to_string(), consumed_by_translate_command: false };
+    if cfg.commands_enabled && !has_pending() {
+        if let Ok(list) = commands::load(store.root()) {
+            if let Some(hit) = commands::match_text(&list, text) {
+                if let Some(commands::TranslateIntent::Once(target, slot)) = commands::translate_intent(&hit) {
+                    log::info!("一次性翻译指令「{}」→ {}，槽位 {slot:?}", hit.phrase, target.as_str());
+                    let out = translate_and_record(store, cfg, content_hash, &slot, target);
+                    return Delivered { text: out, consumed_by_translate_command: true };
+                }
+            }
+        }
+    }
+    if cfg.talk_mode == config::TalkMode::InputMethod {
+        if let Some(target) = cfg.input_translate.target() {
+            return Delivered {
+                text: translate_and_record(store, cfg, content_hash, text, target),
+                consumed_by_translate_command: false,
+            };
+        }
+    }
+    plain(text)
+}
+
+fn translate_and_record(
+    store: &store::Store,
+    cfg: &config::Config,
+    content_hash: &str,
+    text: &str,
+    target: translate::Target,
+) -> String {
+    let (out, translated) = translate::text_to_deliver(cfg, text, target);
+    if let Some(tr) = translated {
+        println!("🌐 → {}：{tr}", target.as_str());
+        if let Err(e) = store.write_translation(content_hash, target.as_str(), &tr) {
+            log::error!("写译文文件失败（不影响上屏）: {e:#}");
+        }
+    }
+    out
+}
+
+/// 切翻译输出。**菜单和语音指令都走这里**，副作用只有一份：写配置 + 开了就去确保 LLM 边车。
+/// 对话模式下只写配置（那里不翻译；切回输入法时再拉边车，见 `set_mode`）。
+fn set_input_translate(t: config::InputTranslate) {
+    if config::get().input_translate == t {
+        return;
+    }
+    config::update(|c| c.input_translate = t);
+    log::info!("输入法输出：{}（input_translate = {}）", match t.target() {
+        None => "原文".to_string(),
+        Some(x) => format!("翻译成 {}", x.as_str()),
+    }, t.as_str());
+    let cfg = config::get();
+    if t.target().is_some() && cfg.talk_mode == config::TalkMode::InputMethod {
+        talk::ensure_llm_async(&cfg);
+    }
 }
 
 /// 指令表命中就执行，返回是否命中。
@@ -1895,6 +2016,15 @@ fn run_command_turn_attached(
     let Some(hit) = commands::match_text(&all, text) else {
         return CommandTurn::NotMine;
     };
+    // 翻译开关是 AgentEar 自己的输入法设置（本机、可逆、不涉及宿主）：本地执行，不发 proposal。
+    if commands::translate_intent(&hit).is_some() {
+        let rest = hit.rest.clone();
+        match execute_command(store, cfg, &hit, &rest, content_hash) {
+            Ok(msg) => println!("⚡ {msg}"),
+            Err(e) => log::error!("本地指令执行失败: {e:#}"),
+        }
+        return CommandTurn::Handled;
+    }
     let mut proposal = proposal_json(&all, text, store.root());
     // 给宿主看的路径不带用户名（A3 设计）。
     if let Some(p) = proposal["commands_path"].as_str() {
@@ -2203,6 +2333,41 @@ fn execute_command(
                     Err(e) => Err(anyhow::anyhow!("写 routes 失败: {e:#}")),
                 }
             }
+            Ok(commands::BuiltinAction::Translate) => {
+                // 正常路径里「翻译成X：……」在上屏前就处理掉了（`deliver_text`），
+                // 走到这里的只有 `--run-command` 与附着模式：
+                // 持续开关照常改配置；带槽位的一次性翻译只打印+进剪贴板（不上屏）。
+                match commands::translate_intent(hit) {
+                    Some(commands::TranslateIntent::Off) => {
+                        set_input_translate(config::InputTranslate::Off);
+                        Ok("输入法输出：原文".to_string())
+                    }
+                    Some(commands::TranslateIntent::On) => {
+                        let cur = config::get().input_translate;
+                        let to = if cur == config::InputTranslate::Off { config::InputTranslate::En } else { cur };
+                        set_input_translate(to);
+                        Ok(format!("输入法输出：翻译成 {}", to.as_str()))
+                    }
+                    Some(commands::TranslateIntent::Persist(t)) => {
+                        let to = match t {
+                            translate::Target::En => config::InputTranslate::En,
+                            translate::Target::Zh => config::InputTranslate::Zh,
+                            translate::Target::Th => config::InputTranslate::Th,
+                        };
+                        set_input_translate(to);
+                        Ok(format!("输入法输出：翻译成 {}", t.as_str()))
+                    }
+                    Some(commands::TranslateIntent::Once(t, slot)) => {
+                        let (out, tr) = translate::text_to_deliver(cfg, &slot, t);
+                        copy_to_clipboard(&out)?;
+                        Ok(match tr {
+                            Some(_) => format!("译文已进剪贴板：{out}"),
+                            None => format!("翻译没成，原文已进剪贴板：{out}"),
+                        })
+                    }
+                    None => Err(anyhow::anyhow!("translate 指令的值不合法")),
+                }
+            }
             Err(e) => Err(e),
         },
     };
@@ -2232,6 +2397,10 @@ fn set_mode(mode: config::TalkMode) {
         config::TalkMode::InputMethod => {
             if talk::stop_playback() {
                 log::info!("已切回输入法模式，掐掉正在播放的回答");
+            }
+            // 翻译开着、却一直在对话模式里：此刻才轮到输入法模式需要 LLM。
+            if config::get().input_translate.target().is_some() {
+                talk::ensure_llm_async(&config::get());
             }
         }
         config::TalkMode::Conversation => {
@@ -3015,6 +3184,7 @@ const TEXT_ONLY_SUBCOMMANDS: &[&str] = &[
     "--run-command",
     "--say",
     "--ask",
+    "--translate",
     "--cue",
     "--cue-wav",
     "--timings",
@@ -3255,6 +3425,8 @@ mod contract_tests {
             ("发邮件给 a@b.com 讨论 AEC", Some("open_url"), true),
             ("记到notion 明天要测 AEC", Some("http_post"), true),
             ("搜索 Talk.rs", Some("open_url"), false),
+            ("翻译成英文：你好", Some("builtin"), false),
+            ("关闭翻译", Some("builtin"), false),
             ("打开大写 rust", Some("open_url"), false),
         ];
         for (text, kind, confirm) in cases {
@@ -3289,6 +3461,72 @@ mod host_wiring_tests {
     fn events_of(fake: &host::FakeHost, ty: &str) -> Vec<serde_json::Value> {
         assert!(host::flush(Duration::from_secs(2)));
         fake.events_of(ty)
+    }
+
+    /// 指向没人监听的端口：翻译请求必然失败，走「退回原文」那条真路径（不依赖任何边车）。
+    fn dead_llm_cfg() -> config::Config {
+        let mut cfg = config::Config::default();
+        cfg.talk_llm_url = Some("http://127.0.0.1:9".into());
+        cfg
+    }
+
+    #[test]
+    fn deliver_text_is_the_original_by_default() {
+        let (_g, store, cfg) = setup();
+        let d = deliver_text(&store, &cfg, HASH, "你好世界");
+        assert_eq!(d.text, "你好世界");
+        assert!(!d.consumed_by_translate_command);
+    }
+
+    #[test]
+    fn deliver_text_failed_translation_falls_back_to_the_original() {
+        let (_g, store, _) = setup();
+        let mut cfg = dead_llm_cfg();
+        cfg.input_translate = config::InputTranslate::En;
+        let d = deliver_text(&store, &cfg, HASH, "你好世界");
+        assert_eq!(d.text, "你好世界", "边车不通：原文照常上屏");
+        assert!(!d.consumed_by_translate_command);
+        assert!(!store.root().join("derived/translations").exists(), "没译成就不写译文文件");
+    }
+
+    #[test]
+    fn deliver_text_conversation_mode_never_translates() {
+        let (_g, store, _) = setup();
+        let mut cfg = dead_llm_cfg();
+        cfg.input_translate = config::InputTranslate::En;
+        cfg.talk_mode = config::TalkMode::Conversation;
+        let d = deliver_text(&store, &cfg, HASH, "你好世界");
+        assert_eq!(d.text, "你好世界");
+    }
+
+    #[test]
+    fn one_shot_translate_command_delivers_only_the_slot_and_is_consumed() {
+        let (_g, store, _) = setup();
+        let cfg = dead_llm_cfg(); // 翻译失败 → 上屏槽位原文，而不是整句「翻译成英文：……」
+        let d = deliver_text(&store, &cfg, HASH, "翻译成英文：今天 review Rust 代码");
+        assert_eq!(d.text, "今天 review Rust 代码");
+        assert!(d.consumed_by_translate_command);
+        // 指令表关了就当普通话（整句原文）
+        let mut off = dead_llm_cfg();
+        off.commands_enabled = false;
+        let d = deliver_text(&store, &off, HASH, "翻译成英文：你好");
+        assert_eq!(d.text, "翻译成英文：你好");
+        assert!(!d.consumed_by_translate_command);
+        // 没有槽位 = 持续开关，不是一次性：不在上屏前消费
+        let d = deliver_text(&store, &cfg, HASH, "翻译成英文");
+        assert!(!d.consumed_by_translate_command);
+        assert_eq!(d.text, "翻译成英文");
+    }
+
+    #[test]
+    fn one_shot_is_not_taken_while_a_confirmation_is_pending() {
+        let (_g, store, cfg) = setup();
+        let cfg = { let mut c = cfg; c.talk_llm_url = Some("http://127.0.0.1:9".into()); c };
+        let _ = run_command_turn(&store, &cfg, "发邮件给 a@b.com 讨论 AEC", HASH);
+        assert!(has_pending());
+        let d = deliver_text(&store, &cfg, HASH, "翻译成英文：你好");
+        assert!(!d.consumed_by_translate_command, "这一轮是在答复待确认");
+        drop_pending("测试结束");
     }
 
     #[test]

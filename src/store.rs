@@ -109,6 +109,19 @@ impl Store {
         self.write_transcript_named(&format!("{content_hash}.raw"), text)
     }
 
+    /// 翻译输入的译文（可选派生物）：`derived/translations/<hash>.<lang>.txt`。
+    /// 单独的目录，不和 `derived/transcripts/` 混——后者的每个文件都被当作转写
+    /// （kb 的 front matter、重放、索引都按它找）。
+    pub fn write_translation(&self, content_hash: &str, target: &str, text: &str) -> Result<PathBuf> {
+        let dir = self.root.join("derived/translations");
+        fs::create_dir_all(&dir).with_context(|| format!("建 {} 失败", dir.display()))?;
+        let path = dir.join(format!("{content_hash}.{target}.txt"));
+        let tmp = dir.join(format!(".{content_hash}.{target}.tmp"));
+        fs::write(&tmp, text).with_context(|| format!("写 {} 失败", tmp.display()))?;
+        fs::rename(&tmp, &path).context("rename 译文文件失败")?;
+        Ok(path)
+    }
+
     pub fn write_transcript(&self, content_hash: &str, text: &str) -> Result<PathBuf> {
         self.write_transcript_named(content_hash, text)
     }
@@ -433,6 +446,19 @@ fn bytemuck_cast(pcm: &[i16]) -> &[u8] {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn translations_live_beside_not_inside_transcripts() {
+        let dir = crate::testutil::tmpdir("agentear-store-translation");
+        let store = Store::open(&dir).unwrap();
+        let p = store.write_translation("abc123", "en", "Hello").unwrap();
+        assert_eq!(fs::read_to_string(&p).unwrap(), "Hello");
+        assert!(p.ends_with("derived/translations/abc123.en.txt"), "{}", p.display());
+        assert!(
+            !dir.join("derived/transcripts/abc123.en.txt").exists(),
+            "不能混进 transcripts（kb / 重放 / 索引按它找转写）"
+        );
+    }
+
     use super::*;
 
     fn tmpdir() -> PathBuf {
