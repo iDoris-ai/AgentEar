@@ -568,7 +568,7 @@
 
 ---
 
-### T3.4.18 边车端口自动避让 + 默认 TTS 端口换 8796 + `say` 兜底  `PR_OPEN`（2026-09-26，分支 `feat/sidecar-port-fallback`，v0.22.0）
+### T3.4.18 边车端口自动避让 + 默认 TTS 端口换 8796 + `say` 兜底  `DONE`（2026-09-26，PR #92 → `aeaef3c`，v0.22.0 已发布）
 - **来源**：jason 2026-09-26 对 T3.4.17 两个待决项的拍板（原话：「可以换掉。然后你确保别人占了这个端口之后，
   我们可以自动的发现服务无效，再拉起换一个端口。可以 say。」）
 - **做了什么**（细节见 `docs/releases/v0.22.0-notes.md`）：
@@ -594,7 +594,7 @@
   退出前重核接回 pid 的监听者；**接回的 pid 不进信号槽位**（泄漏可自愈、误杀不可逆）；配置改了先收旧边车再删记录；`env -S` 拒绝换端口。
   调用点变异 9 处全红（含评审原来不红的那个）；真 TTS 边车冒烟通过（不起守护进程）。
 
-### T3.4.17 对话模式首轮没回答：端口被占误判 + 首轮与边车拉起赛跑  `PR_OPEN`（2026-09-26，分支 `fix/talk-first-turn`，v0.21.1）
+### T3.4.17 对话模式首轮没回答：端口被占误判 + 首轮与边车拉起赛跑  `DONE`（2026-09-26，PR #90 → `8104f57`，v0.21.1 已发布）
 - **来源**：jason 2026-09-26 装上 v0.21.0 实测：双击进对话模式说了一句，**没有回答**。
   日志（13:29:47–13:29:52）两条真 bug 叠在一起：
   1. **端口被占被当成「没起」**：TTS 默认端口 8765 被另一个 app（Chat On Steroids）
@@ -1042,7 +1042,7 @@
   「出现 GGUF 路径应重新评估」。
 - ⚠️ `llama-server` 默认上下文会吃 30 GB 级内存（ADR-0010 RAW §5），**`-c` 必须钉死并有测试守着**。
 
-### T3.5.9 Qwen3-ASR 常驻服务的内存：从「外面重启」到「进程内管住」  `IN PROGRESS`（2026-10-02 新增，jason 定；第 1 步 `DONE`，第 2 步 B-lite `DONE`，待 jason 过一轮真机验收）
+### T3.5.9 Qwen3-ASR 常驻服务的内存：从「外面重启」到「进程内管住」  `IN PROGRESS`（2026-10-02 新增，jason 定；第 1 步 `DONE`，第 2 步 B-lite `DONE`——PR #104 → `d65080c`（v0.26.2）、PR #106 → `5f32921`（v0.27.0）均已合并并发布；仍待 jason 过一轮真机验收，文档里无验收记录；2026-11 的 `fix/record-limit` #114 改了这个补丁，见 T3.5.10）
 - **来源**：jason 2026-10-02「越用越慢，一句话要好几分钟」。v0.26.2（PR #104 `d65080c`，**已发布**）先在外面兜底：
   每轮转完 `phys_footprint` > 4 GiB 就重启 speech-server。jason：「重启是临时方案」，要求查根因、规划自己解决。
 - **读源码得到的根因（speech-swift v0.0.28 @ `231f8eb`，✅ 第 1 步已实测证实）**：
@@ -1249,7 +1249,7 @@
 > 审批、执行、回执留档、长期记忆归 Agent24；模型准入归 iDoris（经 Agent24）。
 > 本表只列 AgentEar 这一侧的责任，Agent24 侧的见 embedding.md §5。
 
-### T6.1.0 P0 契约冻结（AgentEar 侧）  `PR_OPEN`（2026-09-27）
+### T6.1.0 P0 契约冻结（AgentEar 侧）  `DONE`（2026-09-27，PR #95 → `522f9eb`，纯文档/契约/测试，未发版）
 - **交付**：`contracts/` 目录。包括三份 schema（`agentear.proposal/1` 已冻结，`agentear.event/1`、`agentear.command/1`
   是新增的）、52 个 fixtures（合法 / 非法 / 事件序列），以及两道测试守卫：
   `tests/contracts.rs` 做 fixture 自检；`src/main.rs::contract_tests` 用真实代码路径检查 proposal 不漂移。
@@ -1261,7 +1261,7 @@
 - **P0 的完成判据只算完成了一半**：embedding.md §5 要求「两边各有同一组 schema fixtures」，
   Agent24 那一侧要按 commit hash 引用本目录，而且 A3 协议要冻结，这两件都还没做。
 
-### T6.1.1 P1 并行骨架  `PR_OPEN`（2026-09-27，v0.24.0，分支 `feat/a24-p1-host-adapter`）
+### T6.1.1 P1 并行骨架  `DONE`（2026-09-27，PR #96 → `5813c1b`，v0.24.0 已发布）
 - **交付**：`src/host.rs`（+ `src/host/tests.rs`）——
   - LLM transport 三档 `talk_llm_transport`：`sidecar`（默认，原样）/ `idoris`（`CurlWith` 带
     `X-iDoris-Privacy`，默认 `local_only`；请求体补 `model`）/ `agent24`（`HostLlm` 经 `_a24/model/complete`，
@@ -1333,11 +1333,11 @@
 - jason 真机：Agent24 路由到 Qwen3-8B-4bit，输出无 `<think>` 开头标签、160 token 用完在思考里 → 独白被 TTS 念出。
 - 修：附着请求加 ` /no_think`；**附着路径专属**（`host::judge_host_reply`，仅在加了 /no_think 的请求上）认无开头标签的思考段——全局 `strip_thinking` 不变（#101 评审：合法提到 `</think>` 的正文会被腰斩）；截断在思考里只念提示 + error{internal, reasoning_truncated}；附着上限 512。实测 136→22 tokens。
 
-### T6.1.2d 附着 token 改存 0600 文件（不再用钥匙串）  `PR_OPEN`（2026-09-27，v0.26.1，分支 `fix/agent24-token-file`）
+### T6.1.2d 附着 token 改存 0600 文件（不再用钥匙串）  `DONE`（2026-09-27，PR #103 → `a26c914`，v0.26.1 已发布；#103 标题里写的是 v0.25.3，以 GitHub release v0.26.1 为准）
 - 起因：jason 升级到 v0.25.2 首启弹「AgentEar wants to access key ai.idoris.agentear.agent24 … login keychain password」。自签证书无 Team ID → 钥匙串分区按 cdhash 认 app → 每次升级都弹。jason 拍板改存 `<数据目录>/agent24/token`（0600）。
 - 迁移：配对过但无 token 文件 → 代跑 `attach add` 重新签发；不读、不删旧钥匙串项（都会弹框），旧 token 随轮换作废。
 - 验证：7 处调用点变异全红；隔离 agent24d 实测全新配对 / 迁移（旧 token auth_failed）/ 宽权限拒用 / daemon 不在时迁移。
-### T6.1.5 每轮分段耗时（看得到 + 落盘积累）  `PR_OPEN`（2026-09-27，v0.26.0，分支 `feat/turn-timings`）
+### T6.1.5 每轮分段耗时（看得到 + 落盘积累）  `DONE`（2026-09-27，PR #102 → `f7b358c`，v0.26.0 已发布；文中「待 jason 手测」一项无验收记录，未核实）
 - 需求：jason（经 agent24-13 转述）——本地模型卖点是隐私和快，每轮要看到毫秒级耗时并落盘，作为定位慢点的依据。
 - 做法：`src/timings.rs`（全局时钟 + 线程绑定轮次；缺段省略不填 0）；菜单栏「上一轮：说完→出声」；`--timings [--last N]`（中位数/p90/最大值，最近秩）；
   `derived/timings.jsonl`（只有数字与枚举，10 MB 滚动）；附着时收尾 `turn` 事件带可选 `timings`（schema + fixtures）。
@@ -1352,10 +1352,61 @@
 ### T6.1.2a #97 评审跟进  `DONE`（2026-09-27，#98 合并，随 v0.25.1 发布）
 - `strip_nulls` 递归数组元素；`A24_BUSY` panic 兜底（drop guard）。验收：`cargo test -- strip_nulls_recurses busy_flag` 3 条绿，调用点变异红。
 
-### T6.1.3 P3 提案闭环  `BLOCKED`（等 T6.1.2）
+### T6.1.3 P3 提案闭环  `READY`（T6.1.2 AgentEar 侧已 DONE：#97/#99/#100；对真 agent24d 的端到端见 T6.1.2 小节；2026-11-10 未开工）
 - 发 proposal，自己不执行；附着模式下关掉本地的语音确认，改发 `confirm_reply`（B8）。
 - **验收**：拒绝时零执行；确认的内容与执行载荷同源；超出支持范围的 action type 会被安全拒绝。
 
 ### T6.1.4 P4 流式优化  `BLOCKED`（等 Agent24 的流式 model callback）
 - 支持取消、分句播报和背压，不改 P0 的语义。**验收**：首字起播中位数 ≤3.0 秒，n≥10，只报中位数和极值。
 
+---
+
+## 2026-11-10 对账补录（以下是 `docs/agent/` 此前没有编号的工作；事实来源：`gh pr list --state merged`、`gh release list`、`docs/releases/`、PR 正文）
+
+### T3.5.10 录音上限 5/10/15 分钟 + Qwen3 解码上限 6144  `DONE`（代码；PR #114 → `07ce7fa`，2026-11-10 合并，**未发版**；新 speech-server 未发布）
+- 事实（PR #114 正文）：录音上限默认仍是 5 分钟；设置窗口加「录音上限」一行，只有 5 / 10 / 15 分钟三档，非法配置退回 5 分钟。
+  Qwen3 常驻转写的解码上限从上游默认 448 提到 6144（上游 `Qwen3DecodingOptions.maxTokens=448` 写满即停、HTTP 仍 200；
+  PR 记录的触发样本：一段 281.75 秒录音回来正好 448 个 token）。菜单栏秒数 `u8` → `u32`。
+- **没发版的原因/现状**：`SPEECH_VERSION` 仍是已发布的 `v0.0.28-agentear.1`；补丁与构建脚本（`AGENTEAR_REV=2`）在仓库里，
+  但新的 speech-server 还没发到 GitHub release，当前代码里的运行时常量仍指向已发布的旧运行时（`SPEECH_VERSION` 未变），各台机器实际装的是哪份未逐台核实。
+  要让 6144 真正生效：重跑 `scripts/build-speech-runtime.sh` → 发新的 `speech-runtime-<版本>` release → 填 `src/qwen3.rs` 常量与 `SPEECH_VERSION`（流程见根 `CLAUDE.md` v0.27.0 一节）。
+- 验收：`docs/agent/progress.md` 2026-11-03 条写明「没有打开菜单栏里的 .app，也没有用 15 分钟的录音实测解码」——**15 分钟解码未实测**。
+
+### F-LITE — AgentEar Lite（ARM64 小安装包，内置模型按需定位/下载）
+> 依据：PR #109/#110 正文。范围：安装包不内置模型，设置里点击后下载所需组件。以下仅列已合并的两步；**签名 DMG / 完整 GUI 安装验收不是这两个 PR 的交付声明**。
+
+#### T-LITE-1 EAR-LITE-1：内置模型完整组定位与缺失诊断  `DONE`（PR #109 → `cd2859c`，2026-10-15）
+- 录音调度时重新解析 SenseVoice + VAD 两文件的完整组路径（普通文件、当前 SHA/预期字节数、引擎指纹须与安装记录一致）；缺模型时给诊断/警告，守护进程不因此退出；显式 `--transcribe --lang th` 优先于 Auto 存储配置做预检且不写回。
+- PR 正文自述：`cargo test --locked` 506 passed / 0 failed / 10 ignored（后续 R2 修复后 517 passed）；`cargo fmt --check` 因 main 既有格式债（649 处）失败，PR 未声称全绿。
+
+#### T-LITE-2 PR2：按需安装模型对并收紧取消与真实加载校验  `DONE`（PR #110 → `5ac6156`，2026-10-15）
+- 两文件按需下载组、取消边界、真实加载探针、菜单就绪状态。PR 正文自述 `cargo test --locked` 536 passed / 0 failed / 14 ignored。
+- 相关发布：GitHub 预发布 `v0.27.0-preview.20261015.1`（ARM64 核心预览，DMG 约 6.05 MiB、不内置模型，构建来源 `5ac6156`，release 页写明已签名公证；本仓库未另有验收记录）。
+- 未核实：Lite 后续 PR（PR 正文提到的「后续 PR」）是否存在；`gh pr list` 在 2026-11-10 只有 #112 一个 open PR。
+
+### T-I18N-1 设置里切界面语言/泰语  `DONE`（PR #111 → `0b6409b`，2026-10-26，v0.28.0 已发布）
+- 设置窗口可选界面语言，新安装默认英语；选「ไทย」开始下载泰语模型（574 MB），下载完成前识别语言保持 `auto`；切回英语/中文只改界面；已存过 `ui_lang` 的安装不迁移。
+- 验收边界（progress.md 2026-10-26 条）：调试二进制设置窗口点过，下到约 31% 后 SIGTERM 停；**没下完、没做加载冒烟，打好的 .app 没点过**。
+- 另有未合并的 PR #112（`docs/v0.28.0-notes-english`，release notes 英文在前）仍 open。
+
+### T-UI-1 设置窗口下半区两列并排  `DONE`（PR #113 → `bf28054`，2026-10-27，v0.28.1 已发布）
+- 语音识别与保留期上下两行、左右各半，底部四按钮两行两列；窗口 560pt → 620pt；列宽有单测。打好的 .app 没打开过（progress.md 自述）。
+
+### T-CI-1 lint-shell 进 CI + 修 7 处 bash 3.2 全角坑  `DONE`（PR #107 → `f7f28b7`、PR #108 → `f919154`，2026-10-03，不发版）
+- #107：`lint-shell.sh` 在 #106 修好后（原用 `grep -P`，macOS grep 不支持，一直假绿）扫出 7 处，逐处加花括号，另删 clippy 恒真断言。#108：CI（macOS runner）编译检查前加 `/bin/bash scripts/lint-shell.sh`；扫描范围仍只有 `scripts/`。
+
+## 进行中的三条线（2026-11-10 记录；只写能核实的）
+
+### T-APPSTORE-1 App Store 分发  `IN_PROGRESS`
+- 分支 `feat/app-store-sandbox`，本机 worktree `/Users/jason/Dev/tools/AgentEar-appstore`，基于 main `07ce7fa`，**尚无提交、`origin` 上没有该分支、没有 PR**（2026-11-10 对账期间才在本机出现）。
+- 工作区未提交改动涉及：`docs/agent/tasks.md`、`scripts/bundle.sh`、`src/main.rs`、`tests/script_defaults.rs`，另有未跟踪的 `assets/entitlements/` 与 `docs/app-store.md`（`git diff origin/main --stat`：约 +112 / -7，不含未跟踪文件）。
+- 具体设计、范围、验收：**未核实**（只看了文件列表，没有读内容）。
+
+### T-HOSTSPEAK-1 宿主 speak 时按需拉起 TTS  `IN_PROGRESS`
+- 分支 `fix/host-speak-tts`，本机 worktree `/Users/jason/Dev/tools/AgentEar-host-speak`，基于 main `07ce7fa`，**尚无提交，也没推到远端、没有 PR**。
+- 工作区未提交改动涉及：`contracts/README.md`、`contracts/schema/agentear.event.v1.schema.json`、`src/a3/tests.rs`、`src/config.rs`、`src/host.rs`、`src/host/tests.rs`、`src/talk.rs`（共 7 个文件，`git diff origin/main --stat`：约 +463 / -112）。
+- 具体行为目标、验收、是否改了事件契约：**未核实**（只看了文件列表，没有读 diff）。
+
+### T-TRANSLATE-1 翻译输入  `IN_PROGRESS`（仍在讨论）
+- 分支 `feat/translate-input`，本机 worktree `/Users/jason/Dev/tools/AgentEar-translate`，停在 `bf28054`（v0.28.1，落后 main 一个提交 #114），**无自己的提交、工作区干净、无远端分支、无 PR**。
+- 目前只在讨论「模式切换手势」。**没有已定设计，不要把本条当作既有设计引用**；做法、手势、验收均未定。
