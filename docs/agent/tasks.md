@@ -568,6 +568,13 @@
 
 ---
 
+### T3.4.19 录音中途崩溃不再丢整段：5 秒 checkpoint + 启动抢救  `IN_PROGRESS`（2026-11-11，分支 `feat/crash-recovery`，PR 见 GitHub）
+- **背景**：ADR-0007 §8 第 7 条——提交前的录音崩溃时整段丢失；2026-09-26 jason 曾「接受风险」，2026-11-11 同意补做。
+- **做法**（`src/store.rs`）：`Session::write` 每 `CHECKPOINT_EVERY`=5s checkpoint：flush 与 hound 共享的 BufWriter、`pwrite` 回填头部两个长度（游标不动；不用 hound 的 flush，因其出错时游标会停在头部）、复制句柄 `sync_data`；在 worker 线程调用，不在 CoreAudio 回调线程。启动 `sweep_tmp` → `recover_one`：`flock` 排除活会话；校验 44 字节头格式；数据取到文件末尾（不信头里长度）、丢半个采样、回填 RIFF/data size、fsync、与正常 commit 共用 `publish`（rename → fsync 目录 → 清单，清单加 `recovered:true`）。<0.3s 或坏头才删。
+- `main.rs::worker` 空闲时逐条给抢救录音补转写，只写 `derived/transcripts/`；失败只记日志，可手动 `--transcribe`。
+- **测试**：store 单测 19 条（头修复/奇数字节/坏头不 panic/短残留删除/活会话不动/子进程真 `kill -9` 后找回）。
+- **未验证**：真麦克风 + 真守护进程 kill -9；断电（fdatasync 之后是否真落盘取决于 APFS/硬件，未测）；抢救转写在 Qwen3 常驻/泰语路径下的行为。
+
 ### T3.4.18 边车端口自动避让 + 默认 TTS 端口换 8796 + `say` 兜底  `DONE`（2026-09-26，PR #92 → `aeaef3c`，v0.22.0 已发布）
 - **来源**：jason 2026-09-26 对 T3.4.17 两个待决项的拍板（原话：「可以换掉。然后你确保别人占了这个端口之后，
   我们可以自动的发现服务无效，再拉起换一个端口。可以 say。」）

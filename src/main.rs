@@ -1262,6 +1262,26 @@ fn main() -> Result<()> {
     tray::run(mtm)
 }
 
+/// 给启动时抢救的录音补转写。失败只记日志：raw 已落盘，可用
+/// `agentear --transcribe <raw/audio/<hash>.wav>` 手动重跑。
+fn transcribe_recovered(store: &store::Store, asr: &dyn engine::AsrEngine, r: &store::Recovered) {
+    let hash = &r.committed.content_hash;
+    log::info!("给抢救的录音 {hash} 补转写（{:.1} 秒）", r.secs);
+    match asr.transcribe(&r.committed.path, config::get().asr_lang) {
+        Ok(t) if !t.text.trim().is_empty() => {
+            match store.write_transcript(hash, &paste::sanitize(&t.text)) {
+                Ok(p) => log::info!("抢救录音的转写已存 {}", p.display()),
+                Err(e) => log::error!("写抢救录音的转写失败: {e:#}"),
+            }
+        }
+        Ok(_) => log::warn!("抢救的录音 {hash} 转写为空"),
+        Err(e) => log::error!(
+            "抢救的录音 {hash} 转写失败（raw 已保存，可手动 --transcribe {}）: {e:#}",
+            r.committed.path.display()
+        ),
+    }
+}
+
 fn worker(
     rx: std::sync::mpsc::Receiver<hotkey::Signal>,
     store: store::Store,
@@ -1276,7 +1296,18 @@ fn worker(
     /// 常开的机器永远不生效。
     const PURGE_EVERY: Duration = Duration::from_secs(6 * 3600);
 
+    // 启动时从 raw/.tmp 抢救出来的上次中断的录音：raw 已经提交，这里只补转写。
+    let mut recovered = store.take_recovered();
+
     loop {
+        // 空闲时一次补一条（只落 derived 转写：不上屏、不进剪贴板、不入知识库、不出声）。
+        // 放在空闲分支里而不是启动路径上：转写可能要几秒，不能挡住热键。
+        if matches!(state, State::Idle) {
+            if let Some(r) = recovered.pop() {
+                transcribe_recovered(&store, asr.as_ref(), &r);
+                continue;
+            }
+        }
         // 录音期间不做清理：删文件的 IO 会和写 WAV 抢盘,
         // 而这条循环每 20ms 就要把采样搬进 session 一次
         if matches!(state, State::Idle) && last_purge.elapsed() >= PURGE_EVERY {
