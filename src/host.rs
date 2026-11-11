@@ -1207,22 +1207,28 @@ pub fn emit(ty: &str, payload: Value) -> Option<String> {
 /// 记一条等宿主答复的 proposal（只留一条，新的顶掉旧的——与独立版同一个理由：
 /// 挂两条时用户说「确认」我们不知道他确认的是哪条）。
 pub fn await_confirm(proposal_event_id: String, ttl: Duration) {
-    let mut slot = AWAITING.lock().unwrap_or_else(|p| p.into_inner());
-    if let Some(old) = slot.replace(Awaiting {
-        event_id: proposal_event_id,
-        deadline: Instant::now() + ttl,
-    }) {
-        log::info!("新的待确认顶掉了旧的（{}）", old.event_id);
+    let old = {
+        let mut slot = AWAITING.lock().unwrap_or_else(|p| p.into_inner());
+        slot.replace(Awaiting {
+            event_id: proposal_event_id,
+            deadline: Instant::now() + ttl,
+        })
+    };
+    if let Some(old) = old {
+        log::info!("新的待确认顶掉了旧的（{}），告诉宿主作废", old.event_id);
+        // P3：被顶掉的 proposal 在宿主那边不能一直挂着等——明确发 reject，零执行。
+        emit("confirm_reply", confirm_reply_payload(&old.event_id, false, None));
     }
 }
 
-/// 取走还没过期的那条待确认（过期的顺手丢掉）。
+/// 取走还没过期的那条待确认（过期的顺手丢掉，并向宿主发 reject，免得它一直挂着）。
 pub fn take_awaiting() -> Option<String> {
-    let mut slot = AWAITING.lock().unwrap_or_else(|p| p.into_inner());
-    match slot.take() {
+    let taken = AWAITING.lock().unwrap_or_else(|p| p.into_inner()).take();
+    match taken {
         Some(a) if Instant::now() <= a.deadline => Some(a.event_id),
         Some(a) => {
-            log::info!("待确认已过期作废（{}）", a.event_id);
+            log::info!("待确认已过期作废（{}），告诉宿主作废", a.event_id);
+            emit("confirm_reply", confirm_reply_payload(&a.event_id, false, None));
             None
         }
         None => None,
