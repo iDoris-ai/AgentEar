@@ -125,7 +125,9 @@ pub fn max_tokens_for(text: &str) -> u32 {
 
 /// 清理模型返回：去思考段、去首尾空白、去模型自作主张包上的一层引号。
 fn clean_reply(raw: &str, original: &str) -> String {
-    let mut s = talk::strip_thinking(raw).trim().to_string();
+    // 译文是 LLM 输出，会被粘进任意应用（含终端：多行文本会被 shell 逐行执行）。
+    // 和 ASR 文本一样过 `paste::sanitize`：控制字符（LF/CR/ESC…）一律变空格并折叠。
+    let mut s = crate::paste::sanitize(&talk::strip_thinking(raw));
     // 模型常把译文整个包进一层引号；原文本身没有这层引号时才剥。
     let wrapped = |a: char, b: char| s.chars().count() >= 2 && s.starts_with(a) && s.ends_with(b);
     for (a, b) in [('"', '"'), ('“', '”'), ('「', '」')] {
@@ -234,6 +236,25 @@ mod tests {
     fn translates_and_cleans_the_reply() {
         let r = translate_with(&Fake(Ok("  \"Hello, world\"  ")), "你好，世界", Target::En);
         assert_eq!(r.unwrap(), "Hello, world", "模型包的那层引号要剥掉");
+    }
+
+    #[test]
+    fn translation_is_sanitized_like_asr_text() {
+        // 多行、CR、ESC 都不能原样到光标处（粘进终端会被逐行执行）
+        let r = translate_with(&Fake(Ok("a\nb\r\nrm -rf /\x1b[31m done")), "你好", Target::En).unwrap();
+        assert_eq!(r, "a b rm -rf / [31m done");
+        assert!(!r.chars().any(|c| c.is_control()), "{r:?}");
+        // 只剩控制字符 = 空译文
+        assert_eq!(translate_with(&Fake(Ok("\n\r\x1b")), "你好", Target::En), Err(Fallback::EmptyReply));
+    }
+
+    #[test]
+    fn prompt_does_not_ask_the_model_to_keep_line_breaks() {
+        for t in [Target::En, Target::Zh, Target::Th] {
+            let p = system_prompt(t);
+            assert!(p.contains("single line"), "{p}");
+            assert!(!p.contains("Keep the original tone") && !p.contains("and line breaks"), "{p}");
+        }
     }
 
     #[test]

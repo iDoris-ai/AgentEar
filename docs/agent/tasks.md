@@ -1411,7 +1411,7 @@
 - 验收：单测 529/0、contracts 4/0、`--say` 真机通过。**未实测**：边车真没跑时的真实拉起、空闲回收杀进程那一步、与物理按键打断的竞态。已知局限见 FU-25。
 
 ### T-TRANSLATE-1 翻译输入  `IN_REVIEW`（jason 2026-11-11 拍板「输入法模式的输出属性」；不用三连击）
-- 分支 `feat/translate-input`，本机 worktree `/Users/jason/Dev/tools/AgentEar-translate`。设计与诚实边界见 `CLAUDE.md`「翻译输入」小节。
+- 分支 `feat/translate-input`。设计与诚实边界见 `CLAUDE.md`「翻译输入」小节。
 - 做了：`config.input_translate`（off/en/zh/th，缺键 = off）；菜单「输入法输出」子菜单 + 菜单栏 `→EN` 标记；语音指令（开启/关闭翻译、翻译成X、「翻译成X：……」一次性）；`src/translate.rs`（专用提示词、15 s 超时、任何失败退回原文）；仅拉 LLM 边车的 `talk::ensure_llm_async`；CLI `--translate <文字> --to en|zh|th`；译文另存 `derived/translations/`。
 - **未验收**：没有真实按键 / 真机菜单点击；泰语目标质量没有可测办法（模型卡只声明中英）；译文落盘目录只被写、没有任何读取方。
 - 已知局限：翻译在 worker 线程里同步做，最长 15 s 内读不到下一次按键；默认指令表只对没有 `commands.json` 的新用户生效，老用户要手工加。

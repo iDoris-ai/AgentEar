@@ -918,9 +918,7 @@ mod tests {
         assert!(!c.correct_terms, "术语纠错默认关——它要一个额外的边车进程");
     }
 
-    /// **默认必须是输入法模式。** jason 2026-09-14 拍板：两种模式并存，
-    /// 默认走 M1 那条老路（只上屏、不出声）——因为对话模式要两个边车，
-    /// 没起的时候会让每次录音都白等一次超时。
+    /// `input_translate` 缺键 = off；非法值只丢这一个字段；往返不变。
     #[test]
     fn input_translate_defaults_to_off_and_missing_key_is_off() {
         assert_eq!(Config::default().input_translate, InputTranslate::Off);
@@ -951,6 +949,9 @@ mod tests {
         assert_eq!(back.input_translate, InputTranslate::Th);
     }
 
+    /// **默认必须是输入法模式。** jason 2026-09-14 拍板：两种模式并存，
+    /// 默认走 M1 那条老路（只上屏、不出声）——因为对话模式要两个边车，
+    /// 没起的时候会让每次录音都白等一次超时。
     #[test]
     fn talk_mode_defaults_to_input_method() {
         assert_eq!(Config::default().talk_mode, TalkMode::InputMethod);

@@ -1821,16 +1821,42 @@ struct Delivered {
 /// 译文另存 `derived/translations/`（失败只记日志）。
 fn deliver_text(store: &store::Store, cfg: &config::Config, content_hash: &str, text: &str) -> Delivered {
     let plain = |t: &str| Delivered { text: t.to_string(), consumed_by_translate_command: false };
-    if cfg.commands_enabled && !has_pending() {
-        if let Ok(list) = commands::load(store.root()) {
-            if let Some(hit) = commands::match_text(&list, text) {
-                if let Some(commands::TranslateIntent::Once(target, slot)) = commands::translate_intent(&hit) {
-                    log::info!("一次性翻译指令「{}」→ {}，槽位 {slot:?}", hit.phrase, target.as_str());
-                    let out = translate_and_record(store, cfg, content_hash, &slot, target);
-                    return Delivered { text: out, consumed_by_translate_command: true };
+    // 这一轮的指令命中（翻译相关）。指令表读不出来 / 关了 = 没有指令。
+    let mut intent = None;
+    if cfg.commands_enabled {
+        // 有待确认的向外动作时：这句要是确认/取消，归指令轮次处理，翻译不插手；
+        // 要是「别的话」，指令轮次本来就会作废待确认再把它当新指令，
+        // 所以这里在**消费它之前**先作废（否则指令轮次会再执行一遍 → 翻两次，L2）。
+        let pending_answer = has_pending()
+            && !matches!(commands::classify_confirmation(text), commands::Reply::Other);
+        if pending_answer {
+            return plain(text);
+        }
+        {
+            if let Ok(list) = commands::load(store.root()) {
+                if let Some(hit) = commands::match_text(&list, text) {
+                    intent = commands::translate_intent(&hit).map(|i| (hit.phrase.clone(), i));
                 }
             }
         }
+    }
+    match intent {
+        Some((phrase, commands::TranslateIntent::Once(target, slot))) => {
+            if has_pending() {
+                drop_pending("用户说了别的话，不是确认");
+                println!("（刚才那条待确认已作废）");
+            }
+            log::info!("一次性翻译指令「{phrase}」→ {}，槽位 {slot:?}", target.as_str());
+            let out = translate_and_record(store, cfg, content_hash, &slot, target);
+            return Delivered { text: out, consumed_by_translate_command: true };
+        }
+        // 持续开关类指令（「关闭翻译」「翻译成英文」无槽位…）本身不送 LLM、不上屏译文：
+        // 光标处是用户说的那句原话，随后指令轮次执行开关（L1）。
+        Some((phrase, _)) => {
+            log::info!("翻译开关指令「{phrase}」：这一句不翻译，原文上屏");
+            return plain(text);
+        }
+        None => {}
     }
     if cfg.talk_mode == config::TalkMode::InputMethod {
         if let Some(target) = cfg.input_translate.target() {
@@ -3470,12 +3496,112 @@ mod host_wiring_tests {
         cfg
     }
 
+    /// 假的 OpenAI 兼容端点：每个请求都回同一段 `content`，记下请求数与最后一个请求体。
+    /// 让测试能走**成功路径**（上屏的是译文、写了译文文件），也能证明某条 guard
+    /// 「没有发请求」（请求数 = 0）。
+    struct FakeLlm {
+        url: String,
+        hits: Arc<std::sync::atomic::AtomicUsize>,
+        last_body: Arc<std::sync::Mutex<String>>,
+    }
+
+    impl FakeLlm {
+        fn start(content: &'static str) -> Self {
+            use std::io::{Read, Write};
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let url = format!("http://{}", listener.local_addr().unwrap());
+            let hits = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let last_body = Arc::new(std::sync::Mutex::new(String::new()));
+            let (h, lb) = (hits.clone(), last_body.clone());
+            std::thread::spawn(move || {
+                for stream in listener.incoming() {
+                    let Ok(mut st) = stream else { continue };
+                    let mut buf = Vec::new();
+                    let mut chunk = [0u8; 4096];
+                    let body = loop {
+                        let n = st.read(&mut chunk).unwrap_or(0);
+                        buf.extend_from_slice(&chunk[..n]);
+                        let text = String::from_utf8_lossy(&buf).to_string();
+                        if let Some(i) = text.find("\r\n\r\n") {
+                            let len = text[..i]
+                                .lines()
+                                .find_map(|l| l.to_ascii_lowercase().strip_prefix("content-length:").map(|v| v.trim().parse::<usize>().unwrap_or(0)))
+                                .unwrap_or(0);
+                            if buf.len() >= i + 4 + len || n == 0 {
+                                break text[i + 4..].to_string();
+                            }
+                        } else if n == 0 {
+                            break String::new();
+                        }
+                    };
+                    h.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    *lb.lock().unwrap() = body;
+                    let out = serde_json::json!({"choices":[{"finish_reason":"stop","message":{"content":content}}]}).to_string();
+                    let _ = write!(
+                        st,
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        out.len(),
+                        out
+                    );
+                }
+            });
+            Self { url, hits, last_body }
+        }
+        fn hits(&self) -> usize {
+            self.hits.load(std::sync::atomic::Ordering::SeqCst)
+        }
+        fn cfg(&self) -> config::Config {
+            let mut cfg = config::Config::default();
+            cfg.talk_llm_url = Some(self.url.clone());
+            cfg
+        }
+        /// 最后一次请求里 user 消息的内容。
+        fn last_user(&self) -> String {
+            let v: serde_json::Value = serde_json::from_str(&self.last_body.lock().unwrap()).unwrap();
+            v["messages"][1]["content"].as_str().unwrap().to_string()
+        }
+    }
+
+    fn translation_file(store: &store::Store, lang: &str) -> Option<String> {
+        std::fs::read_to_string(store.root().join(format!("derived/translations/{HASH}.{lang}.txt"))).ok()
+    }
+
     #[test]
-    fn deliver_text_is_the_original_by_default() {
-        let (_g, store, cfg) = setup();
-        let d = deliver_text(&store, &cfg, HASH, "你好世界");
+    fn deliver_text_is_the_original_by_default_and_never_calls_the_llm() {
+        let (_g, store, _) = setup();
+        let llm = FakeLlm::start("Hello");
+        let d = deliver_text(&store, &llm.cfg(), HASH, "你好世界");
         assert_eq!(d.text, "你好世界");
         assert!(!d.consumed_by_translate_command);
+        assert_eq!(llm.hits(), 0, "默认 off：不发请求");
+        assert!(translation_file(&store, "en").is_none());
+    }
+
+    #[test]
+    fn deliver_text_success_delivers_the_translation_and_records_it() {
+        let (_g, store, _) = setup();
+        let llm = FakeLlm::start("Hello world");
+        let mut cfg = llm.cfg();
+        cfg.input_translate = config::InputTranslate::En;
+        let d = deliver_text(&store, &cfg, HASH, "你好世界");
+        assert_eq!(d.text, "Hello world", "上屏的是译文");
+        assert!(!d.consumed_by_translate_command);
+        assert_eq!(llm.hits(), 1);
+        assert_eq!(llm.last_user(), "你好世界", "送去翻译的是原文");
+        assert_eq!(translation_file(&store, "en").as_deref(), Some("Hello world"), "译文落盘了");
+        assert!(!store.root().join(format!("derived/transcripts/{HASH}.txt")).exists(), "不动转写文件");
+    }
+
+    #[test]
+    fn deliver_text_sanitizes_a_multiline_translation() {
+        let (_g, store, _) = setup();
+        let llm = FakeLlm::start("line1\nrm -rf /\r\x1b[0m end");
+        let mut cfg = llm.cfg();
+        cfg.input_translate = config::InputTranslate::En;
+        let d = deliver_text(&store, &cfg, HASH, "你好");
+        assert_eq!(d.text, "line1 rm -rf / [0m end");
+        assert!(!d.text.chars().any(|c| c.is_control()), "{:?}", d.text);
+        assert_eq!(translation_file(&store, "en").as_deref(), Some("line1 rm -rf / [0m end"));
     }
 
     #[test]
@@ -3486,46 +3612,89 @@ mod host_wiring_tests {
         let d = deliver_text(&store, &cfg, HASH, "你好世界");
         assert_eq!(d.text, "你好世界", "边车不通：原文照常上屏");
         assert!(!d.consumed_by_translate_command);
-        assert!(!store.root().join("derived/translations").exists(), "没译成就不写译文文件");
+        assert!(translation_file(&store, "en").is_none(), "没译成就不写译文文件");
     }
 
     #[test]
-    fn deliver_text_conversation_mode_never_translates() {
+    fn deliver_text_conversation_mode_never_translates_even_when_it_could() {
         let (_g, store, _) = setup();
-        let mut cfg = dead_llm_cfg();
+        let llm = FakeLlm::start("Hello world"); // 能成功翻译的配置：guard 才有意义
+        let mut cfg = llm.cfg();
         cfg.input_translate = config::InputTranslate::En;
         cfg.talk_mode = config::TalkMode::Conversation;
         let d = deliver_text(&store, &cfg, HASH, "你好世界");
         assert_eq!(d.text, "你好世界");
+        assert_eq!(llm.hits(), 0, "对话模式不发翻译请求");
+        assert!(translation_file(&store, "en").is_none());
     }
 
     #[test]
-    fn one_shot_translate_command_delivers_only_the_slot_and_is_consumed() {
+    fn one_shot_translates_only_the_slot_and_is_consumed() {
         let (_g, store, _) = setup();
-        let cfg = dead_llm_cfg(); // 翻译失败 → 上屏槽位原文，而不是整句「翻译成英文：……」
+        let llm = FakeLlm::start("Review the Rust code today");
+        let cfg = llm.cfg(); // 一次性不要求 input_translate 开着
         let d = deliver_text(&store, &cfg, HASH, "翻译成英文：今天 review Rust 代码");
+        assert_eq!(d.text, "Review the Rust code today");
+        assert!(d.consumed_by_translate_command);
+        assert_eq!(llm.last_user(), "今天 review Rust 代码", "只送槽位，不送指令短语");
+        assert_eq!(translation_file(&store, "en").as_deref(), Some("Review the Rust code today"));
+        // 失败 → 槽位原文
+        let d = deliver_text(&store, &dead_llm_cfg(), HASH, "翻译成英文：今天 review Rust 代码");
         assert_eq!(d.text, "今天 review Rust 代码");
         assert!(d.consumed_by_translate_command);
         // 指令表关了就当普通话（整句原文）
-        let mut off = dead_llm_cfg();
+        let mut off = llm.cfg();
         off.commands_enabled = false;
+        let n = llm.hits();
         let d = deliver_text(&store, &off, HASH, "翻译成英文：你好");
         assert_eq!(d.text, "翻译成英文：你好");
         assert!(!d.consumed_by_translate_command);
-        // 没有槽位 = 持续开关，不是一次性：不在上屏前消费
-        let d = deliver_text(&store, &cfg, HASH, "翻译成英文");
-        assert!(!d.consumed_by_translate_command);
-        assert_eq!(d.text, "翻译成英文");
+        assert_eq!(llm.hits(), n);
     }
 
     #[test]
-    fn one_shot_is_not_taken_while_a_confirmation_is_pending() {
-        let (_g, store, cfg) = setup();
-        let cfg = { let mut c = cfg; c.talk_llm_url = Some("http://127.0.0.1:9".into()); c };
+    fn switch_commands_are_not_translated_even_when_translation_is_on() {
+        let (_g, store, _) = setup();
+        let llm = FakeLlm::start("Turn off translation");
+        let mut cfg = llm.cfg();
+        cfg.input_translate = config::InputTranslate::En;
+        for said in ["关闭翻译", "翻译成英文", "翻译成中文", "开启翻译"] {
+            let d = deliver_text(&store, &cfg, HASH, said);
+            assert_eq!(d.text, said, "「{said}」不送 LLM、不上屏译文");
+            assert!(!d.consumed_by_translate_command, "{said}：开关交给指令轮次执行");
+        }
+        assert_eq!(llm.hits(), 0, "开关类指令句不发请求");
+        // 对照：同一配置下普通句子照常翻译（证明上面不是因为翻译整体失效）
+        assert_eq!(deliver_text(&store, &cfg, HASH, "你好世界").text, "Turn off translation");
+        assert_eq!(llm.hits(), 1);
+    }
+
+    #[test]
+    fn one_shot_while_a_confirmation_is_pending_translates_once_and_drops_the_pending() {
+        let (_g, store, _) = setup();
+        let llm = FakeLlm::start("Hello");
+        let cfg = llm.cfg();
         let _ = run_command_turn(&store, &cfg, "发邮件给 a@b.com 讨论 AEC", HASH);
         assert!(has_pending());
         let d = deliver_text(&store, &cfg, HASH, "翻译成英文：你好");
-        assert!(!d.consumed_by_translate_command, "这一轮是在答复待确认");
+        assert!(d.consumed_by_translate_command, "「别的话」= 新指令，在这里一次处理完");
+        assert_eq!(d.text, "Hello");
+        assert!(!has_pending(), "待确认被作废，指令轮次不会再执行一遍");
+        assert_eq!(llm.hits(), 1, "只翻译一次（L2）");
+    }
+
+    #[test]
+    fn a_confirmation_reply_is_left_to_the_command_turn() {
+        let (_g, store, _) = setup();
+        let llm = FakeLlm::start("Hello");
+        let mut cfg = llm.cfg();
+        cfg.input_translate = config::InputTranslate::En;
+        let _ = run_command_turn(&store, &cfg, "发邮件给 a@b.com 讨论 AEC", HASH);
+        assert!(has_pending());
+        // 「确认」是答复：不翻译（否则会把「确认」译成 Confirm 再上屏）
+        let d = deliver_text(&store, &cfg, HASH, "确认");
+        assert!(!d.consumed_by_translate_command);
+        assert!(has_pending(), "deliver_text 不动待确认");
         drop_pending("测试结束");
     }
 
