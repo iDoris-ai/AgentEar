@@ -17,8 +17,8 @@
 //!    release 上（`speech-runtime-<版本>` 这个 tag），`RUNTIME_URL` 指向那里，
 //!    不再指向 `soniqo/speech-swift` 的 release。
 //!    同一份补丁还把 Qwen3 的 `maxTokens` 从 448 改成 6144，盖住设置里最长的
-//!    15 分钟。短句遇到 EOS 会提前停。已发布的 [`SPEECH_VERSION`] 仍是 `.1`，
-//!    新二进制要等 tarball 发出去再改版本号，否则安装器会去下一个还不存在的包。
+//!    15 分钟。短句遇到 EOS 会提前停。[`SPEECH_VERSION`] 为 `.2`，对应的 tarball
+//!    已发布在 `speech-runtime-v0.0.28-agentear.2`。
 //! 2. **模型权重**：0.6B / 1.7B 两档，**直接从 Hugging Face 下载**，
 //!    钉在某个 commit（`resolve/<revision>/`），逐文件 sha256 校验，
 //!    按 speech 认的布局 `$QWEN3_ASR_CACHE_DIR/qwen3-speech/models/<org>/<repo>/`
@@ -77,17 +77,17 @@ use crate::download::{self, Fail, FileLock, State};
 /// 所以改它会让所有现有安装（不管是不是真的换了上游版本）都判定为「没装」、
 /// 重新下载——升级时这正是想要的效果：旧版本号对应的运行时有那个内存泄漏，
 /// 不该被新代码当成「已经装好」。
-pub const SPEECH_VERSION: &str = "v0.0.28-agentear.1";
+pub const SPEECH_VERSION: &str = "v0.0.28-agentear.2";
 /// 上游 pinned 的基线 tag/commit（`patches/speech-swift-v0.0.28-agentear.patch`
 /// 打在这个 tag 上）。只用于日志和文档，不参与安装判据。
 pub const UPSTREAM_TAG: &str = "v0.0.28";
 /// 我们自己发布的运行时 tarball——**不是**上游 `soniqo/speech-swift` 的 release。
 /// 由 `scripts/build-speech-runtime.sh` 产出，发布在 AgentEar 自己的 GitHub
-/// release 上（tag `speech-runtime-v0.0.28-agentear.1`）。
-const RUNTIME_URL: &str = "https://github.com/iDoris-ai/AgentEar/releases/download/speech-runtime-v0.0.28-agentear.1/speech-macos-arm64-v0.0.28-agentear.1.tar.gz";
-/// 2026-10-03 实测（`scripts/build-speech-runtime.sh` 的输出，`shasum -a 256`）。
-const RUNTIME_SHA256: &str = "58f3701e663b157d1da427af8257d4cb44ac51f839b0401f3380f92c8e28f2d1";
-const RUNTIME_BYTES: u64 = 99_502_348;
+/// release 上（tag `speech-runtime-v0.0.28-agentear.2`）。
+const RUNTIME_URL: &str = "https://github.com/iDoris-ai/AgentEar/releases/download/speech-runtime-v0.0.28-agentear.2/speech-macos-arm64-v0.0.28-agentear.2.tar.gz";
+/// 2026-11-10 实测（`scripts/build-speech-runtime.sh` 的输出，`shasum -a 256`）。
+const RUNTIME_SHA256: &str = "266e3aafdc736bffd205e2f14c4061a442e8600956bc12e8b1efb2ced8415fda";
+const RUNTIME_BYTES: u64 = 99_535_412;
 /// 解包后体积（实测 `du -sk` ≈ 382.9 MB），磁盘预检用，往上取整留余量。
 const RUNTIME_UNPACKED_BYTES: u64 = 420_000_000;
 /// 常驻服务的 Metal 缓存上限（MB），传给打了补丁的 `speech-server`
