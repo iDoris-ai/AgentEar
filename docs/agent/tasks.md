@@ -961,7 +961,7 @@
   ✅ **Q4 已决（jason 2026-09-26）：不换默认。** 默认仍是随包分发的 SenseVoice；
   Qwen3-ASR 1.7B / 0.6B 做成**可配置、选了就自动下载**的可选后端 → 见 T3.5.6。
 
-### T3.5.2 whisper 逐条 CER 入库  `READY`
+### T3.5.2 whisper 逐条 CER 入库  `PR_OPEN`（结果见 benchmarks-m3.md §4.1.1：code-switch Δ=+5.66pp，95% 区间 [-6.04, +17.01]，未检出差异）
 - **为什么**：`RESULTS.md` 只存了汇总指标，导致
   Qwen3 vs whisper 的**配对检验做不了**（benchmarks-m3.md §4.1）。
 - 用配置 D 的参数重跑 whisper，逐条 CER 入库，
