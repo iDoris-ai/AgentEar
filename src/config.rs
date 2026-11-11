@@ -767,6 +767,10 @@ pub fn load(data_root: &Path) -> Config {
         log::info!("配置迁移：老的 speech_swift 用户保持 Qwen3-ASR 1.7B");
     }
 
+    // MAS 子集：配置文件里写了也不让这些功能生效（见 `mas::apply_limits`）。
+    #[cfg(feature = "app-store")]
+    crate::mas::apply_limits(&mut cfg);
+
     PATH.set(path).ok();
     *CURRENT.write().unwrap() = Some(cfg.clone());
     cfg
@@ -816,6 +820,8 @@ pub fn update(f: impl FnOnce(&mut Config)) {
         let mut guard = CURRENT.write().unwrap();
         let cfg = guard.get_or_insert_with(Config::default);
         f(cfg);
+        #[cfg(feature = "app-store")]
+        crate::mas::apply_limits(cfg);
         cfg.clone()
     }; // CURRENT 的写锁在这里就放了，读者不必等下面的磁盘 IO
     if let Err(e) = save(&snapshot) {

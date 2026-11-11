@@ -2026,6 +2026,11 @@ fn spawn_gated(
 /// 已经有一次拉起在进行时**排队等它结束再做**（见 [`spawn_gated`]），而不是放弃：
 /// 连着双击两次时第二次等第一次做完、探到「已在跑」就结束，不会各拉一个。
 pub fn ensure_sidecars_async(cfg: &crate::config::Config) {
+    // Mac App Store 版（feature app-store）：本路径不存在。
+    if cfg!(feature = "app-store") {
+        log::info!("对话边车：App Store 版不提供，忽略");
+        return;
+    }
     let cfg = cfg.clone();
     spawn_gated("talk-sidecars", &STARTUP, READY_TIMEOUT, move || {
         let results = ensure_sidecars(&cfg);
@@ -2054,6 +2059,11 @@ pub fn ensure_sidecars_async(cfg: &crate::config::Config) {
 /// 「只收自己拉起的」由 [`ensure_one`] 的登记表保证，用户手工起的 LLM 一律不动。
 /// 拉起命令为空时（默认）只连不拉，日志里会打出该跑哪条命令——翻译失败时原文照常上屏。
 pub fn ensure_llm_async(cfg: &crate::config::Config) {
+    // Mac App Store 版（feature app-store）：本路径不存在。
+    if cfg!(feature = "app-store") {
+        log::info!("LLM 边车：App Store 版不提供，忽略");
+        return;
+    }
     let Some(spec) = sidecar_specs(cfg).into_iter().find(|s| s.name == "LLM") else {
         log::info!("翻译：LLM 引擎不是外部边车（mock），不拉边车");
         return;

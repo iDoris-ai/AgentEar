@@ -209,6 +209,9 @@ fn switch_to_qwen3(m: crate::qwen3::Qwen3Model) {
 // 菜单项的 tag。用一个 action 加 tag 分发，省掉十几个 ObjC 方法。
 /// 开始 / 停止录音。放在菜单第一项——**这是触发键失灵时唯一的出路**，
 /// v0.2.0 漏了它，结果录音开起来就只能靠快捷键停，或者干脆退出程序。
+/// Mac App Store 沙箱版（feature `app-store`）：菜单里隐藏 MAS 子集不提供的项
+/// （模式 / 翻译 / 说话 / 触发键 / Qwen3 常驻 / 自动上屏）。默认构建恒为 false，菜单不变。
+const MAS: bool = cfg!(feature = "app-store");
 const TAG_TOGGLE: isize = 0;
 const TAG_AUTO_PASTE: isize = 1;
 const TAG_OPEN_DATA: isize = 2;
@@ -499,6 +502,7 @@ fn populate(menu: &NSMenu, mtm: MainThreadMarker, target: &MenuTarget) {
     // 单开关的失败形态是用户不知道自己现在**不在**哪个模式里。
     // **标题里带上当前模式**：jason 找不到这个入口，就是因为标题只写「模式」，
     // 而他在找「对话模式」。现在不展开子菜单也能看见自己在哪一档。
+    if !MAS {
     let mode_title = format!(
         "{}: {}",
         i18n::t(lang, Key::ModeSection),
@@ -521,11 +525,14 @@ fn populate(menu: &NSMenu, mtm: MainThreadMarker, target: &MenuTarget) {
             .collect(),
     );
     menu.addItem(&mode_item);
+    }
+
 
     // —— 输入法输出（原文 / 翻译成英文 / 中文 / 泰语）——
     //
     // 紧跟在模式后面：它是输入法模式的输出属性。点一下立刻生效（每轮现读配置）。
     // 不做条件隐藏：对话模式下它不起作用，但少一项比多一项更容易让人以为功能没了。
+    if !MAS {
     let translate_title = format!(
         "{}: {}",
         i18n::t(lang, Key::TranslateSection),
@@ -542,12 +549,15 @@ fn populate(menu: &NSMenu, mtm: MainThreadMarker, target: &MenuTarget) {
             .collect(),
     );
     menu.addItem(&translate_item);
+    }
+
 
     // —— 说话（语系 / 语气 / 音色）——
     //
     // 放在模式后面：先决定「按一下键干什么」，再决定「它怎么说话」。
     // ⚠️ 这三项**只在对话模式有意义**，但**不做条件隐藏**——菜单里少一项比多一项更容易
     // 让人以为「功能没了」（v0.7.0 的「模式」就是这么被投诉的）。
+    if !MAS {
     let speech_item = item(mtm, target, i18n::t(lang, Key::SpeechSection), -1, false);
     speech_item.setEnabled(true);
     // **语言**与**方言**分成两栏（jason 2026-09-15）：
@@ -650,8 +660,11 @@ fn populate(menu: &NSMenu, mtm: MainThreadMarker, target: &MenuTarget) {
     speech_sections.push(voice_item);
     submenu(mtm, &speech_item, speech_sections);
     menu.addItem(&speech_item);
+    }
+
 
     // —— 触发键 ——
+    if !MAS {
     let trigger_item = item(mtm, target, i18n::t(lang, Key::TriggerSection), -1, false);
     trigger_item.setEnabled(true);
     let trusted = crate::hotkey::is_accessibility_trusted();
@@ -683,6 +696,8 @@ fn populate(menu: &NSMenu, mtm: MainThreadMarker, target: &MenuTarget) {
         ],
     );
     menu.addItem(&trigger_item);
+    }
+
 
     // —— 界面语言 ——
     // 每个选项都用它自己的语言书写（English / 中文 / ไทย）：在看不懂的
@@ -744,6 +759,7 @@ fn populate(menu: &NSMenu, mtm: MainThreadMarker, target: &MenuTarget) {
     // 放菜单栏而不是设置窗口（jason 2026-09-26）：这是要**拿来对比体验**的开关，
     // 一点即切，切完下一句就是新形态。只有识别引擎是 Qwen3 且模型已装好时可点——
     // 否则开了也没东西可常驻；但**不隐藏**，让人知道有这个选项。
+    if !MAS {
     {
         let usable = cfg.asr_backend == crate::engine::AsrBackend::SpeechSwift
             && crate::qwen3::is_ready(cfg.qwen3_model);
@@ -757,6 +773,8 @@ fn populate(menu: &NSMenu, mtm: MainThreadMarker, target: &MenuTarget) {
         it.setEnabled(usable);
         menu.addItem(&it);
     }
+    }
+
 
     // —— 输入设备 ——
     let devices = crate::audio::list_input_devices();
@@ -785,6 +803,7 @@ fn populate(menu: &NSMenu, mtm: MainThreadMarker, target: &MenuTarget) {
     menu.addItem(&dev_item);
 
     // —— 自动上屏 ——
+    if !MAS {
     menu.addItem(&item(
         mtm,
         target,
@@ -792,6 +811,8 @@ fn populate(menu: &NSMenu, mtm: MainThreadMarker, target: &MenuTarget) {
         TAG_AUTO_PASTE,
         cfg.auto_paste,
     ));
+    }
+
 
     // —— 与 Agent24 断开且停听时：手动回独立模式（B5，P1 遗留）——
     // 只在停听状态出现：平时多一项只是噪音；停听时它是用户唯一的出路。
@@ -1798,6 +1819,7 @@ fn build_settings_content(
         ));
         content.addSubview(&ui_lang_popup(mtm, &target, lang, row_y));
     }
+    if !MAS {
     {
         let row_y = next_row();
         content.addSubview(&settings_caption(
@@ -1825,7 +1847,10 @@ fn build_settings_content(
         THAI_ROW.with(|r| *r.borrow_mut() = Some((label, b)));
         refresh_thai_settings(lang);
     }
+    }
 
+
+    if !MAS {
     content.addSubview(&checkbox(
         mtm,
         &target,
@@ -1834,6 +1859,8 @@ fn build_settings_content(
         cfg.launch_at_login,
         next_row(),
     ));
+    }
+
     content.addSubview(&checkbox(
         mtm,
         &target,
@@ -1858,6 +1885,7 @@ fn build_settings_content(
             row_y,
         ));
     }
+    if !MAS {
     content.addSubview(&checkbox(
         mtm,
         &target,
@@ -1876,6 +1904,9 @@ fn build_settings_content(
             None => content.addSubview(&info_label(mtm, "", row_y)),
         }
     }
+    }
+
+    if !MAS {
     {
         // SenseVoice+VAD 就绪状态，不绑在下拉框上：没有引擎要切。
         let y = next_row();
@@ -1893,6 +1924,8 @@ fn build_settings_content(
         SV_ROW.with(|r| *r.borrow_mut() = Some((label, b)));
         refresh_sv_row(lang);
     }
+    }
+
     {
         // 语音识别和保留期并排：标题在上、下拉框在下，各占半行。
         // 以前标题用整行宽的 label、下拉框从 x=120 画起，英文会叠在一起。
@@ -1900,45 +1933,50 @@ fn build_settings_content(
         let y_ctl = next_row();
         let (x0, w0) = settings_column(0);
         let (x1, w1) = settings_column(1);
-        content.addSubview(&column_caption(
-            mtm,
-            i18n::t(lang, Key::AsrEngineSection),
-            x0,
-            y_cap,
-            w0,
-        ));
+        if !MAS {
+            content.addSubview(&column_caption(
+                mtm,
+                i18n::t(lang, Key::AsrEngineSection),
+                x0,
+                y_cap,
+                w0,
+            ));
+        }
         content.addSubview(&column_caption(
             mtm,
             i18n::t(lang, Key::RetentionSection),
-            x1,
+            if MAS { x0 } else { x1 },
             y_cap,
-            w1,
+            if MAS { w0 } else { w1 },
         ));
-        let popup = asr_engine_popup(mtm, &target, x0, y_ctl, w0);
-        content.addSubview(&popup);
         content.addSubview(&retention_popup(
             mtm,
             &target,
             lang,
             cfg.retention_days,
-            x1,
+            if MAS { x0 } else { x1 },
             y_ctl,
-            w1,
+            if MAS { w0 } else { w1 },
         ));
-        let mut rows = Vec::new();
-        for (i, _m) in crate::qwen3::Qwen3Model::ALL.iter().enumerate() {
-            let y = next_row();
-            let label = info_label(mtm, "", y);
-            label.setFrame(rect(MARGIN + 18.0, y, SETTINGS_WIDTH - 2.0 * MARGIN - 18.0 - 110.0, ROW_H));
-            let b = action_button(mtm, &target, "", TAG_QWEN3_DL_BASE + i as isize, y);
-            b.setFrame(rect(SETTINGS_WIDTH - MARGIN - 104.0, y, 104.0, ROW_H));
-            content.addSubview(&label);
-            content.addSubview(&b);
-            rows.push((label, b));
+        if !MAS {
+            let popup = asr_engine_popup(mtm, &target, x0, y_ctl, w0);
+            content.addSubview(&popup);
+            let mut rows = Vec::new();
+            for (i, _m) in crate::qwen3::Qwen3Model::ALL.iter().enumerate() {
+                let y = next_row();
+                let label = info_label(mtm, "", y);
+                label.setFrame(rect(MARGIN + 18.0, y, SETTINGS_WIDTH - 2.0 * MARGIN - 18.0 - 110.0, ROW_H));
+                let b = action_button(mtm, &target, "", TAG_QWEN3_DL_BASE + i as isize, y);
+                b.setFrame(rect(SETTINGS_WIDTH - MARGIN - 104.0, y, 104.0, ROW_H));
+                content.addSubview(&label);
+                content.addSubview(&b);
+                rows.push((label, b));
+            }
+            QWEN3_ROWS.with(|r| *r.borrow_mut() = Some(Qwen3Rows { popup, rows }));
+            refresh_qwen3_rows(lang);
         }
-        QWEN3_ROWS.with(|r| *r.borrow_mut() = Some(Qwen3Rows { popup, rows }));
-        refresh_qwen3_rows(lang);
     }
+    if !MAS {
     {
         // Agent24 附着（T6.1.2）：状态 + 一个按钮（没配对 = 连接；配对了 = 断开）。
         let y = next_row();
@@ -1951,6 +1989,8 @@ fn build_settings_content(
         A24_ROW.with(|r| *r.borrow_mut() = Some((label, b)));
         refresh_a24_row(lang);
     }
+    }
+
     {
         let y = next_row();
         let (x0, w0) = settings_column(0);
@@ -2274,6 +2314,10 @@ fn settings_row_count() -> usize {
     // + 语音识别/保留期的标题行和控件行
     // + 每个 Qwen3 一行 + Agent24
     // + 底部按钮两行
+    if MAS {
+        // 界面语言 + 提示音 + 录音上限 + 保留期两行 + 底部按钮两行
+        return 1 + 1 + 1 + 2 + 2;
+    }
     3 + 4 + 1 + 1 + 2 + crate::qwen3::Qwen3Model::ALL.len() + 1 + 2
 }
 
@@ -2296,10 +2340,18 @@ mod tests {
     }
 
     /// 比 v0.28.1 多一行录音上限。少算一行会把底部按钮裁出窗口。
+    #[cfg(not(feature = "app-store"))]
     #[test]
     fn settings_window_counts_the_record_limit_row() {
         let v0281 = 3 + 3 + 1 + 1 + 2 + crate::qwen3::Qwen3Model::ALL.len() + 1 + 2;
         assert_eq!(settings_row_count(), v0281 + 1);
+    }
+
+    /// MAS 子集的设置窗口：界面语言 + 提示音 + 录音上限 + 保留期两行 + 底部两行。
+    #[cfg(feature = "app-store")]
+    #[test]
+    fn mas_settings_window_row_count() {
+        assert_eq!(settings_row_count(), 7);
     }
 
     #[test]

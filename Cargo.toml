@@ -5,6 +5,10 @@ edition = "2021"
 description = "本地语音采集与转写守护进程（快捷键录音 → 本地转写 → 自动上屏）"
 license = "Apache-2.0"
 
+[features]
+# Mac App Store 沙箱版功能子集（docs/app-store.md 阶段 2）。默认不开，默认构建与此前一字节不变。
+app-store = []
+
 [dependencies]
 # L2 全文索引。`bundled` = 把 SQLite 编进二进制，不依赖系统库——
 # 和「单二进制、无运行时」的取向一致。实测随包的是 SQLite 3.50.2，

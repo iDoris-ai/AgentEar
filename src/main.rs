@@ -25,6 +25,8 @@ mod index;
 mod kb;
 mod label;
 mod launch_agent;
+#[cfg(feature = "app-store")]
+mod mas;
 mod paste;
 mod qwen3;
 mod route;
@@ -70,6 +72,17 @@ fn main() -> Result<()> {
     sidecar::install_signal_handlers();
     let vendor = vendor_root()?;
     log::debug!("vendor 目录: {}", vendor.display());
+
+    // MAS 沙箱探针：只在 app-store 构建里存在，放在一切配置/数据目录副作用之前。
+    #[cfg(feature = "app-store")]
+    {
+        if args.iter().any(|a| a == "--mas-probe") {
+            std::process::exit(mas::run_probe(&vendor));
+        }
+        if let Some(i) = args.iter().position(|a| a == "--mas-probe-run") {
+            std::process::exit(mas::run_probe_run(&args[i + 1..]));
+        }
+    }
 
     // 泰语链路的加载冒烟跑在下载线程上，那里拿不到下面这个 `asr` 实例，
     // 所以 vendor 路径单独存一份。必须在任何可能触发下载的东西之前设好。

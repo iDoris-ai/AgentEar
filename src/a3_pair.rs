@@ -456,6 +456,11 @@ pub fn rotate(data_root: &Path) -> Result<(), StopReason> {
 ///
 /// **整个放后台线程**：轮换要代跑 CLI（可能几秒），不能挡住菜单栏图标出现。
 pub fn start(data_root: PathBuf) {
+    // Mac App Store 版（feature app-store）：本路径不存在。
+    if cfg!(feature = "app-store") {
+        log::info!("Agent24 附着：App Store 版不提供，忽略");
+        return;
+    }
     std::thread::Builder::new()
         .name("a3-start".into())
         .spawn(move || start_blocking(data_root))

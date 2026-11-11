@@ -369,6 +369,11 @@ pub fn start(
     on_verify: fn(&Path) -> Result<()>,
     on_installed: fn(),
 ) {
+    // Mac App Store 版（feature app-store）：本路径不存在。
+    if cfg!(feature = "app-store") {
+        log::info!("模型下载：App Store 版不提供，忽略");
+        return;
+    }
     // 0 → 1 的 CAS：只有把 PHASE 从「闲」抢到「下载中」的那个调用者
     // 才真的起线程。**失败状态也允许重来**（2 → 1），用户点重试就该重试。
     // 先看一眼当前相位，别用 swap 抢——抢了再还原会让并发的读方

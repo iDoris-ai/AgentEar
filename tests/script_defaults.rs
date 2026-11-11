@@ -20,6 +20,18 @@ fn read(rel: &str) -> String {
 }
 
 /// App Store 沙箱只声明这个应用真正用到的权限。扬声器没有对应的 entitlement。
+/// 随包 helper（识别引擎）只能是「沙箱 + inherit」，不许带别的 entitlement。
+#[test]
+fn app_store_helper_entitlements_are_sandbox_plus_inherit_only() {
+    let ent = read("assets/entitlements/AppStoreHelper.entitlements");
+    assert!(ent.contains("com.apple.security.app-sandbox"));
+    assert!(ent.contains("com.apple.security.inherit"));
+    assert_eq!(ent.matches("<key>").count(), 2, "inherit 不能和别的 entitlement 同时出现");
+    let bundle = read("scripts/bundle.sh");
+    assert!(bundle.contains("AppStoreHelper.entitlements"), "bundle.sh 要逐个签 helper");
+    assert!(!bundle.contains("--deep --options"), "App Store 签名不能用 --deep（会抹掉 helper 的 entitlements）");
+}
+
 #[test]
 fn app_store_entitlements_enable_sandbox_and_microphone() {
     let ent = read("assets/entitlements/AppStore.entitlements");

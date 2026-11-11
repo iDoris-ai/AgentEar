@@ -90,6 +90,11 @@ pub fn cancel() {
 
 /// 启动下载。重复点击幂等——已在下载/验证中就什么也不做。
 pub fn start(on_installed: fn()) {
+    // Mac App Store 版（feature app-store）：本路径不存在。
+    if cfg!(feature = "app-store") {
+        log::info!("SenseVoice 下载：App Store 版不提供，忽略");
+        return;
+    }
     let (Some(data_root), Some(bin)) = (DATA_ROOT.get().cloned(), bin_path()) else {
         log::error!("SenseVoice+VAD 下载：数据目录/vendor 还没初始化");
         return;

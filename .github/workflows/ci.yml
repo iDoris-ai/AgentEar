@@ -56,6 +56,13 @@ jobs:
       - name: 测试
         run: cargo test --locked
 
+      # Mac App Store 功能子集（docs/app-store.md 阶段 2）：验证它能编译、单测绿。
+      # 只跑单测和脚本默认值测试：tests/builtin_model_locator 等集成测试验的是 speech_swift/Qwen3
+      # 这类 MAS 子集里被压制的功能，在该 feature 下按设计会失败。
+      # 默认构建的上面几步不受影响（feature 默认关）。
+      - name: App Store 功能子集（cargo feature app-store）
+        run: cargo test --locked --features app-store --bin agentear --test script_defaults
+
       # Python 边车（services/tts）的测试。**这一步原来是漏的**，代价实测到了：
       # v0.16.0 把方言 instruct 改成「只写方言名」时有一条测试当场变红，
       # 而 CI 只看 cargo，于是**红着发布了两版**，直到 v0.18.0 才发现
