@@ -107,6 +107,7 @@
 且 SenseVoice README 明说「转换版可能写了不同条款，要单独核对」。
 
 按 v1.1 文本，发行时我们**至少应**：注明出处与作者、保留模型名称（`SenseVoiceSmall`）。⚠️ **商用是否允许尚无许可方的最终确认**（见 §1 表；§3 字面是「仅作参考和学习」），而它是**随包默认 ASR**，所以这是本表里优先级最高的一项：建议由 jason 向许可方（FunASR/Alibaba）发问或换用许可清晰的 ASR 作随包默认。
+**2026-11-11 拍板**：开源 / 直接分发版不换；App Store 版（视同商用）换成许可清晰的模型，候选调研见 [`asr-commercial-alternatives.md`](asr-commercial-alternatives.md)（首选 Qwen3-ASR-0.6B，Apache-2.0）。
 **已改（FU-23，2026-11-11）**：`NOTICE` 已改写为「FunASR Model Open Source License Agreement v1.1（官方权重）；转换版 HF 页标注 Apache-2.0 但对不上」，附协议链接与 §2.2 使用要求，并标注商用待确认。
 
 **⚠️ 待决（需 jason 处理）：SenseVoiceSmall 商用是否允许，未获许可方确认。** 在拿到确认前，本文不下「可商用」结论；备选是换用许可清晰的 ASR 作随包默认。
