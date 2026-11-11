@@ -19,11 +19,19 @@ WORK="$OUT/work"
 
 # ADR-0004 §4 选定的模型。换模型只改这三行。
 HF_REPO="biodatlab/distill-whisper-th-large-v3"
-# 入库记录的 revision 前缀（ADR-0004 §2）。**只比前缀**——记录里就只有这么长。
-HF_REV_PREFIX="62df42cecab9"
+# T3.5.5：钉完整 40 位 commit（2026-11-10 取自 HF API，前 12 位即 ADR-0004 §2
+# 入库记录的 62df42cecab9；当天 HF HEAD 与之一致）。下载走 resolve/<commit>/，
+# 不再取 HEAD 再比前缀。
+HF_REV="62df42cecab9f484226ad5f9afdb557552021bbb"
+HF_REV_PREFIX="${HF_REV:0:12}"
 # 量化产物的 sha256 前 12 位（ADR-0004 §4 表）。48 bit，排碰撞够用；
 # 它证明的是「与入库记录一致」，不是「逐字节一致」——转换是有损的。
 EXPECT_SHA12="5bfc04f1931a"
+
+# T3.5.5：mel_filters.npz 来自 openai/whisper 的这个 commit，文件 sha256 如下
+# （2026-11-10 实测，4271 字节；该文件在 main 上与此 commit 逐字节相同）。
+MEL_COMMIT="86098128c0b4f24f0e2aa2994de830614b474227"
+MEL_SHA256="7450ae70723a5ef9d341e3cee628c7cb0177f36ce42c44b7ed2bf3325f0f6d4c"
 
 QUANT="$WCPP/build/bin/quantize"
 CONVERT="$WCPP/models/convert-h5-to-ggml.py"
@@ -79,19 +87,9 @@ hf_get() {  # hf_get <repo相对路径> <目标文件> <是否必需>
 
 mkdir -p "$HF_DIR"
 
-# 先核对 revision。**上游动了就必须停**，不能静默继续：产物指纹一定对不上，
-# 而那时的报错会指向量化步骤，跟真正的原因差着十万八千里。
-HF_REV=""
-for ep in "${ENDPOINTS[@]}"; do
-  HF_REV="$(curl -sfL --max-time 60 "$ep/api/models/$HF_REPO" \
-    | "$VENV/bin/python" -c 'import json,sys; print(json.load(sys.stdin)["sha"])' 2>/dev/null)" && break
-done
-[ -n "$HF_REV" ] || die "拿不到 $HF_REPO 的 revision（试过 ${ENDPOINTS[*]}）"
-case "$HF_REV" in
-  "$HF_REV_PREFIX"*) echo "    revision $HF_REV ✅" ;;
-  *) die "HF HEAD 是 ${HF_REV}，与入库记录的 ${HF_REV_PREFIX}… 不符。
-!! 上游更新了模型。要么钉住旧 revision，要么重跑 ADR-0004 §3/§4 的评测。" ;;
-esac
+# revision 已在上面钉死，下载直接走 resolve/<commit>/，上游再动也影响不到这里。
+[ "${#HF_REV}" -eq 40 ] || die "HF_REV 必须是完整 40 位 commit"
+echo "    revision ${HF_REV}（钉死）"
 
 # 转换脚本只读这几个文件。整仓 clone 会顺带拉走一份 3 GB 的 pytorch_model.bin。
 hf_get config.json              "$HF_DIR/config.json"              required
@@ -113,10 +111,13 @@ echo "==> 取 mel_filters.npz"
 MEL="$ASSETS/whisper/assets/mel_filters.npz"
 if [ ! -f "$MEL" ]; then
   mkdir -p "$(dirname "$MEL")"
+  # T3.5.5：钉 openai/whisper 的 commit + 文件 sha256，不再取 main。
   curl -sfL -o "$MEL" \
-    https://raw.githubusercontent.com/openai/whisper/main/whisper/assets/mel_filters.npz \
+    "https://raw.githubusercontent.com/openai/whisper/${MEL_COMMIT}/whisper/assets/mel_filters.npz" \
     || die "mel_filters.npz 下载失败"
 fi
+[ "$(shasum -a 256 "$MEL" | awk '{print $1}')" = "$MEL_SHA256" ] \
+  || { rm -f "$MEL"; die "mel_filters.npz 的 sha256 与钉死的值不符（已删除，重跑会重新下载）"; }
 # large-v3 系走 128 维 mel，要和 config.json 的 num_mel_bins 对上
 "$VENV/bin/python" -c "
 import json, numpy, sys

@@ -208,7 +208,7 @@ allow_force_pushes / deletions: false
 # ① 版本号 + 文档 + notes 在同一个 PR 里
 #    - Cargo.toml 的 version
 #    - CLAUDE.md 顶部「当前状态」那一行
-#    - docs/releases/vX.Y.Z-notes.md（**发版正文，入库**）
+#    - docs/releases/vX.Y.Z-notes.md（**发版正文，入库；v0.28.0 起先英文，下面附中文**）
 #    - docs/agent/progress.md 加一条本轮记录
 # ② bundle
 scripts/bundle.sh                              # → dist/AgentEar-X.Y.Z-macos-arm64.zip

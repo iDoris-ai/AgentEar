@@ -1,0 +1,33 @@
+A = docs/data/thai-corpus-arm-2026-09/qwen3-asr-2026-09-08.tsv
+B = docs/data/thai-corpus-arm-2026-09/whisper-d-2026-11-10.tsv
+重采样 20000 次，种子 20261110，Δ = CER(A) − CER(B)
+
+全部                           n=22  A=16.70%  B=13.74%  Δ= +2.96 pp  95%CI=[ -5.60, +11.79] pp  区间含 0（未检出差异）
+code-switch(daily+devops)    n=16  A=22.78%  B=17.12%  Δ= +5.66 pp  95%CI=[ -6.04, +17.01] pp  区间含 0（未检出差异）
+纯泰语对照                        n= 6  A= 0.00%  B= 4.44%  Δ= -4.44 pp  95%CI=[ -8.83,  -0.77] pp  区间不含 0；n<10，只作描述，不下显著性结论
+
+注：「未检出差异」≠「无差异」≠「等效」；没有预定义非劣界，不做非劣结论。
+逐条 CER：
+category	take	A_edits	B_edits	ref_len	A_cer	B_cer
+control_thai_only	arm-001	0	2	38	0.0000	0.0526
+control_thai_only	arm-002	0	2	51	0.0000	0.0392
+control_thai_only	arm-003	0	0	45	0.0000	0.0000
+control_thai_only	arm-004	0	8	61	0.0000	0.1311
+control_thai_only	arm-005	0	0	45	0.0000	0.0000
+control_thai_only	arm-006	0	0	30	0.0000	0.0000
+daily_collaboration	arm-001	14	13	49	0.2857	0.2653
+daily_collaboration	arm-002	20	15	53	0.3774	0.2830
+daily_collaboration	arm-003	14	8	37	0.3784	0.2162
+daily_collaboration	arm-004	4	1	47	0.0851	0.0213
+daily_collaboration	arm-005	0	8	47	0.0000	0.1702
+daily_collaboration	arm-006	9	9	38	0.2368	0.2368
+daily_collaboration	arm-007	16	6	39	0.4103	0.1538
+daily_collaboration	arm-008	0	0	33	0.0000	0.0000
+devops	arm-001	0	6	60	0.0000	0.1000
+devops	arm-002	22	0	54	0.4074	0.0000
+devops	arm-003	3	27	54	0.0556	0.5000
+devops	arm-004	5	2	44	0.1136	0.0455
+devops	arm-005	8	16	42	0.1905	0.3810
+devops	arm-006	23	7	46	0.5000	0.1522
+devops	arm-007	20	0	50	0.4000	0.0000
+devops	arm-008	11	9	49	0.2245	0.1837
