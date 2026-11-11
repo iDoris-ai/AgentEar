@@ -568,7 +568,7 @@
 
 ---
 
-### T3.4.19 录音中途崩溃不再丢整段：5 秒 checkpoint + 启动抢救  `IN_PROGRESS`（2026-11-11，分支 `feat/crash-recovery`，PR 见 GitHub）
+### T3.4.19 录音中途崩溃不再丢整段：5 秒 checkpoint + 启动抢救  `DONE`（2026-11-11，PR #124，v0.29.0）
 - **背景**：ADR-0007 §8 第 7 条——提交前的录音崩溃时整段丢失；2026-09-26 jason 曾「接受风险」，2026-11-11 同意补做。
 - **做法**（`src/store.rs`）：`Session::write` 每 `CHECKPOINT_EVERY`=5s checkpoint：flush 与 hound 共享的 BufWriter、`pwrite` 回填头部两个长度（游标不动；不用 hound 的 flush，因其出错时游标会停在头部）、复制句柄 `sync_data`；在 worker 线程调用，不在 CoreAudio 回调线程。启动 `sweep_tmp` → `recover_one`：`flock` 排除活会话；校验 44 字节头格式；数据取到文件末尾（不信头里长度）、丢半个采样、回填 RIFF/data size、fsync、与正常 commit 共用 `publish`（rename → fsync 目录 → 清单，清单加 `recovered:true`）。<0.3s 或坏头才删。
 - `main.rs::worker` 空闲时逐条给抢救录音补转写，只写 `derived/transcripts/`；失败只记日志，可手动 `--transcribe`。
@@ -1417,7 +1417,7 @@
 - `speech.state=started` 改为真正开播才发；宿主拉起的 TTS 空闲 `tts_idle_secs`（默认 600）回收，只收自己拉起的。
 - 验收：单测 529/0、contracts 4/0、`--say` 真机通过。**未实测**：边车真没跑时的真实拉起、空闲回收杀进程那一步、与物理按键打断的竞态。已知局限见 FU-25。
 
-### T-TRANSLATE-1 翻译输入  `IN_REVIEW`（jason 2026-11-11 拍板「输入法模式的输出属性」；不用三连击）
+### T-TRANSLATE-1 翻译输入  `DONE`（PR #125，v0.29.0）（jason 2026-11-11 拍板「输入法模式的输出属性」；不用三连击）
 - 分支 `feat/translate-input`。设计与诚实边界见 `CLAUDE.md`「翻译输入」小节。
 - 做了：`config.input_translate`（off/en/zh/th，缺键 = off）；菜单「输入法输出」子菜单 + 菜单栏 `→EN` 标记；语音指令（开启/关闭翻译、翻译成X、「翻译成X：……」一次性）；`src/translate.rs`（专用提示词、15 s 超时、任何失败退回原文）；仅拉 LLM 边车的 `talk::ensure_llm_async`；CLI `--translate <文字> --to en|zh|th`；译文另存 `derived/translations/`。
 - **未验收**：没有真实按键 / 真机菜单点击；泰语目标质量没有可测办法（模型卡只声明中英）；译文落盘目录只被写、没有任何读取方。
