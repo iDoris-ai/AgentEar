@@ -481,6 +481,11 @@ pub fn install_blocking(m: Qwen3Model) -> Result<()> {
     });
     let r = install(m, &cancel);
     JOBS.lock().unwrap_or_else(|e| e.into_inner())[m.index()] = None;
+    // M1：`--fetch-qwen3`「只装不选」——没有回调去回切，保持改动前的行为：装好即清标记，
+    // 不让下次守护进程启动悄悄回切。（`start` 的后台路径不清，等回调回切后再清。）
+    if r.is_ok() {
+        clear_recovering_marker();
+    }
     r
 }
 

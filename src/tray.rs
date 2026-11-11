@@ -155,10 +155,9 @@ fn should_switch_back(
 }
 
 /// 升级空档的运行时补完之后调用（`qwen3::start` 的安装成功回调）。
-/// **磁盘标记已经被清过了**——`qwen3::install`（`start` 和 `install_blocking`
-/// 共用的核心函数）在往下走到这个回调之前，成功路径上已经统一清掉
-/// `runtime-recovering.json`（PR #106 评审第 3 轮：收敛到一个地方清，
-/// 这里不用重复清一遍）。这个函数剩下要做的只是：这一次装好之后，
+/// **磁盘标记此时还在**（FU-21）：`qwen3::install` 不再清它，要等回切落盘之后
+/// （`switch_to_qwen3`）或用户放弃恢复时才清，免得「运行时已装好、回切未落盘」时丢线索。
+/// 这个函数要做的是：这一次装好之后，
 /// 要不要真的把识别引擎切回去。
 pub fn on_qwen3_runtime_recovered(m: crate::qwen3::Qwen3Model) {
     let recovering = {
@@ -198,11 +197,17 @@ fn switch_to_qwen3(m: crate::qwen3::Qwen3Model) {
     // 自动切过去、恢复完成换回去）——收在这一处清掉恢复线索，不用在每个调用点
     // 分别记得清（PR #106 评审第 3 轮）。
     // FU-21：先把回切落盘，**再**清恢复标记——反过来的话，两步之间退出就丢了线索。
-    config::update(|c| {
+    let saved = config::update(|c| {
         c.asr_backend = crate::engine::AsrBackend::SpeechSwift;
         c.qwen3_model = m;
     });
-    abandon_qwen3_recovery();
+    if saved {
+        abandon_qwen3_recovery();
+    } else {
+        // L1：没落盘就保留标记，下次启动 SwitchBack 再来一遍
+        *QWEN3_RECOVERING.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        log::warn!("回切配置保存失败：保留恢复标记，下次启动重试");
+    }
     let resident = config::get().qwen3_resident;
     log::info!(
         "识别引擎改为 {}（{}，下次录音生效）",
