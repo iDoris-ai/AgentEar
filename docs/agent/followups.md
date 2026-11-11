@@ -27,6 +27,12 @@
   - **验证**：修复后连跑 30 次全量 `cargo test`，**0 次失败**（修复前 20 次里 1 次）。
   - ⚠️ **教训**：这个 flake 的形状（「随机一条用例失败，每次还不是同一条」）本身就是**共享状态**的指纹，而当时的记录只写了「身份未知」。**下次遇到 flake，第一条要记的不是「它又失败了」，而是「这次失败的是哪一条」**——两次不同的名字几乎就能定性。
   - **顺带更正**：`docs/benchmarks-m3.md` §7.5 记的是「测量设计缺陷比测量误差危险得多」，本条是它的另一面：**并发测试里的共享资源不比测量前提更安全**。
-- [ ] FU-17 · B · src=2026-11-10 文档对账 · 2026-11-10 · #114 的新 speech-server（解码上限 6144，`AGENTEAR_REV=2`）还没发布：需重跑 `scripts/build-speech-runtime.sh`、发新 `speech-runtime-<版本>` release、更新 `src/qwen3.rs` 常量与 `SPEECH_VERSION`；15 分钟录音的解码从未实测
-- [ ] FU-18 · B · src=2026-11-10 文档对账 · 2026-11-10 · `feat/app-store-sandbox` 对账时只有本机 worktree 的未提交改动（无远端、无 PR），tasks.md 的 T-APPSTORE-1 设计/验收写「未核实」；负责人补范围与设计文档
-- [ ] FU-19 · B · src=2026-11-10 文档对账 · 2026-11-10 · PR #112（v0.28.0 release notes 英文在前）仍 open
+- [x] FU-17 · B · src=2026-11-10 文档对账 · 2026-11-10 · #114 的新 speech-server（解码上限 6144，`AGENTEAR_REV=2`）还没发布：需重跑 `scripts/build-speech-runtime.sh`、发新 `speech-runtime-<版本>` release、更新 `src/qwen3.rs` 常量与 `SPEECH_VERSION`；15 分钟录音的解码从未实测 · done=PR#121（v0.28.2）
+- [x] FU-18 · B · src=2026-11-10 文档对账 · 2026-11-10 · `feat/app-store-sandbox` 对账时只有本机 worktree 的未提交改动（无远端、无 PR），tasks.md 的 T-APPSTORE-1 设计/验收写「未核实」；负责人补范围与设计文档 · done=PR#118
+- [x] FU-19 · B · src=2026-11-10 文档对账 · 2026-11-10 · PR #112（v0.28.0 release notes 英文在前）仍 open · done=PR#112
+- [ ] FU-20 · A · src=PR#121-codex High · 2026-11-11 · 解码上限 6144 只在 Qwen3「常驻」路径生效；常驻默认关，关掉或常驻失败时走一次性 `speech` CLI，那条仍是上游 448——默认设置下的 Qwen3 用户长录音仍会被截断。要么让 CLI 路径也带上 maxTokens（补丁 + 运行时 rev 3），要么把常驻设为默认（内存代价见 T3.5.9）
+- [ ] FU-21 · B · src=PR#121-codex Medium · 2026-11-11 · `.2` 运行时的安装标记先于「回切 speech_swift 后端」落盘：升级中途退出时 `recovery_decision` 会判成「没有空档」，不再恢复。既有缺口，非 #121 引入
+- [ ] FU-22 · B · src=v0.28.2 冒烟 · 2026-11-11 · `--diagnose` 在本机卡在 CoreAudio `AudioDeviceCreateIOProcID`（等 coreaudiod，sample 抓到），v0.28.0 旧包同样卡——疑似新签名包的麦克风 TCC 待授权或机器 swap 满。集成测试 `builtin_model_locator::diagnose_and_fetch_thai_keep_speech_swift_and_write_recovery_marker` 因此在本机 20s 超时（时好时坏，CI 绿）。修法候选：diagnose 打开输入流加超时并报「麦克风无响应/待授权」，而不是无限等
+- [ ] FU-23 · A · src=PR#116 · 2026-11-11 · 许可证缺口：NOTICE 把 SenseVoiceSmall 标成 Apache-2.0（实为 FunASR Model License v1.1，§3「仅作参考和学习」，商用未获许可方最终确认——需 jason 向许可方确认）；Ornith-1.0-9B 找不到 LICENSE；speech-runtime tarball 缺 Apache-2.0 全文与 MLX/Swift 依赖声明；NOTICE 缺 whisper.cpp / speech-swift / MLX / 泰语模型条目；ADR-0007 里「VoiceChat 11B 仅研究用途」应改为 OpenMDW-1.1。详见 docs/licenses.md
+- [ ] FU-24 · B · src=PR#119 · 2026-11-11 · 未锁项：vendor 的 llama-funasr-sensevoice / whisper-cli 无构建脚本与上游 commit；whisper.cpp checkout 未核对 ADR-0004 的 commit；泰语构建的 torch/transformers/numpy 未钉；pip 间接依赖未钉；setup-llm / build-thai-model 大权重无逐文件 sha256。详见 docs/upstream-pins.md
+- [ ] FU-25 · B · src=PR#120 · 2026-11-11 · 宿主冷启动 TTS 期间占着启动闸，这时切进对话模式，对话模式那次拉起被跳过、LLM 不会顺带拉起，要再切一次
