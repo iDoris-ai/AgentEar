@@ -893,6 +893,55 @@ fn smoke(m: Qwen3Model) -> Result<()> {
     Ok(())
 }
 
+/// 一次性 `speech transcribe` CLI 的解码上限固定是上游的 448 个 token，
+/// **且没有任何参数能改**（`speech transcribe --help` 里的 `--max-tokens` 只对 MOSS 引擎
+/// 生效，对 qwen3 传了会被忽略——2026-11-11 在 v0.0.28 官方包上用 353 秒录音实测，
+/// 加 `--max-tokens 50` 前后输出字节数一样）。448 个 token 大约是 1–3 分钟的话
+///（282 秒的真实录音要 736 个）。所以**录音超过这个时长的一次性转写改走临时
+/// 拉起的 speech-server**（补丁版，上限 6144），转完即停，见 [`transcribe_long_oneshot`]。
+/// 取 60 s：短于它的绝大多数录音在 448 内，继续走 CLI，行为一个字节不变。
+pub const ONESHOT_LONG_WAV_SECS: f64 = 60.0;
+
+/// WAV 时长（秒）。读不了头就返回 `None`，调用方按「短」处理（走原来的 CLI）。
+pub fn wav_secs(wav: &Path) -> Option<f64> {
+    let r = hound::WavReader::open(wav).ok()?;
+    let spec = r.spec();
+    if spec.sample_rate == 0 || spec.channels == 0 {
+        return None;
+    }
+    Some(r.duration() as f64 / spec.sample_rate as f64)
+}
+
+/// 一次性路径要不要改走服务：只看时长，纯函数，便于钉住阈值。
+pub fn oneshot_needs_server(secs: Option<f64>) -> bool {
+    secs.is_some_and(|s| s > ONESHOT_LONG_WAV_SECS)
+}
+
+/// 单次请求的 curl 超时（秒）。常驻服务原来固定 120 s：15 分钟的录音在
+/// RTF 0.16 下要约 144 s，会被掐断。按时长放宽，下限仍是 120 s。
+fn request_timeout_secs(audio_secs: Option<f64>) -> u64 {
+    let base: f64 = 120.0;
+    let scaled = audio_secs.map_or(0.0, |s| s * 0.5 + 60.0);
+    base.max(scaled).ceil() as u64
+}
+
+/// 长录音的一次性转写：临时拉起（或复用已有的）补丁版 speech-server 转写。
+/// 常驻开关**关着**时转完立刻停掉服务，内存行为与「逐次」一致，只是冷启动换成
+/// 服务启动；常驻开着就保留给空闲回收。**调用方负责失败时退回 CLI**（会被截断，
+/// 但不丢整轮）。
+pub fn transcribe_long_oneshot(
+    m: Qwen3Model,
+    wav: &Path,
+    language: Option<&str>,
+    context: &str,
+) -> Result<crate::asr::Transcript> {
+    let r = server_transcribe(m, wav, language, context);
+    if !crate::config::get().qwen3_resident {
+        stop_server("长录音一次性转写结束");
+    }
+    r
+}
+
 // —— 常驻服务 ——
 
 struct Server {
@@ -1252,7 +1301,9 @@ fn transcribe_on_server(
         ensure_server_locked(&mut slot, m)?
     };
     let mut cmd = Command::new("/usr/bin/curl");
-    cmd.args(["-sS", "--fail-with-body", "--max-time", "120"])
+    let max_time = request_timeout_secs(wav_secs(wav));
+    cmd.args(["-sS", "--fail-with-body", "--max-time"])
+        .arg(max_time.to_string())
         .arg("-F")
         .arg(format!("file=@\"{}\"", wav.display()))
         .arg("-F")
@@ -1713,6 +1764,30 @@ mod tests {
             .and_then(|(_, v)| v)
             .map(|v| v.to_string_lossy().to_string());
         assert_eq!(val, Some(AGENTEAR_MLX_CACHE_MB.to_string()));
+    }
+
+    #[test]
+    fn long_wav_threshold_and_timeout() {
+        assert!(!oneshot_needs_server(None), "读不出时长按短处理，走原 CLI");
+        assert!(!oneshot_needs_server(Some(ONESHOT_LONG_WAV_SECS)));
+        assert!(oneshot_needs_server(Some(ONESHOT_LONG_WAV_SECS + 0.1)));
+        assert_eq!(request_timeout_secs(None), 120);
+        assert_eq!(request_timeout_secs(Some(30.0)), 120);
+        assert_eq!(request_timeout_secs(Some(900.0)), 510, "15 分钟档不能被 120 s 掐断");
+    }
+
+    #[test]
+    fn wav_secs_reads_header_duration() {
+        let dir = std::env::temp_dir().join(format!("ae-wavsecs-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("a.wav");
+        let spec = hound::WavSpec { channels: 1, sample_rate: 16000, bits_per_sample: 16, sample_format: hound::SampleFormat::Int };
+        let mut w = hound::WavWriter::create(&p, spec).unwrap();
+        for _ in 0..32000 { w.write_sample(0i16).unwrap(); }
+        w.finalize().unwrap();
+        assert_eq!(wav_secs(&p), Some(2.0));
+        assert_eq!(wav_secs(&dir.join("missing.wav")), None);
+        let _ = fs::remove_dir_all(&dir);
     }
 
     /// 常驻转写的解码上限必须盖住设置里最长的 15 分钟。

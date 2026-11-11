@@ -2610,10 +2610,50 @@ pub fn restart_self() {
     }
 }
 
+/// `--diagnose` 探测麦克风的超时。正常机器上几十毫秒就返回。
+const DIAGNOSE_AUDIO_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
+/// 设了就整段跳过麦克风探测（集成测试用：它们不需要音频，也不该被 CoreAudio 拖住）。
+const DIAGNOSE_SKIP_AUDIO_ENV: &str = "AGENTEAR_DIAGNOSE_SKIP_AUDIO";
+
+/// 在独立线程里跑 `f`，最多等 `limit`；超时返回 `None`，线程留着自生自灭。
+fn probe_with_timeout<T: Send + 'static>(
+    limit: std::time::Duration,
+    f: impl FnOnce() -> T + Send + 'static,
+) -> Option<T> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::Builder::new()
+        .name("diagnose-audio-probe".into())
+        .spawn(move || {
+            let _ = tx.send(f());
+        })
+        .ok()?;
+    rx.recv_timeout(limit).ok()
+}
+
+/// 麦克风探测本体（会被 CoreAudio 卡住，必须经 [`probe_with_timeout`] 调用）。
+fn probe_input_device() -> Vec<String> {
+    use cpal::traits::{DeviceTrait, HostTrait};
+    let host = cpal::default_host();
+    match host.default_input_device() {
+        Some(d) => {
+            let mut v = vec![format!("  默认: {}", d.name().unwrap_or_else(|_| "?".into()))];
+            match d.default_input_config() {
+                Ok(c) => v.push(format!(
+                    "  配置: {} Hz, {} ch, {:?}",
+                    c.sample_rate().0,
+                    c.channels(),
+                    c.sample_format()
+                )),
+                Err(e) => v.push(format!("  ❌ 读取配置失败: {e}（麦克风权限？）")),
+            }
+            v
+        }
+        None => vec!["  ❌ 找不到输入设备".to_string()],
+    }
+}
+
 /// 环境自检。「按了没反应」时先跑这个。
 fn diagnose(vendor: &std::path::Path, data_root: &std::path::Path) -> Result<()> {
-    use cpal::traits::{DeviceTrait, HostTrait};
-
     println!("=== AgentEar 环境自检 ===\n");
 
     let trusted = hotkey::is_accessibility_trusted();
@@ -2627,21 +2667,21 @@ fn diagnose(vendor: &std::path::Path, data_root: &std::path::Path) -> Result<()>
     }
 
     println!("\n音频输入设备:");
-    let host = cpal::default_host();
-    match host.default_input_device() {
-        Some(d) => {
-            println!("  默认: {}", d.name().unwrap_or_else(|_| "?".into()));
-            match d.default_input_config() {
-                Ok(c) => println!(
-                    "  配置: {} Hz, {} ch, {:?}",
-                    c.sample_rate().0,
-                    c.channels(),
-                    c.sample_format()
-                ),
-                Err(e) => println!("  ❌ 读取配置失败: {e}（麦克风权限？）"),
-            }
+    // CoreAudio 在麦克风 TCC 待授权 / coreaudiod 无响应时，查设备与配置的调用会
+    // 一直不返回（FU-22：sample 抓到卡在 AudioDeviceCreateIOProcID 一带）。
+    // 放到独立线程 + 超时：超时就报「无响应」并继续其余自检。
+    // **线程会泄漏**：CoreAudio 调用没法取消，卡住的线程一直留到进程退出被带走——
+    // `--diagnose` 是一次性命令，打完报告就退出，可以接受。
+    if std::env::var_os(DIAGNOSE_SKIP_AUDIO_ENV).is_some() {
+        println!("  ⚪ 已跳过（{DIAGNOSE_SKIP_AUDIO_ENV} 已设置，测试/无人值守用）");
+    } else {
+        match probe_with_timeout(DIAGNOSE_AUDIO_TIMEOUT, probe_input_device) {
+            Some(lines) => lines.iter().for_each(|l| println!("{l}")),
+            None => println!(
+                "  ❌ 麦克风无响应（{} s 没返回，可能在等待麦克风授权或设备被占用）；继续其余自检",
+                DIAGNOSE_AUDIO_TIMEOUT.as_secs()
+            ),
         }
-        None => println!("  ❌ 找不到输入设备"),
     }
 
     println!("\nASR 依赖（所选引擎：SenseVoice+VAD）:");
@@ -3521,6 +3561,19 @@ mod host_wiring_tests {
         ] {
             assert!(!is_model_pair_not_ready(&anyhow::anyhow!(msg)));
         }
+    }
+
+    /// 探测线程卡住时 `probe_with_timeout` 必须按时返回 `None`，不能跟着卡（FU-22）。
+    #[test]
+    fn probe_with_timeout_gives_up_on_a_hung_probe() {
+        let t = std::time::Instant::now();
+        let r = probe_with_timeout(std::time::Duration::from_millis(100), || {
+            std::thread::sleep(std::time::Duration::from_secs(30));
+            1
+        });
+        assert_eq!(r, None);
+        assert!(t.elapsed() < std::time::Duration::from_secs(5));
+        assert_eq!(probe_with_timeout(std::time::Duration::from_secs(5), || 7), Some(7));
     }
 
     /// `--diagnose`/`--fetch-thai` 跳过 preflight，但仍参与 Qwen3 恢复判定。
