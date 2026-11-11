@@ -19,6 +19,34 @@ fn read(rel: &str) -> String {
     fs::read_to_string(&path).unwrap_or_else(|e| panic!("读不了 {}: {e}", path.display()))
 }
 
+/// App Store 沙箱只声明这个应用真正用到的权限。扬声器没有对应的 entitlement。
+#[test]
+fn app_store_entitlements_enable_sandbox_and_microphone() {
+    let ent = read("assets/entitlements/AppStore.entitlements");
+    for key in [
+        "com.apple.security.app-sandbox",
+        "com.apple.security.device.microphone",
+        "com.apple.security.device.audio-input",
+        "com.apple.security.network.client",
+        "com.apple.security.network.server",
+    ] {
+        assert!(ent.contains(key), "App Store entitlements 缺少 {key}");
+    }
+    assert!(
+        !ent.contains("speaker") && !ent.contains("audio-output"),
+        "播放不需要单独的扬声器 entitlement"
+    );
+    let bundle = read("scripts/bundle.sh");
+    assert!(
+        bundle.contains("AGENTEAR_DISTRIBUTION:-}") && bundle.contains("app-store"),
+        "沙箱只在 App Store 打包时签上"
+    );
+    assert!(
+        bundle.contains("assets/entitlements/AppStore.entitlements"),
+        "App Store 签名要带上这份 entitlements"
+    );
+}
+
 /// 默认档**只能**是 4bit，而且必须是显式写出来的默认值（不是「碰巧为空」）。
 #[test]
 fn the_default_tts_quant_is_4bit() {

@@ -1400,10 +1400,10 @@
 
 ## 进行中的三条线（2026-11-10 记录；只写能核实的）
 
-### T-APPSTORE-1 App Store 分发  `IN_PROGRESS`
-- 分支 `feat/app-store-sandbox`，本机 worktree `/Users/jason/Dev/tools/AgentEar-appstore`，基于 main `07ce7fa`，**尚无提交、`origin` 上没有该分支、没有 PR**（2026-11-10 对账期间才在本机出现）。
-- 工作区未提交改动涉及：`docs/agent/tasks.md`、`scripts/bundle.sh`、`src/main.rs`、`tests/script_defaults.rs`，另有未跟踪的 `assets/entitlements/` 与 `docs/app-store.md`（`git diff origin/main --stat`：约 +112 / -7，不含未跟踪文件）。
-- 具体设计、范围、验收：**未核实**（只看了文件列表，没有读内容）。
+### T-APPSTORE-1 App Store 分发：沙箱底座 + 可行性审计（原 T7.1）  `PR_OPEN`（2026-11-10，PR #118，分支 `feat/app-store-sandbox`）
+- 做法：`assets/entitlements/AppStore.entitlements`；`bundle.sh` 的 `AGENTEAR_DISTRIBUTION=app-store` 签名分支；`resolve_data_root`（沙箱数据进容器，HOME 已在容器时不嵌套）；审计结论见 `docs/app-store.md`。
+- 结论：现状不能原样上 MAS，4 个硬阻塞（右 Command/CGEventTap、自动 ⌘V、运行时下载 speech-server、Python 边车）；可行子集 = 输入法模式 + 随包 SenseVoice + 组合键 + 剪贴板。
+- 下一步：阶段 1 沙箱原型（真机验证标「未核实」的项）。默认构建行为不变。
 
 ### T-HOSTSPEAK-1 宿主 speak 时按需拉起 TTS  `IN_PROGRESS`
 - 分支 `fix/host-speak-tts`，本机 worktree `/Users/jason/Dev/tools/AgentEar-host-speak`，基于 main `07ce7fa`，**尚无提交，也没推到远端、没有 PR**。

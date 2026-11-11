@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- Mac App Store 必须开。这是 Xcode 里 Signing & Capabilities → App Sandbox
+         写下的同一个键。开发者网站上没有这一项可勾。 -->
+    <key>com.apple.security.app-sandbox</key>
+    <true/>
+
+    <!-- 麦克风，两把锁都要。
+         microphone：App Sandbox 的 Audio Input。
+         audio-input：Hardened Runtime 的 Audio Input。只开一把，另一层仍会拒绝录音。
+         系统弹窗文案仍是 Info.plist 的 NSMicrophoneUsageDescription，不用另外申请。 -->
+    <key>com.apple.security.device.microphone</key>
+    <true/>
+    <key>com.apple.security.device.audio-input</key>
+    <true/>
+
+    <!-- 出站：下载模型、访问本机 LLM/TTS。入站：本进程拉起的识别服务要在本机监听。 -->
+    <key>com.apple.security.network.client</key>
+    <true/>
+    <key>com.apple.security.network.server</key>
+    <true/>
+</dict>
+</plist>
