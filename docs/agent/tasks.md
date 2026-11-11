@@ -989,7 +989,7 @@
   **FireRedTTS3 相应地从候选里移除**（引入它的唯一理由就是台湾腔）。
   VoxCPM2 的 9 种方言够用，不需要第二个 TTS 引擎。台湾腔记为已知缺口。
 
-### T3.5.5 上游版本锁定与回滚流程  `READY`
+### T3.5.5 上游版本锁定与回滚流程  `IN PROGRESS`（2026-11-10：清单/补锁/回滚/Qwen3 运行时能力探测见 [`docs/upstream-pins.md`](../upstream-pins.md)；vendor 二进制构建脚本与 whisper.cpp commit 核对留作后续）
 - 锁到 commit + release 资产 SHA-256（tag 会被移动、asset 会被替换）。
 - 保留已验证版本的本地副本或可复建脚本，写明回滚流程。
 - 加版本握手 + capability probe + CLI 输出契约测试；
@@ -1141,6 +1141,11 @@
     （合成 tab / `${VAR}` / 全角括号三个用例，改坏了当场报错退出，不会悄悄又变假绿）。
 
 ---
+
+- **v0.28.2 发版准备（2026-11-10，`DONE`，待合并后打包 / 打 tag）**：#114 的 speech-server 补丁（Qwen3 `maxTokens` 448→6144）
+  编成 `speech-runtime-v0.0.28-agentear.2` 并发布，`src/qwen3.rs` 的 `SPEECH_VERSION` / URL / sha256 / 字节数从实际产物回填。
+  实测：281.75 s 真实录音走新 `speech-server` 常驻接口，HTTP 200、1295 字（448 的旧二进制只有约 774 字）。
+  已知：本机 agent 环境里 `speech` CLI 套 `sandbox-exec` 的「断网冒烟」连 `.1` 运行时也过不了，所以 `--fetch-qwen3` 的冒烟这里没跑通，待真机复验。
 
 ### T3.2.1 泰语 code-switch：给 whisper 加 initial prompt  `DONE`（2026-09-19）
 - **实测依据**：[`docs/data/thai-corpus-arm-2026-09/RESULTS.md`](../data/thai-corpus-arm-2026-09/RESULTS.md)
