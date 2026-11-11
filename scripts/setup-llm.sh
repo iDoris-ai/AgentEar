@@ -33,7 +33,9 @@ mkdir -p "$ENV_DIR"
 [ -d "$VENV" ] || uv venv "$VENV" --python 3.11 >/dev/null
 # mlx-dspark 带 mlx / mlx-lm。装在自己的 venv 里，不碰系统 Python。
 # T3.5.5：钉版本（2026-11-10 取自实测在用的 venv）。升级 = 改这里 + 重跑 benchmarks-m2 的复现。
-uv pip install --python "$VENV/bin/python" -q mlx==0.32.2 mlx-dspark==0.18.0 huggingface_hub==1.29.0
+PINS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/pins"
+# FU-24：-c 约束文件锁住间接依赖（mlx-metal 等）；直接依赖仍在命令行 == 钉死。
+uv pip install --python "$VENV/bin/python" -q -c "$PINS_DIR/venv-constraints.txt" mlx==0.32.2 mlx-dspark==0.18.0 huggingface_hub==1.29.0
 
 echo "==> 模型 ${HF_REPO}（约 7.7 GB）"
 # ⚠️ **用 curl 逐文件，不用 snapshot_download。**
@@ -96,6 +98,18 @@ hf_get processor_config.json          optional
 hf_get video_preprocessor_config.json optional
 hf_get model-00001-of-00002.safetensors required
 hf_get model-00002-of-00002.safetensors required
+
+# FU-24：逐文件 sha256 校验（清单 scripts/pins/ornith-1.0-9b-6bit.sha256，大文件取自 HF API lfs.oid）。
+# 镜像（HF_ENDPOINT）上拿到的内容也要过这一关。清单只对默认 revision 有效，
+# 用 AGENTEAR_LLM_REV 覆盖时无从校验，明说跳过而不是假装校验过。
+MANIFEST="$PINS_DIR/ornith-1.0-9b-6bit.sha256"
+if [ "$HF_REV" = "a2800933352a607ffbb1f814295fc3ff8e10ad69" ]; then
+  echo "==> 校验 sha256（$(grep -vc '^#' "$MANIFEST") 个文件）"
+  (cd "$MODEL_DIR" && grep -v '^#' "$MANIFEST" | shasum -a 256 -c --quiet) \
+    || die "sha256 校验失败：模型文件与钉死的清单不符（镜像被改动或下载损坏）。删掉对应文件重跑"
+else
+  echo "!! revision 被覆盖为 ${HF_REV}，跳过 sha256 清单校验" >&2
+fi
 
 # 产物校验：转换/下载中断留下的残缺目录不该被当成可用模型。
 # 9B 的 6bit 权重约 7 GB，明显小于这个数就是没下完。

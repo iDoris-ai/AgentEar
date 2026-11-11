@@ -28,17 +28,33 @@
 | Python 包 `mlx==0.32.2 mlx-lm==0.31.3 mlx-audio==0.5.1 huggingface_hub==1.29.0` | `==` 钉版本（T3.5.5 新增，取自实测在用的 venv） | `scripts/setup-talk.sh` `PIP_PINS` |
 | Python 包 `mlx==0.32.2 mlx-dspark==0.18.0 huggingface_hub==1.29.0` | 同上 | `scripts/setup-llm.sh` |
 
-### 1.3 仍然没锁住的（诚实清单）
+### 1.3 FU-24 补锁的（2026-11-11）
+
+| 项 | 锁定方式 | 位置 |
+|---|---|---|
+| `vendor/bin/llama-funasr-sensevoice` | 开发机上的副本与 FunASR 官方 release `runtime-llamacpp-v0.1.9`（tag 对象 `d10aedff3c50`，指向 commit `9b918d74d7090b38211a6414c6ee08893a34afd4`）的 `funasr-llamacpp-macos-arm64.tar.gz`（sha256 `2d5786784ad09d8f4def1d942f678728638fe601d00acf0dad7cf094a9328363`）里的同名二进制**逐字节相同**：sha256 `49d66b2f79d439e2db7933627e1deb9eb7f3ebf0d708473757828130f3619435`。即它是官方预编译产物，不是自编。该 commit 的 `runtime/llama.cpp/CMakeLists.txt` 用 FetchContent 拉 `ggml-org/llama.cpp` @ `8086439a4cea94c71a5dfb8fe4ad1546aebd640f`；官方 CI 的 macos-arm64 参数是 `-DGGML_NATIVE=OFF` | `scripts/build-vendor-asr.sh` |
+| `vendor/bin/whisper-cli` | `ggml-org/whisper.cpp` @ `7de8dd783f7b2eab56bff6bbc5d3369e34f0e77f`，静态链接 + Metal 嵌入（参数见 `scripts/build-whisper-cli.sh`）。开发机副本 sha256 `322b8ce3c2bc7790adcc9fd28e7c24f25338e08d1ae27d4585e94981743c0603` | 同上 |
+| `whisper.cpp` checkout | `/Users/jason/Dev/tools/whisper.cpp` 的 `HEAD` = `7de8dd783f7b2eab56bff6bbc5d3369e34f0e77f`，**与 ADR-0004 记载的 `7de8dd78` 一致**（2026-11-11 `git rev-parse` 核对）。`build-vendor-asr.sh` 现在比对**完整 40 位** commit，不一致直接失败（`build-whisper-cli.sh` 单跑时仍只对 8 位前缀发警告）。checkout 不存在时脚本按钉死的 commit 自己浅克隆 | 同上 |
+| 泰语构建的 torch / transformers / numpy 等 | `==` 钉在要求文件，`build-thai-model.sh` 用 `uv pip install -r` | `scripts/pins/thai-build-requirements.txt` |
+| 间接 pip 依赖（mlx-metal、mlx-vlm、numpy…） | 约束文件（`-c`）= 2026-11-11 `uv pip freeze` 全量 57 个包；`setup-llm.sh` / `setup-talk.sh` 安装时带上 | `scripts/pins/venv-constraints.txt` |
+| 理解层 LLM 权重 Ornith 6bit 逐文件 sha256 | 12 个文件；大文件取 HF API `lfs.oid`，小文件按该 commit 的 resolve URL 实算；`setup-llm.sh` 下载后 `shasum -a 256 -c`。本机 `~/.agentear/llm/models/ornith` 实测全部 OK。用 `AGENTEAR_LLM_REV` 覆盖 revision 时清单不适用，脚本明说跳过 | `scripts/pins/ornith-1.0-9b-6bit.sha256` |
+| 泰语微调权重 distill-whisper-th-large-v3 逐文件 sha256 | 11 个文件，取法同上；`build-thai-model.sh` 在转换前校验（镜像内容也要过） | `scripts/pins/distill-whisper-th-large-v3.sha256` |
+
+**复建实测（2026-11-11，机器负载高）**：`scripts/build-vendor-asr.sh` 两个目标都跑了一次，各约 1.5 分钟（FunASR 只编 sensevoice 一个 target）。
+
+- `whisper-cli` 自编产物 sha256 = `322b8ce3…0603`，**与 vendor 副本逐字节相同**（同一台机器、同一工具链，所以这一次可复现；换工具链不保证）。
+- `llama-funasr-sensevoice` 自编产物 sha256 = `76190ea7686330d3ed9e0731d34ef369af9a8d37dbdb67861776fb5e0e0d3864`，**与官方预编译 `49d66b2f…` 不同**（官方是 GitHub runner 编的，路径、编译器、`GGML_NATIVE=OFF` 之外的细节都可能不同）。行为：用 `AGENTEAR_VENDOR` 指向自编产物，`agentear --transcribe` 一段中文 `say` 和一段英文 `say`，转写文本与 vendor 副本**完全相同**（只有 2 段合成语音，耗时在高负载下无参考价值）。
+- 想要逐字节一致的 sensevoice：直接下官方 tarball，核对上面的 tarball sha256 与二进制 sha256（README「从源码构建」里的 curl 命令即是；注意它没有校验 sha256，是遗留项）。
+
+### 1.4 仍然没锁住的（诚实清单）
 
 | 项 | 现状 | 风险 / 后续 |
 |---|---|---|
-| `vendor/bin/llama-funasr-sensevoice`、`vendor/bin/whisper-cli` | 随发布包分发，**仓库里没有构建脚本，也没有记录它们对应的上游 commit**（开发机上现有副本 sha256：`49d66b2f…435` / `322b8ce3…603`） | 无法从源码复建；换机器只能从旧 release 拷。后续：补 `build-llama-funasr.sh` 并记录 commit |
-| `whisper.cpp` checkout | `build-thai-model.sh` / `build-whisper-cli.sh` 读同级目录；ADR-0004 记的是 `7de8dd78`，**脚本不核对** | 换 commit 产出的就不是测过的东西。后续：脚本里 `git rev-parse HEAD` 与常量比对 |
-| 泰语构建的 `torch` / `transformers` / `numpy` | `build-thai-model.sh` 里仍未钉版本 | 一次性维护者脚本，产物有 sha12 指纹兜底；没有当时用的版本记录，不能凭空钉 |
+| 泰语要求文件的版本是**未经完整重跑验证**的 | 取自本机 `~/venvs/ml` 里实装的 torch 2.12.0 / transformers 5.15.1 / numpy 2.4.4 …；2026-08-28 那次跑通转换的版本**没有记录**，本次也没有重下 3 GB 权重跑完整转换 | 下一次实际重跑 `build-thai-model.sh` 时，若转换失败或产物 sha12 指纹不符，改要求文件并记录；torch 的间接依赖与 `--hash` 未做 |
 | `pip install --upgrade pip` | `setup-talk.sh` 里新建 venv 时仍升级 pip 到最新 | 只是安装器本身，不影响运行时行为 |
-| Python 间接依赖（mlx-metal 等） | 只钉了直接依赖 | 要完全可复现需 `pip freeze` 约束文件；暂未做 |
-| HF 镜像（`HF_ENDPOINT`） | `setup-llm.sh` / `build-thai-model.sh` 允许镜像优先；revision 钉了，但镜像内容未做 sha 校验 | 内置模型和 Qwen3 有 sha256，这两个脚本的大权重没有 |
-| 对话 LLM / TTS 权重文件 sha256 | 只钉到 commit（HF 对 commit 内容不可变），无逐文件 sha | 够用；要更严就照 `FILES_*` 补 |
+| 约束文件来自一个 venv 的 freeze | 该 venv 同时装了 mlx-dspark / mlx-vlm / fastapi 等，约束对 talk venv 多余但无害；没有 `--hash` | 要更严：`uv pip compile --generate-hashes` |
+| README 里 `funasr-llamacpp-macos-arm64.tar.gz` 的下载命令 | 没校验 tarball sha256，且 SenseVoice/VAD 的 GGUF 用 `resolve/main`（README 示例；运行时下载走 `builtin_models.rs`，已钉） | 文档示例，不影响发布包；后续可补 sha256 校验 |
+| 对话 LLM / TTS（MiniCPM5 / VoxCPM2）权重文件 sha256 | 只钉到 commit（HF 对 commit 内容不可变），无逐文件 sha | 够用；要更严就照 `scripts/pins/*.sha256` 补 |
 
 ## 2. 版本握手 / 能力探测
 

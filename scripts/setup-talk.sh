@@ -155,7 +155,7 @@ else
     mkdir -p "$TALK_DIR"
     [ -d "$NEW_VENV" ] || "$PY" -m venv "$NEW_VENV"
     "$NEW_VENV/bin/python" -m pip install -q --upgrade pip
-    "$NEW_VENV/bin/python" -m pip install -q "${PIP_PINS[@]}"
+    "$NEW_VENV/bin/python" -m pip install -q -c "$ROOT/scripts/pins/venv-constraints.txt" "${PIP_PINS[@]}"
   fi
   VENV="$NEW_VENV"
 fi

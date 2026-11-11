@@ -1,0 +1,11 @@
+# build-thai-model.sh 的转换环境（torch + transformers 读 safetensors/config，供 convert-h5-to-ggml.py）。
+# FU-24：此前完全没钉。版本取自 2026-11-11 本机 ~/venvs/ml 里**实装**的同一组（cpython 3.11, macOS arm64）。
+# ⚠️ 诚实边界：这组版本是「本机现成能装、同族包」，**没有**当时（2026-08-28）跑通 ADR-0004 那次转换的版本记录，
+#    也**未在本次重跑完整转换**（要下 3 GB 权重）。第一次实际重跑时若转换或 sha12 指纹不符，改这里并在 docs 记录。
+# 只钉直接用到的包；torch 的间接依赖（sympy/networkx/…）未锁，也没加 --hash。
+torch==2.12.0
+transformers==5.15.1
+numpy==2.4.4
+safetensors==0.8.0
+tokenizers==0.22.2
+huggingface_hub==1.29.0
