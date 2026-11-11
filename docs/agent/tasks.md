@@ -1142,6 +1142,11 @@
 
 ---
 
+- **v0.28.2 发版准备（2026-11-10，`DONE`，待合并后打包 / 打 tag）**：#114 的 speech-server 补丁（Qwen3 `maxTokens` 448→6144）
+  编成 `speech-runtime-v0.0.28-agentear.2` 并发布，`src/qwen3.rs` 的 `SPEECH_VERSION` / URL / sha256 / 字节数从实际产物回填。
+  实测：281.75 s 真实录音走新 `speech-server` 常驻接口，HTTP 200、1295 字（448 的旧二进制只有约 774 字）。
+  已知：本机 agent 环境里 `speech` CLI 套 `sandbox-exec` 的「断网冒烟」连 `.1` 运行时也过不了，所以 `--fetch-qwen3` 的冒烟这里没跑通，待真机复验。
+
 ### T3.2.1 泰语 code-switch：给 whisper 加 initial prompt  `DONE`（2026-09-19）
 - **实测依据**：[`docs/data/thai-corpus-arm-2026-09/RESULTS.md`](../data/thai-corpus-arm-2026-09/RESULTS.md)
 - 用**已经在发的** `terms.json` 当 whisper 的 `--prompt`：

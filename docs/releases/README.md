@@ -1,5 +1,7 @@
 # 历次发布的 release notes
 
+From v0.28.0 on, a release body is English first. The matching Chinese text goes below it, under a `## 中文` heading. Notes published before v0.28.0 stay as they were.
+
 一版一个文件：`v0.18.0-notes.md`，内容就是 GitHub release 的正文。
 
 **为什么放仓库里**（2026-09-16 搬进来的）：这些文件原来躺在
