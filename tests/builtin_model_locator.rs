@@ -449,6 +449,8 @@ fn run_isolated(
         .env("PATH", path)
         .env("AGENTEAR_VENDOR", vendor)
         .env("AGENTEAR_DATA", data)
+        // 这些测试不需要音频；CoreAudio 在麦克风未授权时会卡住（FU-22）
+        .env("AGENTEAR_DIAGNOSE_SKIP_AUDIO", "1")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
