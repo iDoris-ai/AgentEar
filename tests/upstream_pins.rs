@@ -41,7 +41,8 @@ fn code_lines(body: &str, comment: &str) -> Vec<String> {
         .collect()
 }
 
-const PINNED_SCRIPTS: [&str; 4] = [
+const PINNED_SCRIPTS: [&str; 5] = [
+    "scripts/build-vendor-asr.sh",
     "scripts/setup-talk.sh",
     "scripts/setup-llm.sh",
     "scripts/build-thai-model.sh",
@@ -187,5 +188,71 @@ fn rollback_doc_names_the_constants_to_change() {
     let doc = read("docs/upstream-pins.md");
     for needle in ["SPEECH_VERSION", "RUNTIME_URL", "RUNTIME_SHA256", "RUNTIME_BYTES", "runtime/speech-"] {
         assert!(doc.contains(needle), "docs/upstream-pins.md 回滚一节要提到 {needle}");
+    }
+}
+
+/// FU-24：约束文件 / 要求文件里每一行都是 `name==版本`，不许出现无版本的包。
+fn assert_all_pinned_file(rel: &str, min_lines: usize) {
+    let body = read(rel);
+    let pkgs: Vec<&str> = body
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        .collect();
+    assert!(pkgs.len() >= min_lines, "{rel} 只有 {} 行，疑似被清空", pkgs.len());
+    for p in pkgs {
+        assert!(p.contains("=="), "{rel}：{p} 没钉版本");
+    }
+}
+
+#[test]
+fn pip_constraints_and_thai_requirements_are_fully_pinned() {
+    assert_all_pinned_file("scripts/pins/venv-constraints.txt", 20);
+    assert_all_pinned_file("scripts/pins/thai-build-requirements.txt", 5);
+    // 脚本必须真的用它们。
+    assert!(read("scripts/setup-llm.sh").contains("venv-constraints.txt"));
+    assert!(read("scripts/setup-talk.sh").contains("venv-constraints.txt"));
+    assert!(read("scripts/build-thai-model.sh").contains("thai-build-requirements.txt"));
+}
+
+/// FU-24：大权重的逐文件 sha256 清单存在、格式对（64 位 hex + 两个空格 + 文件名），脚本会校验。
+#[test]
+fn hf_weight_manifests_exist_and_are_verified() {
+    for (rel, must_have, script) in [
+        ("scripts/pins/ornith-1.0-9b-6bit.sha256", "model-00001-of-00002.safetensors", "scripts/setup-llm.sh"),
+        ("scripts/pins/distill-whisper-th-large-v3.sha256", "model.safetensors", "scripts/build-thai-model.sh"),
+    ] {
+        let body = read(rel);
+        let mut found = false;
+        for l in body.lines().filter(|l| !l.starts_with('#') && !l.trim().is_empty()) {
+            let (h, name) = l.split_once("  ").unwrap_or_else(|| panic!("{rel} 格式不对：{l}"));
+            assert!(h.len() == 64 && h.bytes().all(|b| b.is_ascii_hexdigit()), "{rel}：{l}");
+            found |= name == must_have;
+        }
+        assert!(found, "{rel} 缺 {must_have}");
+        let name = rel.rsplit('/').next().unwrap();
+        let sbody = read(script);
+        assert!(sbody.contains(name) && sbody.contains("shasum -a 256 -c"), "{script} 没有用 {name} 校验");
+    }
+}
+
+/// FU-24：复建脚本钉了完整 commit，且 docs 里记了 vendor 二进制的 sha256。
+#[test]
+fn vendor_asr_build_pins_commits_and_docs_record_binaries() {
+    let body = read("scripts/build-vendor-asr.sh");
+    for name in ["FUNASR_COMMIT", "FUNASR_LLAMA_COMMIT", "WHISPER_COMMIT"] {
+        let l = code_lines(&body, "#")
+            .into_iter()
+            .find(|l| l.starts_with(&format!("{name}=\"")))
+            .unwrap_or_else(|| panic!("缺 {name}"));
+        assert!(is_full_sha(l.split('"').nth(1).unwrap()), "{l}");
+    }
+    let doc = read("docs/upstream-pins.md");
+    for needle in [
+        "49d66b2f79d439e2db7933627e1deb9eb7f3ebf0d708473757828130f3619435",
+        "322b8ce3c2bc7790adcc9fd28e7c24f25338e08d1ae27d4585e94981743c0603",
+        "build-vendor-asr.sh",
+    ] {
+        assert!(doc.contains(needle), "docs/upstream-pins.md 要记 {needle}");
     }
 }

@@ -51,8 +51,8 @@ export UV_PROJECT_ENVIRONMENT="$WORK/venv"
 VENV="$WORK/venv"
 [ -d "$VENV" ] || uv venv "$VENV" --python 3.11 >/dev/null
 # convert-h5-to-ggml.py 要 torch + transformers 读 safetensors 和 config
-uv pip install --python "$VENV/bin/python" -q \
-  torch transformers huggingface_hub numpy
+# FU-24：版本钉在 scripts/pins/thai-build-requirements.txt（含诚实边界说明）。
+uv pip install --python "$VENV/bin/python" -q -r "$ROOT/scripts/pins/thai-build-requirements.txt"
 
 echo "==> 下载权重（$HF_REPO @ ${HF_REV_PREFIX}…）"
 # ⚠️ 全程用 curl，不用 `hf` CLI 也不用 huggingface_hub 的下载函数。
@@ -103,6 +103,13 @@ hf_get merges.txt               "$HF_DIR/merges.txt"               optional
 hf_get tokenizer_config.json    "$HF_DIR/tokenizer_config.json"    optional
 hf_get normalizer.json          "$HF_DIR/normalizer.json"          optional
 hf_get generation_config.json   "$HF_DIR/generation_config.json"   optional
+
+# FU-24：逐文件 sha256 校验（清单 scripts/pins/distill-whisper-th-large-v3.sha256）。
+# 镜像（HF_ENDPOINT）可能先于官方站被命中，其内容也必须与钉死的清单一致。
+# 清单里的文件必须都在（该 commit 上它们都存在）；缺任何一个都是下载出了问题。
+echo "==> 校验权重 sha256"
+(cd "$HF_DIR" && grep -v '^#' "$ROOT/scripts/pins/distill-whisper-th-large-v3.sha256" | shasum -a 256 -c --quiet) \
+  || die "权重 sha256 与钉死的清单不符（镜像被改动或下载损坏）。删掉 $HF_DIR 重跑"
 
 echo "==> 取 mel_filters.npz"
 # ADR-0004 §2 坑 4：convert-h5-to-ggml.py 要 <dir_whisper>/whisper/assets/mel_filters.npz，
