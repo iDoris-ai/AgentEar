@@ -72,7 +72,10 @@ Schema 用 JSON Schema draft 2020-12。`event` 的 `proposal` payload 用相对 
   |---|---|
   | `barge_in` | 用户按录音键打断 |
   | `stop_command` | 宿主发来的 `stop_playback` |
-  | `tts_unavailable` | TTS 边车不可用 |
+  | `sidecar_not_running` | 宿主 `speak` 时 TTS 没在跑，而且这次没有拉起（关了自动拉起、没配拉起命令，或端口被占又不能换） |
+  | `start_failed` | 按需拉起 TTS 失败（命令起不来，或进程马上退出；换端口失败也归这里） |
+  | `start_timeout` | 按需拉起后，在就绪时限内没有应答 |
+  | `tts_unavailable` | 边车已经视为可用，但合成或播放仍然失败 |
   | `superseded` | 被后面的播报顶掉（例如清空队列） |
 
   **宿主只能拿 reason 做展示，不能按它做分支判断。**
