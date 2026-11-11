@@ -211,12 +211,13 @@ fn main() -> Result<()> {
             qwen3_recovery_marker.is_some(),
             cfg.asr_backend == engine::AsrBackend::SpeechSwift,
             qwen3_is_daemon,
+            qwen3::is_ready(qwen3_recovery_model),
         )
     } else {
         qwen3::RecoveryAction::None
     };
     match qwen3_recovery {
-        qwen3::RecoveryAction::None => {}
+        qwen3::RecoveryAction::None | qwen3::RecoveryAction::SwitchBack => {}
         qwen3::RecoveryAction::Note => {
             log::info!(
                 "{} 的运行时还缺（升级空档，或上一次恢复被打断）：一次性命令不发起下载，记下标记交给下次守护进程启动去后台补",
@@ -244,7 +245,15 @@ fn main() -> Result<()> {
     // 而 PATH 上也没有老的 brew 版 speech：不对账的话下面的 preflight 会让
     // **整个守护进程起不来**。宁可退回随包的 SenseVoice 并把原因写清楚——
     // 录音是这个程序的本职，不能因为一个可选后端没装好就全挂。
-    let backend = if qwen3_recovery == qwen3::RecoveryAction::Note && !pinned_backend {
+    let backend = if qwen3_recovery == qwen3::RecoveryAction::SwitchBack {
+        // FU-21：上一次恢复在「运行时装好」与「回切」之间被打断，直接回切，不下载。
+        log::info!(
+            "{} 的运行时已装好但上次没来得及换回 speech_swift：现在换回",
+            qwen3_recovery_model.label()
+        );
+        tray::switch_back_after_interrupted_recovery(qwen3_recovery_model);
+        engine::AsrBackend::SpeechSwift
+    } else if qwen3_recovery == qwen3::RecoveryAction::Note && !pinned_backend {
         // 一次性 CLI 处在恢复空档：这一轮**只在内存里**退回 builtin（靠 pin
         // 住这个进程的后端选择），完全不碰 config.json——持久化交给上面已经
         // 写的标记，不是靠改 asr_backend（PR #106 评审阻塞项：改了
@@ -4023,7 +4032,7 @@ mod host_wiring_tests {
         }
     }
 
-    /// 探测线程卡住时 `probe_with_timeout` 必须按时返回 `None`，不能跟着卡（FU-22）。
+    /// 探测线程卡住时 `probe_with_timeout` 必须按时返回 `Err(ProbeFail::TimedOut)`，不能跟着卡（FU-22）。
     #[test]
     fn probe_with_timeout_gives_up_on_a_hung_probe() {
         let t = std::time::Instant::now();

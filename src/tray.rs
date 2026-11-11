@@ -182,7 +182,14 @@ pub fn on_qwen3_runtime_recovered(m: crate::qwen3::Qwen3Model) {
         switch_to_qwen3(m);
     } else {
         log::info!("{} 运行时补完；用户已经手动选了别的引擎，不强行换回", m.label());
+        // 安装核心不再清标记（FU-21）；不回切时由这里收尾，免得标记残留误触发下次回切。
+        abandon_qwen3_recovery();
     }
+}
+
+/// FU-21：启动时发现「运行时已装好、标记还在」，直接回切（不下载）。
+pub fn switch_back_after_interrupted_recovery(m: crate::qwen3::Qwen3Model) {
+    switch_to_qwen3(m);
 }
 
 /// 把识别引擎切到某一档 Qwen3（已确认装好）。常驻开着就顺手预热。
@@ -190,11 +197,12 @@ fn switch_to_qwen3(m: crate::qwen3::Qwen3Model) {
     // 任何切到某一档 Qwen3 的路径都经过这里（用户点了已装好的模型、下载完成后
     // 自动切过去、恢复完成换回去）——收在这一处清掉恢复线索，不用在每个调用点
     // 分别记得清（PR #106 评审第 3 轮）。
-    abandon_qwen3_recovery();
+    // FU-21：先把回切落盘，**再**清恢复标记——反过来的话，两步之间退出就丢了线索。
     config::update(|c| {
         c.asr_backend = crate::engine::AsrBackend::SpeechSwift;
         c.qwen3_model = m;
     });
+    abandon_qwen3_recovery();
     let resident = config::get().qwen3_resident;
     log::info!(
         "识别引擎改为 {}（{}，下次录音生效）",
@@ -2544,6 +2552,7 @@ mod tests {
             qwen3::read_recovering_marker().is_some(),
             /* configured_backend_is_speech_swift */ false,
             /* is_daemon */ true,
+            /* model_ready */ false,
         );
         assert_eq!(action, qwen3::RecoveryAction::None, "不该重新发起对用户已放弃模型的恢复");
 
