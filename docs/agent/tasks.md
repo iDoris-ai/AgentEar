@@ -961,14 +961,14 @@
   ✅ **Q4 已决（jason 2026-09-26）：不换默认。** 默认仍是随包分发的 SenseVoice；
   Qwen3-ASR 1.7B / 0.6B 做成**可配置、选了就自动下载**的可选后端 → 见 T3.5.6。
 
-### T3.5.2 whisper 逐条 CER 入库  `PR_OPEN`（结果见 benchmarks-m3.md §4.1.1：code-switch Δ=+5.66pp，95% 区间 [-6.04, +17.01]，未检出差异）
+### T3.5.2 whisper 逐条 CER 入库  `DONE`（PR #117 → `ecf9611`，2026-11-11）（结果见 benchmarks-m3.md §4.1.1：code-switch Δ=+5.66pp，95% 区间 [-6.04, +17.01]，未检出差异）
 - **为什么**：`RESULTS.md` 只存了汇总指标，导致
   Qwen3 vs whisper 的**配对检验做不了**（benchmarks-m3.md §4.1）。
 - 用配置 D 的参数重跑 whisper，逐条 CER 入库，
   与已入库的 `qwen3-asr-2026-09-08.tsv` 做配对 bootstrap，报差值置信区间。
 - **拿到区间之后**，才可以使用「未检出差异」「非劣」这类措辞。
 
-### T3.5.3 逐组件许可证表  `DONE`（2026-11-10，结果见 [`docs/licenses.md`](../licenses.md)）
+### T3.5.3 逐组件许可证表  `DONE`（2026-11-10，PR #116 → `eafdc99` 2026-11-11 合并；查出的缺口记为 FU-23，结果见 [`docs/licenses.md`](../licenses.md)）
 - **结果摘要**：表已出；随包/再分发的缺口（SenseVoice 权重实为 FunASR 模型协议而非 Apache、tarball 缺许可全文、NOTICE 缺条目）
   与未核实项（Ornith、FSMN-VAD、FunctionGemma、PersonaPlex、IndexTTS2 限制）都列在文末；后续修 NOTICE / 补 tarball 声明另开任务。
 - ⚠️ 下面「VoiceChat 11B 仅研究用途」一句核实后**不成立**：HF 卡是 OpenMDW-1.1（宽松），见 licenses.md §4。
@@ -992,7 +992,7 @@
   **FireRedTTS3 相应地从候选里移除**（引入它的唯一理由就是台湾腔）。
   VoxCPM2 的 9 种方言够用，不需要第二个 TTS 引擎。台湾腔记为已知缺口。
 
-### T3.5.5 上游版本锁定与回滚流程  `IN PROGRESS`（2026-11-10：清单/补锁/回滚/Qwen3 运行时能力探测见 [`docs/upstream-pins.md`](../upstream-pins.md)；vendor 二进制构建脚本与 whisper.cpp commit 核对留作后续）
+### T3.5.5 上游版本锁定与回滚流程  `DONE`（主体：PR #119 → `02f2683`，2026-11-11；未锁项记为 FU-24。2026-11-10：清单/补锁/回滚/Qwen3 运行时能力探测见 [`docs/upstream-pins.md`](../upstream-pins.md)；vendor 二进制构建脚本与 whisper.cpp commit 核对留作后续）
 - 锁到 commit + release 资产 SHA-256（tag 会被移动、asset 会被替换）。
 - 保留已验证版本的本地副本或可复建脚本，写明回滚流程。
 - 加版本握手 + capability probe + CLI 输出契约测试；
@@ -1366,7 +1366,7 @@
 
 ## 2026-11-10 对账补录（以下是 `docs/agent/` 此前没有编号的工作；事实来源：`gh pr list --state merged`、`gh release list`、`docs/releases/`、PR 正文）
 
-### T3.5.10 录音上限 5/10/15 分钟 + Qwen3 解码上限 6144  `DONE`（代码；PR #114 → `07ce7fa`，2026-11-10 合并，**未发版**；新 speech-server 未发布）
+### T3.5.10 录音上限 5/10/15 分钟 + Qwen3 解码上限 6144  `DONE`（PR #114 → `07ce7fa`；**已随 v0.28.2 发布**：#121 → `a699894`，新运行时 `speech-runtime-v0.0.28-agentear.2`。⚠️ 只在「Qwen3 常驻」路径生效，一次性 CLI 路径仍是 448，见 FU-20）
 - 事实（PR #114 正文）：录音上限默认仍是 5 分钟；设置窗口加「录音上限」一行，只有 5 / 10 / 15 分钟三档，非法配置退回 5 分钟。
   Qwen3 常驻转写的解码上限从上游默认 448 提到 6144（上游 `Qwen3DecodingOptions.maxTokens=448` 写满即停、HTTP 仍 200；
   PR 记录的触发样本：一段 281.75 秒录音回来正好 448 个 token）。菜单栏秒数 `u8` → `u32`。
@@ -1400,15 +1400,15 @@
 
 ## 进行中的三条线（2026-11-10 记录；只写能核实的）
 
-### T-APPSTORE-1 App Store 分发：沙箱底座 + 可行性审计（原 T7.1）  `PR_OPEN`（2026-11-10，PR #118，分支 `feat/app-store-sandbox`）
+### T-APPSTORE-1 App Store 分发：沙箱底座 + 可行性审计（原 T7.1）  `DONE`（阶段 0；PR #118 → `da7c570`，2026-11-11）。阶段 1 真机沙箱原型与「MAS 版功能子集」待 jason 拍板，见 `docs/app-store.md`
 - 做法：`assets/entitlements/AppStore.entitlements`；`bundle.sh` 的 `AGENTEAR_DISTRIBUTION=app-store` 签名分支；`resolve_data_root`（沙箱数据进容器，HOME 已在容器时不嵌套）；审计结论见 `docs/app-store.md`。
 - 结论：现状不能原样上 MAS，4 个硬阻塞（右 Command/CGEventTap、自动 ⌘V、运行时下载 speech-server、Python 边车）；可行子集 = 输入法模式 + 随包 SenseVoice + 组合键 + 剪贴板。
 - 下一步：阶段 1 沙箱原型（真机验证标「未核实」的项）。默认构建行为不变。
 
-### T-HOSTSPEAK-1 宿主 speak 时按需拉起 TTS  `IN_PROGRESS`
-- 分支 `fix/host-speak-tts`，本机 worktree `/Users/jason/Dev/tools/AgentEar-host-speak`，基于 main `07ce7fa`，**尚无提交，也没推到远端、没有 PR**。
-- 工作区未提交改动涉及：`contracts/README.md`、`contracts/schema/agentear.event.v1.schema.json`、`src/a3/tests.rs`、`src/config.rs`、`src/host.rs`、`src/host/tests.rs`、`src/talk.rs`（共 7 个文件，`git diff origin/main --stat`：约 +463 / -112）。
-- 具体行为目标、验收、是否改了事件契约：**未核实**（只看了文件列表，没有读 diff）。
+### T-HOSTSPEAK-1 宿主 speak 时按需拉起 TTS  `DONE`（PR #120 → `299694e`，2026-11-11，未单独发版）
+- 宿主 `speak` 遇 TTS 未运行时按对话模式同一套逻辑按需拉起（连接优先、端口避让），拉起在播放线程；失败原因细分 `sidecar_not_running` / `start_failed` / `start_timeout`，`tts_unavailable` 只留给合成/播放失败（`/1` 内兼容加法，fixtures 同步）。
+- `speech.state=started` 改为真正开播才发；宿主拉起的 TTS 空闲 `tts_idle_secs`（默认 600）回收，只收自己拉起的。
+- 验收：单测 529/0、contracts 4/0、`--say` 真机通过。**未实测**：边车真没跑时的真实拉起、空闲回收杀进程那一步、与物理按键打断的竞态。已知局限见 FU-25。
 
 ### T-TRANSLATE-1 翻译输入  `IN_PROGRESS`（仍在讨论）
 - 分支 `feat/translate-input`，本机 worktree `/Users/jason/Dev/tools/AgentEar-translate`，停在 `bf28054`（v0.28.1，落后 main 一个提交 #114），**无自己的提交、工作区干净、无远端分支、无 PR**。
