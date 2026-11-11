@@ -8,7 +8,7 @@
 //!   5. 写入并 fsync 清单
 //!   6. 此时才算 COMMITTED
 //!
-//! 崩溃语义（T3.4.17 起）：录音中每 `CHECKPOINT_EVERY`（5 秒）把头部与数据
+//! 崩溃语义（T3.4.19 起）：录音中每 `CHECKPOINT_EVERY`（5 秒）把头部与数据
 //! flush + fdatasync 一次，崩溃最多丢最后约 5 秒（**有界丢失**）。启动时对
 //! `raw/.tmp` 里的残留做**抢救**而不是删除：按文件实际长度修 WAV 头，够长
 //! 的走与正常停止相同的提交（rename → fsync 目录 → 清单），清单里标
@@ -35,6 +35,11 @@ pub const CHECKPOINT_EVERY: std::time::Duration = std::time::Duration::from_secs
 
 /// 抢救的最短长度（采样数）= 0.3 s，与 `main.rs::finish` 的「录音过短丢弃」同一阈值。
 const MIN_RECOVER_SAMPLES: u64 = 16_000 * 3 / 10;
+
+/// `begin()` 创建临时文件时的过渡名前缀（见 `Store::begin`）。
+const PENDING_PREFIX: &str = ".pending-";
+/// 过渡名文件超过这么久还在，说明创建它的进程在 begin 中途死了。
+const PENDING_STALE: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// WAV 头长度：`hound` 写的是标准 44 字节（RIFF 12 + fmt 24 + data 8）。
 const WAV_HEADER_LEN: usize = 44;
@@ -72,6 +77,21 @@ impl Store {
         for e in fs::read_dir(&tmp)? {
             let p = e?.path();
             if !p.is_file() {
+                continue;
+            }
+            // `begin()` 先以 `.pending-` 名字创建并加锁、再改成正式名：
+            // 新的 pending 可能属于正在 begin 的另一个进程，绝不碰；
+            // 超过 PENDING_STALE 的才是 begin 中途崩溃留下的空壳，删掉。
+            if p.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.starts_with(PENDING_PREFIX)) {
+                let stale = fs::metadata(&p)
+                    .and_then(|m| m.modified())
+                    .ok()
+                    .and_then(|t| t.elapsed().ok())
+                    .is_some_and(|age| age >= PENDING_STALE);
+                if stale {
+                    let _ = fs::remove_file(&p);
+                    dropped += 1;
+                }
                 continue;
             }
             match self.recover_one(&p) {
@@ -143,7 +163,13 @@ impl Store {
         f.sync_all().context("fsync 修复后的临时文件失败")?;
 
         let hash = format!("{:x}", Sha256::digest(pcm));
-        let final_path = publish(&self.root, tmp, &hash, samples, true)?;
+        let final_path = publish_rename(&self.root, tmp, &hash)?;
+        // rename 之后临时文件已经不在了：音频已安全地在 raw/audio 里。
+        // 后面的目录 fsync / 清单失败不能让这条录音丢出 `take_recovered()`
+        // （否则永远不会被转写、也没有重试），只告警。
+        if let Err(e) = finish_publish(&self.root, &hash, samples, true) {
+            log::warn!("抢救的录音 {hash} 已入库，但写清单 / fsync 失败（不影响音频）: {e:#}");
+        }
         Ok(Outcome::Recovered(Recovered {
             committed: Committed { path: final_path, content_hash: hash },
             secs: samples as f32 / 16_000.0,
@@ -154,34 +180,39 @@ impl Store {
     pub fn begin(&self) -> Result<Session> {
         let session_id = new_session_id();
         let path = self.root.join("raw/.tmp").join(&session_id);
+        // 先用 sweep 会忽略的 `.pending-` 名字创建 → 加锁 → 改成正式名。
+        // 直接以正式名创建的话，创建与加锁之间别的进程的 `Store::open` 可能
+        // 锁到这个 0 字节文件、判为坏头并删掉（锁跟着 inode 走，改名不影响）。
+        let pending = self.root.join("raw/.tmp").join(format!("{PENDING_PREFIX}{session_id}"));
         // O_EXCL：撞上并发会话时直接失败，而不是静默复用别人的文件
         let file = OpenOptions::new()
             .write(true)
             .create_new(true)
             .custom_flags(libc::O_EXCL)
-            .open(&path)
-            .with_context(|| format!("创建临时对象失败: {}", path.display()))?;
+            .open(&pending)
+            .with_context(|| format!("创建临时对象失败: {}", pending.display()))?;
 
         // 独占 flock：让启动抢救认得出「这个文件有人正在写」。失败只告警，
         // 最坏情况是别的进程误把它当残留（与旧行为一样），不值得拒绝录音。
         if unsafe { libc::flock(std::os::fd::AsRawFd::as_raw_fd(&file), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
             log::warn!("临时录音文件加锁失败: {}", std::io::Error::last_os_error());
         }
-        // 同一个打开文件描述的 dup：fdatasync 作用于文件而不是 fd，
-        // 所以不必碰 hound 内部的 writer 就能刷盘。
+        fs::rename(&pending, &path).context("临时文件改名失败")?;
+        // 同一个打开文件描述的 dup：用来 fdatasync 和 pwrite 头部（不动游标）。
         let sync_file = file.try_clone().context("复制临时文件句柄失败")?;
+        let sink = Sink(std::sync::Arc::new(std::sync::Mutex::new(std::io::BufWriter::new(file))));
 
         Ok(Session {
             root: self.root.clone(),
             tmp_path: path,
-            writer: Some(hound::WavWriter::new(
-                std::io::BufWriter::new(file),
-                wav_spec(),
-            )?),
+            writer: Some(hound::WavWriter::new(sink.clone(), wav_spec())?),
+            sink,
             sync_file,
             last_checkpoint: std::time::Instant::now(),
             hasher: Sha256::new(),
             samples: 0,
+            #[cfg(test)]
+            fail_next_checkpoint: false,
         })
     }
 
@@ -429,7 +460,13 @@ pub fn wav_spec() -> hound::WavSpec {
 pub struct Session {
     root: PathBuf,
     tmp_path: PathBuf,
-    writer: Option<hound::WavWriter<std::io::BufWriter<File>>>,
+    writer: Option<hound::WavWriter<Sink>>,
+    /// 与 `writer` 共享同一个 BufWriter：checkpoint 从这里直接 flush，
+    /// **不走 hound 的 `flush()`**——它会 seek 到头部改长度，中途出错时游标
+    /// 停在头部，之后的采样会覆盖文件开头（评审 M1）。我们 flush 与写头都不动游标。
+    sink: Sink,
+    #[cfg(test)]
+    fail_next_checkpoint: bool,
     /// 同一文件的另一个句柄，只用来 fdatasync。
     sync_file: File,
     last_checkpoint: std::time::Instant,
@@ -466,13 +503,25 @@ impl Session {
         std::mem::forget(self);
     }
 
-    /// 让此刻之前的数据在崩溃后可恢复：hound 的 `flush` 会回填头部长度并
-    /// flush BufWriter（已读 hound 3.5.1 源码核实：seek 回头部写 size、flush、
-    /// 再 seek 回原位），然后 fdatasync 落盘。
+    /// 让此刻之前的数据在崩溃后可恢复：flush 共享的 BufWriter，用 `pwrite`
+    /// 回填头部两个长度字段（游标不动，写位置永远在文件末尾），再 fdatasync。
+    /// 任何一步失败都**不会**影响后续写入的位置；头部长度其实也不是恢复所必需
+    /// （抢救按文件长度重修），只是让半截文件对普通播放器更友好。
     pub(crate) fn checkpoint(&mut self) -> Result<()> {
+        use std::os::unix::fs::FileExt;
         self.last_checkpoint = std::time::Instant::now();
-        let w = self.writer.as_mut().expect("session 已提交");
-        w.flush().context("flush WAV 失败")?;
+        #[cfg(test)]
+        if std::mem::take(&mut self.fail_next_checkpoint) {
+            anyhow::bail!("注入的 EIO");
+        }
+        self.sink.flush().context("flush 录音数据失败")?;
+        let data_len = (self.samples * 2) as u32;
+        self.sync_file
+            .write_all_at(&(data_len + 36).to_le_bytes(), 4)
+            .context("回填 RIFF size 失败")?;
+        self.sync_file
+            .write_all_at(&data_len.to_le_bytes(), (WAV_HEADER_LEN - 4) as u64)
+            .context("回填 data size 失败")?;
         self.sync_file.sync_data().context("fdatasync 临时文件失败")?;
         Ok(())
     }
@@ -497,7 +546,8 @@ impl Session {
 
         // 3–5. rename → fsync 目录 → 清单（与启动抢救共用同一段）
         let hash = format!("{:x}", std::mem::take(&mut self.hasher).finalize());
-        let final_path = publish(&self.root, &self.tmp_path, &hash, self.samples, false)?;
+        let final_path = publish_rename(&self.root, &self.tmp_path, &hash)?;
+        finish_publish(&self.root, &hash, self.samples, false)?;
 
         Ok(Committed {
             path: final_path,
@@ -535,14 +585,40 @@ fn parse_wav_header(b: &[u8]) -> Option<usize> {
     Some(WAV_HEADER_LEN)
 }
 
-/// 提交协议后半段：rename 到内容寻址路径 → fsync 目录 → 追加清单。
-/// 调用前临时文件必须已经 fsync 过。
-fn publish(root: &Path, tmp: &Path, hash: &str, samples: u64, recovered: bool) -> Result<PathBuf> {
+/// 与 hound 共享的写入端：`Arc<Mutex<BufWriter<File>>>`。
+#[derive(Clone)]
+struct Sink(std::sync::Arc<std::sync::Mutex<std::io::BufWriter<File>>>);
+
+impl Sink {
+    fn inner(&self) -> std::sync::MutexGuard<'_, std::io::BufWriter<File>> {
+        self.0.lock().unwrap_or_else(|e| e.into_inner())
+    }
+}
+impl Write for Sink {
+    fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+        self.inner().write(b)
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.inner().flush()
+    }
+}
+impl std::io::Seek for Sink {
+    fn seek(&mut self, p: std::io::SeekFrom) -> std::io::Result<u64> {
+        self.inner().seek(p)
+    }
+}
+
+/// 提交协议后半段第 3 步：原子改名到内容寻址路径。调用前临时文件必须已 fsync。
+fn publish_rename(root: &Path, tmp: &Path, hash: &str) -> Result<PathBuf> {
     let final_path = root.join("raw/audio").join(format!("{hash}.wav"));
     fs::rename(tmp, &final_path).context("rename 失败")?;
-    fsync_dir(&root.join("raw/audio"))?;
-    append_manifest(root, hash, samples, recovered)?;
     Ok(final_path)
+}
+
+/// 第 4、5 步：fsync 目录 → 追加清单。
+fn finish_publish(root: &Path, hash: &str, samples: u64, recovered: bool) -> Result<()> {
+    fsync_dir(&root.join("raw/audio"))?;
+    append_manifest(root, hash, samples, recovered)
 }
 
 fn append_manifest(root: &Path, hash: &str, samples: u64, recovered: bool) -> Result<()> {
@@ -551,21 +627,20 @@ fn append_manifest(root: &Path, hash: &str, samples: u64, recovered: bool) -> Re
     // 接收序号用行号隐含表达；M1 单进程单会话，M4 协议化时换成 SQLite（见 ingest-design §3.3）
     // `recovered` 只在抢救时出现；读取方应按 `#[serde(default)]`（缺省 = false）处理老行。
     let extra = if recovered { r#","recovered":true"# } else { "" };
-    writeln!(
-        f,
-        r#"{{"content_hash":"{hash}","samples":{samples},"received_at":{}{extra}}}"#,
+    // 先拼成一整行、单次 write_all：O_APPEND 下单次 write 不会与别的进程的行交错
+    // （`writeln!` 会拆成多次 write）。
+    let line = format!(
+        "{{\"content_hash\":\"{hash}\",\"samples\":{samples},\"received_at\":{}{extra}}}\n",
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_secs()
-    )?;
+    );
+    f.write_all(line.as_bytes())?;
     f.sync_all().context("fsync 清单失败")?;
     drop(f);
     fsync_dir(&root.join("raw"))?;
     Ok(())
-}
-
-impl Session {
 }
 
 fn fsync_dir(p: &Path) -> Result<()> {
@@ -783,6 +858,103 @@ mod tests {
         sess.write(&vec![1i16; 100]).unwrap();
         let c = sess.commit().unwrap();
         assert_eq!(read_wav(&c.path).len(), 40_100);
+        fs::remove_dir_all(&root).ok();
+    }
+
+    /// M1：checkpoint 失败后继续录音，之后的采样必须仍然追加在末尾，
+    /// 不能覆盖文件开头（旧实现靠 hound 的 flush，出错时游标会停在头部）。
+    #[test]
+    fn failed_checkpoint_does_not_corrupt_later_samples() {
+        let root = tmpdir();
+        let s = Store::open(&root).unwrap();
+        let mut sess = s.begin().unwrap();
+        let a: Vec<i16> = (0..16_000).map(|i| (i % 500) as i16).collect();
+        let b: Vec<i16> = (0..16_000).map(|i| -((i % 400) as i16)).collect();
+        sess.write(&a).unwrap();
+        sess.fail_next_checkpoint = true;
+        assert!(sess.checkpoint().is_err());
+        sess.write(&b).unwrap();
+        sess.checkpoint().unwrap(); // 下一次正常 checkpoint 恢复
+        sess.write(&a).unwrap();
+        let c = sess.commit().unwrap();
+        let want: Vec<i16> = a.iter().chain(&b).chain(&a).copied().collect();
+        assert_eq!(read_wav(&c.path), want);
+        let mut h = Sha256::new();
+        h.update(bytemuck_cast(&want));
+        assert_eq!(c.content_hash, format!("{:x}", h.finalize()));
+        fs::remove_dir_all(&root).ok();
+    }
+
+    /// checkpoint 之后的头部长度是对的（pwrite 回填），不靠抢救也能读出已刷的部分。
+    #[test]
+    fn checkpoint_backfills_header_lengths() {
+        let root = tmpdir();
+        let s = Store::open(&root).unwrap();
+        let mut sess = s.begin().unwrap();
+        sess.write(&vec![5i16; 20_000]).unwrap();
+        sess.checkpoint().unwrap();
+        let f = tmp_files(&root).pop().unwrap();
+        assert_eq!(read_wav(&f).len(), 20_000);
+        sess.write(&vec![5i16; 10]).unwrap();
+        sess.commit().unwrap();
+        fs::remove_dir_all(&root).ok();
+    }
+
+    /// M2：begin 创建与加锁之间别的进程不能删掉它——过渡名 `.pending-*`
+    /// 新的不碰、陈旧的清掉；begin 完成后文件用正式名、无 pending 残留。
+    #[test]
+    fn fresh_pending_file_is_left_alone_and_stale_one_is_removed() {
+        let root = tmpdir();
+        Store::open(&root).unwrap();
+        let fresh = root.join("raw/.tmp/.pending-fresh");
+        let stale = root.join("raw/.tmp/.pending-stale");
+        fs::write(&fresh, b"").unwrap();
+        fs::write(&stale, b"").unwrap();
+        age_file(&stale, 1);
+        let s = Store::open(&root).unwrap();
+        assert!(fresh.exists(), "新的 pending 可能属于正在 begin 的进程");
+        assert!(!stale.exists());
+        let sess = s.begin().unwrap();
+        let names: Vec<String> = tmp_files(&root)
+            .iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert!(names.iter().filter(|n| !n.starts_with(".pending-")).count() == 1, "{names:?}");
+        sess.crash();
+        fs::remove_dir_all(&root).ok();
+    }
+
+    /// M3：rename 之后清单写不进去（manifest.jsonl 是目录），录音仍要进 take_recovered。
+    #[test]
+    fn manifest_failure_after_rename_still_reports_recovered() {
+        let root = tmpdir();
+        let kept = vec![4i16; 16_000];
+        {
+            let s = Store::open(&root).unwrap();
+            let mut sess = s.begin().unwrap();
+            sess.write(&kept).unwrap();
+            sess.checkpoint().unwrap();
+            sess.crash();
+        }
+        fs::create_dir(root.join("raw/manifest.jsonl")).unwrap();
+        let s2 = Store::open(&root).unwrap();
+        let r = s2.take_recovered();
+        assert_eq!(r.len(), 1, "音频已入库，必须交给调用方转写");
+        assert_eq!(read_wav(&r[0].committed.path), kept);
+        assert!(tmp_files(&root).is_empty());
+        fs::remove_dir_all(&root).ok();
+    }
+
+    /// L1：清单每行是一次 write_all 写出的完整一行。
+    #[test]
+    fn manifest_rows_are_whole_lines() {
+        let root = tmpdir();
+        let s = Store::open(&root).unwrap();
+        commit_one(&s, 1);
+        commit_one(&s, 2);
+        let m = fs::read_to_string(root.join("raw/manifest.jsonl")).unwrap();
+        assert_eq!(m.lines().count(), 2);
+        assert!(m.ends_with('\n') && m.lines().all(|l| l.starts_with('{') && l.ends_with('}')));
         fs::remove_dir_all(&root).ok();
     }
 
