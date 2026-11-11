@@ -440,6 +440,9 @@ impl TtsEngine for HttpTts {
     }
 
     fn synthesize(&self, text: &str, lang: TalkLang) -> Result<Vec<u8>> {
+        // 每次真的去请求都记一笔使用：宿主按需拉起的边车靠这个空闲计时，
+        // 长对话不会在两句之间被收掉。请求还在飞的时候回收线程会让开。
+        let _use = TtsInflight::enter();
         // 音色/语系/语气都随请求走：这样菜单改完**下一轮立刻生效**，
         // 不用重启边车、也不用重启守护进程。
         let mut payload = serde_json::json!({
@@ -685,6 +688,13 @@ static PLAYING: std::sync::Mutex<Option<Player>> = std::sync::Mutex::new(None);
 static INTERRUPTS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// 打断计数器的当前值。调用方记下开始时的值，事后比对。
+/// 每次 [`stop_playback`] 调用都加一（含没在播的时候）。
+static STOP_EPOCH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+pub fn stop_epoch() -> u64 {
+    STOP_EPOCH.load(std::sync::atomic::Ordering::SeqCst)
+}
+
 pub fn interrupts() -> u64 {
     INTERRUPTS.load(std::sync::atomic::Ordering::SeqCst)
 }
@@ -693,6 +703,9 @@ pub fn interrupts() -> u64 {
 ///
 /// 返回 `true` 表示确实掐掉了东西。没在播时是 no-op，调用方不必先查状态。
 pub fn stop_playback() -> bool {
+    // 不管有没有在播都记一笔：宿主 speak 还在等边车 / 合成时收到停止，
+    // 那时没有播放句柄可掐，靠这个让它醒来后别再开播。
+    STOP_EPOCH.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     let Ok(mut slot) = PLAYING.lock() else {
         return false;
     };
@@ -1476,6 +1489,62 @@ pub fn sidecar_action(health: EndpointHealth, autostart: bool, command: &[String
     SidecarAction::Start
 }
 
+/// 宿主 `speak` 拉不起 TTS 时写进 `speech.reason` 的原因。
+///
+/// 自由字符串，不是 `error.code`。边车已经起来、合成或播放仍失败时
+/// 继续用 `tts_unavailable`，不走这个枚举。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TtsBootError {
+    /// 没在跑，而且这次不会拉（关了自动拉起、没有拉起命令，或端口被占又不能换）。
+    NotRunning,
+    /// 拉起命令失败，或进程起来就退出了。换端口失败也归这里（那条路只回成功与否）。
+    StartFailed,
+    /// 拉起来了，但在就绪时限内没有应答。
+    StartTimeout,
+}
+
+impl TtsBootError {
+    pub fn reason(self) -> &'static str {
+        match self {
+            Self::NotRunning => "sidecar_not_running",
+            Self::StartFailed => "start_failed",
+            Self::StartTimeout => "start_timeout",
+        }
+    }
+}
+
+/// `sidecar_action` 决定要拉之后，这一次尝试的结局。纯映射的输入，测试不真的起进程。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BootAttempt {
+    Ready,
+    Exited,
+    TimedOut,
+    SpawnFailed,
+}
+
+/// 把「该不该拉」和「拉的结果」收成宿主播报能用的原因。
+///
+/// `AlreadyUp` 成功。拉不了（关了、没命令、端口被占又不能换）是
+/// `sidecar_not_running`。`Start` 把进程退出和等满分开；`Relocate`
+/// 只知道成或不成，失败一律 `start_failed`。
+fn boot_error(action: SidecarAction, attempt: Option<BootAttempt>) -> Result<(), TtsBootError> {
+    match action {
+        SidecarAction::AlreadyUp => Ok(()),
+        SidecarAction::CantStartDisabled | SidecarAction::CantStartNoCommand | SidecarAction::PortTaken => {
+            Err(TtsBootError::NotRunning)
+        }
+        SidecarAction::Relocate => match attempt {
+            Some(BootAttempt::Ready) => Ok(()),
+            _ => Err(TtsBootError::StartFailed),
+        },
+        SidecarAction::Start => match attempt {
+            Some(BootAttempt::Ready) => Ok(()),
+            Some(BootAttempt::TimedOut) => Err(TtsBootError::StartTimeout),
+            _ => Err(TtsBootError::StartFailed),
+        },
+    }
+}
+
 /// 对话模式需要的边车清单。**按引擎派生，不是写死两个**：
 /// 用 `mock` LLM 或 `say` TTS 时那一路根本不需要边车，探它只会误导用户。
 pub fn sidecar_specs(cfg: &crate::config::Config) -> Vec<Sidecar> {
@@ -1604,6 +1673,116 @@ fn kill_child(pid: i32) -> bool {
     }
 }
 
+/// TTS 正在被用（合成，或宿主播报正在等边车起来）。回收线程拿这把锁和
+/// [`SPAWNED`] 的顺序是：先 `SPAWNED`，再这里。其它路径只拿这一把，不拿 `SPAWNED`。
+struct TtsUse {
+    last: Option<Instant>,
+    inflight: u32,
+}
+
+static TTS_USE: std::sync::Mutex<TtsUse> = std::sync::Mutex::new(TtsUse {
+    last: None,
+    inflight: 0,
+});
+
+static TTS_REAPER_STARTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// 一次 TTS 使用。进入时记下时间并占住「正在用」，离开时再记一次，
+/// 空闲从**请求结束**起算。
+struct TtsInflight;
+
+impl TtsInflight {
+    fn enter() -> Self {
+        {
+            let mut g = TTS_USE.lock().unwrap_or_else(|e| e.into_inner());
+            g.inflight = g.inflight.saturating_add(1);
+            g.last = Some(Instant::now());
+        }
+        start_tts_reaper();
+        Self
+    }
+}
+
+impl Drop for TtsInflight {
+    fn drop(&mut self) {
+        let mut g = TTS_USE.lock().unwrap_or_else(|e| e.into_inner());
+        g.inflight = g.inflight.saturating_sub(1);
+        g.last = Some(Instant::now());
+    }
+}
+
+/// 要不要收掉我们拉起的 TTS。有请求在飞、或还没使用过、或没到上限，都不收。
+///
+/// 对话模式下一律不收：那条路只在启动 / 切模式时拉边车，收掉后下一轮就没声音。
+pub fn tts_reap_reason(
+    inflight: u32,
+    idle: Option<Duration>,
+    limit: Duration,
+    conversation: bool,
+) -> Option<&'static str> {
+    if conversation || inflight > 0 {
+        return None;
+    }
+    match idle {
+        Some(d) if d >= limit => Some("空闲超时"),
+        _ => None,
+    }
+}
+
+fn start_tts_reaper() {
+    if TTS_REAPER_STARTED.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        return;
+    }
+    let spawned = std::thread::Builder::new().name("tts-idle".into()).spawn(|| loop {
+        std::thread::sleep(Duration::from_secs(15));
+        let limit = Duration::from_secs(crate::config::get().tts_idle_secs);
+        reap_idle_tts(limit);
+    });
+    if spawned.is_err() {
+        TTS_REAPER_STARTED.store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+/// 空闲够久，就关掉**我们拉起的** TTS。用户自己起的、以及 LLM，都不动。
+///
+/// 进 `SPAWNED` 之后再看一眼「正在用」：拉起方会先占住 inflight，再 `spawn`，
+/// 这样不会把刚拉起来的进程收掉。
+fn reap_idle_tts(limit: Duration) {
+    // 判定、摘除、杀进程全程握着 TTS_USE：新请求的 `TtsInflight::enter` 会等到
+    // 这里做完，不会出现「刚探活成功就被杀」。锁序固定为 SPAWNED → TTS_USE。
+    let mut guard = SPAWNED.lock().unwrap_or_else(|e| e.into_inner());
+    let usage = TTS_USE.lock().unwrap_or_else(|e| e.into_inner());
+    let conversation = crate::config::get().talk_mode == crate::config::TalkMode::Conversation;
+    if tts_reap_reason(usage.inflight, usage.last.map(|t| t.elapsed()), limit, conversation).is_none() {
+        return;
+    }
+    let mut kept = Vec::with_capacity(guard.len());
+    let mut kids = Vec::new();
+    for (name, child) in guard.drain(..) {
+        if name == "TTS" {
+            kids.push(child);
+        } else {
+            kept.push((name, child));
+        }
+    }
+    *guard = kept;
+    if kids.is_empty() {
+        return;
+    }
+    for mut child in kids {
+        let pid = child.id() as i32;
+        log::info!("空闲超时：关掉我们拉起的 TTS 边车（pid {pid}）");
+        // 先从信号槽位注销，再回收：wait 返回后 pid 就可能被系统复用。
+        unregister_pid(pid);
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+    // 换过端口的覆盖还指着刚杀掉的进程。清掉，下次按配置地址重新判断。
+    // 仍握着 TTS_USE，并发的拉起（也要先 enter）写不进新覆盖。
+    clear_override("TTS");
+    remove_run_entry("TTS");
+}
+
 /// 这个子进程退出了没有。退出了就**当场**摘除登记并回收，返回 `true`。
 fn child_exited(pid: i32) -> Option<std::process::ExitStatus> {
     let status = {
@@ -1636,95 +1815,154 @@ fn reap_dead_children() {
 /// LLM 冷启动要几秒到十几秒（含 Metal 着色器编译），所以给足。
 const READY_TIMEOUT: Duration = Duration::from_secs(90);
 
+/// 把**一个**边车拉到可用。日志和成败与原来 `ensure_sidecars` 的循环体相同；
+/// 失败时多带一个原因，给宿主播报写进 `speech.reason`。
+///
+/// 不碰 [`STARTUP`]：对话模式的拉起线程占着那把闸，这里再 `wait` 会和自己死锁。
+fn ensure_one(cfg: &crate::config::Config, spec: Sidecar) -> Result<(), TtsBootError> {
+    // 先把已经死掉的子进程从登记表和信号槽位里摘掉（它们的 pid 回收后可能被复用）。
+    reap_dead_children();
+    // ① 这个进程里已经换过端口：换出来的那个还活着就接着用，死了就作废。
+    // ⚠️ 这里只看**内存**里的覆盖，不看运行态记录：记录里的那个要走下面的
+    // 「接回」（校验 pid、登记收尾），直接拿来用会漏掉退出时的收尾。
+    if let Some((current, _pid)) = override_entry(spec.name, &spec.url) {
+        if probe_health(&current).0 == EndpointHealth::Up {
+            log::info!("{} 边车已在跑（换过端口）：{current}", spec.name);
+            return Ok(());
+        }
+        log::warn!("{} 边车换出来的端口 {current} 不再应答——作废（连同进程），重新判断", spec.name);
+        // **按 pid 收掉并摘除所有登记**，不只是删覆盖——评审的阻塞项：
+        // 只删覆盖、pid 还挂在登记表里，退出时就可能打到复用了这个 pid 的别人。
+        discard_relocated(spec.name, &spec.url);
+    }
+    // ② 上次（崩溃前）换端口拉起的那个还活着：接回来，别再起一份。
+    if adopt_from_run_file(spec.name, &spec.url).is_some() {
+        return Ok(());
+    }
+    let (health, detail) = probe_health(&spec.url);
+    let action = sidecar_action(health, cfg.talk_autostart, &spec.command);
+    let attempt = match action {
+        SidecarAction::AlreadyUp => {
+            log::info!("{} 边车已在跑：{}", spec.name, spec.url);
+            Some(BootAttempt::Ready)
+        }
+        SidecarAction::PortTaken => {
+            log::error!("{}", describe_port_taken(spec.name, &spec.url, &detail, false));
+            None
+        }
+        SidecarAction::Relocate => {
+            Some(if relocate_and_start(&spec, &detail) {
+                BootAttempt::Ready
+            } else {
+                BootAttempt::SpawnFailed
+            })
+        }
+        SidecarAction::CantStartDisabled => {
+            log::warn!(
+                "{} 边车没起（{}），且配置里关了自动拉起（talk_autostart=false）",
+                spec.name,
+                spec.url
+            );
+            log::warn!("  自己起一下：{}", startup_hint(spec.name));
+            None
+        }
+        SidecarAction::CantStartNoCommand => {
+            // **不许静默。** 没有拉起命令不是错，但用户必须知道该跑什么，
+            // 否则他按了键只会有文字没有声音（这是 v0.6/v0.7.0 的短板）。
+            log::warn!("{} 边车没起（{}），也没有配置拉起命令", spec.name, spec.url);
+            log::warn!("  自己起一下：{}", startup_hint(spec.name));
+            None
+        }
+        SidecarAction::Start => {
+            log::info!(
+                "{} 边车没起，按配置拉起：{}",
+                spec.name,
+                spec.command.join(" ")
+            );
+            match spawn_sidecar(spec.name, &spec.command) {
+                // 等满了还没好（TimedOut）时，子进程**留在登记表里**：它在配置的地址上，
+                // 之后真起来了下一次探活就是 `AlreadyUp`，退出时也照常被收掉。
+                // （换端口那条路不一样，见 `relocate_and_start_with`。）
+                Ok(pid) => match wait_ready(spec.name, pid, &spec.url, READY_TIMEOUT) {
+                    ReadyOutcome::Ready => {
+                        log::info!("{} 边车已就绪", spec.name);
+                        Some(BootAttempt::Ready)
+                    }
+                    other => {
+                        log::error!(
+                            "{} 边车拉起后在 {:?} 内没就绪，用 --diagnose 看详情",
+                            spec.name,
+                            READY_TIMEOUT
+                        );
+                        Some(if other == ReadyOutcome::Exited {
+                            BootAttempt::Exited
+                        } else {
+                            BootAttempt::TimedOut
+                        })
+                    }
+                },
+                Err(e) => {
+                    log::error!("拉起 {} 边车失败：{e}", spec.name);
+                    Some(BootAttempt::SpawnFailed)
+                }
+            }
+        }
+    };
+    boot_error(action, attempt)
+}
+
 /// **连接优先、拉起兜底**（ADR-0002 §8 的老规矩，通话边车照抄）。
 ///
 /// 返回每个边车最终是否可用。**这个函数会阻塞**（最多 `READY_TIMEOUT`），
 /// 所以调用方要用 [`ensure_sidecars_async`]——菜单和启动路径都不能卡住。
 pub fn ensure_sidecars(cfg: &crate::config::Config) -> Vec<(&'static str, bool)> {
-    let mut out = Vec::new();
-    // 先把已经死掉的子进程从登记表和信号槽位里摘掉（它们的 pid 回收后可能被复用）。
-    reap_dead_children();
-    for spec in sidecar_specs(cfg) {
-        // ① 这个进程里已经换过端口：换出来的那个还活着就接着用，死了就作废。
-        // ⚠️ 这里只看**内存**里的覆盖，不看运行态记录：记录里的那个要走下面的
-        // 「接回」（校验 pid、登记收尾），直接拿来用会漏掉退出时的收尾。
-        if let Some((current, _pid)) = override_entry(spec.name, &spec.url) {
-            if probe_health(&current).0 == EndpointHealth::Up {
-                log::info!("{} 边车已在跑（换过端口）：{current}", spec.name);
-                out.push((spec.name, true));
-                continue;
-            }
-            log::warn!("{} 边车换出来的端口 {current} 不再应答——作废（连同进程），重新判断", spec.name);
-            // **按 pid 收掉并摘除所有登记**，不只是删覆盖——评审的阻塞项：
-            // 只删覆盖、pid 还挂在登记表里，退出时就可能打到复用了这个 pid 的别人。
-            discard_relocated(spec.name, &spec.url);
+    sidecar_specs(cfg)
+        .into_iter()
+        .map(|spec| {
+            let name = spec.name;
+            (name, ensure_one(cfg, spec).is_ok())
+        })
+        .collect()
+}
+
+/// 宿主 `speak` 专用：只保证 **TTS** 能用，不拉 LLM。
+///
+/// `say` 引擎没有边车，直接成功。HTTP 引擎走和对话模式同一套拉起
+/// （[`ensure_one`]：连接优先，`talk_autostart` + `talk_tts_start_command`
+/// 才拉，等就绪最多 [`READY_TIMEOUT`]）。对话模式正在拉边车时先等它结束，
+/// 避免同一条命令被拉起两次。
+///
+/// 调用期间记一笔「正在用」，空闲回收不会把刚拉起来的进程收掉。
+pub fn ensure_tts(cfg: &crate::config::Config) -> Result<(), TtsBootError> {
+    if cfg.talk_tts_engine == "say" {
+        return Ok(());
+    }
+    let _hold = TtsInflight::enter();
+    // 拿到启动闸才往下：对话模式的拉起线程占着时先等它；我们占着时，
+    // 对话模式那边 `try_begin` 失败、不会再拉第二份。
+    let waited_from = Instant::now();
+    let deadline = waited_from + READY_TIMEOUT;
+    loop {
+        if STARTUP.try_begin() {
+            break;
         }
-        // ② 上次（崩溃前）换端口拉起的那个还活着：接回来，别再起一份。
-        if adopt_from_run_file(spec.name, &spec.url).is_some() {
-            out.push((spec.name, true));
-            continue;
-        }
-        let (health, detail) = probe_health(&spec.url);
-        match sidecar_action(health, cfg.talk_autostart, &spec.command) {
-            SidecarAction::AlreadyUp => {
-                log::info!("{} 边车已在跑：{}", spec.name, spec.url);
-                out.push((spec.name, true));
-            }
-            SidecarAction::PortTaken => {
-                log::error!("{}", describe_port_taken(spec.name, &spec.url, &detail, false));
-                out.push((spec.name, false));
-            }
-            SidecarAction::Relocate => {
-                out.push((spec.name, relocate_and_start(&spec, &detail)));
-            }
-            SidecarAction::CantStartDisabled => {
-                log::warn!(
-                    "{} 边车没起（{}），且配置里关了自动拉起（talk_autostart=false）",
-                    spec.name,
-                    spec.url
-                );
-                log::warn!("  自己起一下：{}", startup_hint(spec.name));
-                out.push((spec.name, false));
-            }
-            SidecarAction::CantStartNoCommand => {
-                // **不许静默。** 没有拉起命令不是错，但用户必须知道该跑什么，
-                // 否则他按了键只会有文字没有声音（这是 v0.6/v0.7.0 的短板）。
-                log::warn!("{} 边车没起（{}），也没有配置拉起命令", spec.name, spec.url);
-                log::warn!("  自己起一下：{}", startup_hint(spec.name));
-                out.push((spec.name, false));
-            }
-            SidecarAction::Start => {
-                log::info!(
-                    "{} 边车没起，按配置拉起：{}",
-                    spec.name,
-                    spec.command.join(" ")
-                );
-                match spawn_sidecar(spec.name, &spec.command) {
-                    // 等满了还没好（TimedOut）时，子进程**留在登记表里**：它在配置的地址上，
-                    // 之后真起来了下一次探活就是 `AlreadyUp`，退出时也照常被收掉。
-                    // （换端口那条路不一样，见 `relocate_and_start_with`。）
-                    Ok(pid) => {
-                        let ready = wait_ready(spec.name, pid, &spec.url, READY_TIMEOUT) == ReadyOutcome::Ready;
-                        if ready {
-                            log::info!("{} 边车已就绪", spec.name);
-                        } else {
-                            log::error!(
-                                "{} 边车拉起后在 {:?} 内没就绪，用 --diagnose 看详情",
-                                spec.name,
-                                READY_TIMEOUT
-                            );
-                        }
-                        out.push((spec.name, ready));
-                    }
-                    Err(e) => {
-                        log::error!("拉起 {} 边车失败：{e}", spec.name);
-                        out.push((spec.name, false));
-                    }
-                }
-            }
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() || STARTUP.wait(left) == StartupWait::TimedOut {
+            log::warn!(
+                "宿主播报等边车拉起，等满 {:?} 还没结束——这次不重复拉 TTS",
+                READY_TIMEOUT
+            );
+            return Err(TtsBootError::StartTimeout);
         }
     }
-    out
+    let _done = StartupDone;
+    if waited_from.elapsed() > Duration::from_millis(50) {
+        log::info!("宿主播报先等边车拉起：等了 {:.1}s", waited_from.elapsed().as_secs_f32());
+    }
+    let Some(spec) = sidecar_specs(cfg).into_iter().find(|s| s.name == "TTS") else {
+        return Ok(());
+    };
+    ensure_one(cfg, spec)
 }
 
 /// 起一条后台线程做 [`ensure_sidecars`]——**菜单和启动路径都不能被它卡住**。
@@ -2414,9 +2652,27 @@ pub fn answer(engines: &Engines, cfg: &crate::config::Config, user_text: &str, l
 
 /// 合成 + 播放，返回播放时长。
 pub fn speak(engines: &Engines, text: &str, lang: TalkLang) -> Result<Duration> {
+    speak_then(engines, text, lang, &|| false, &mut || {})
+}
+
+/// 同 [`speak`]，但在**合成成功、即将播放**时调一次 `on_begin`。
+///
+/// 合成失败不会调它。宿主播报用这个时机发 `speech.state=started`：
+/// 边车还没起来、或者合成没成，宿主不该先看到「已经开始播」。
+pub fn speak_then(
+    engines: &Engines,
+    text: &str,
+    lang: TalkLang,
+    cancelled: &dyn Fn() -> bool,
+    on_begin: &mut dyn FnMut(),
+) -> Result<Duration> {
     let started = Instant::now();
     let wav = engines.tts.synthesize(text, lang)?;
     let synth = started.elapsed();
+    if cancelled() {
+        log::info!("合成完成时这条播报已被停止，不开播");
+        return Ok(Duration::ZERO);
+    }
     crate::timings::note_tts_first(synth);
     log::info!(
         "通话 TTS（{}）{:.2}s，{} 字节",
@@ -2425,6 +2681,7 @@ pub fn speak(engines: &Engines, text: &str, lang: TalkLang) -> Result<Duration> 
         wav.len()
     );
     crate::timings::mark(crate::timings::Stage::AudioFirst);
+    on_begin();
     let played = play_blocking(&wav);
     crate::timings::mark(crate::timings::Stage::PlayEnd);
     played
@@ -2996,6 +3253,82 @@ mod tests {
         for (auto, c) in [(true, &cmd[..]), (true, &[][..]), (false, &cmd[..]), (false, &[][..])] {
             assert_ne!(sidecar_action(WrongService, auto, c), SidecarAction::Start);
         }
+    }
+
+    /// 宿主播报的失败原因：拉不了、拉失败、等满，三句要能分开。
+    #[test]
+    fn boot_error_maps_sidecar_actions_onto_speak_reasons() {
+        use SidecarAction::*;
+        assert_eq!(TtsBootError::NotRunning.reason(), "sidecar_not_running");
+        assert_eq!(TtsBootError::StartFailed.reason(), "start_failed");
+        assert_eq!(TtsBootError::StartTimeout.reason(), "start_timeout");
+        assert_eq!(boot_error(AlreadyUp, None), Ok(()));
+        assert_eq!(boot_error(CantStartDisabled, None), Err(TtsBootError::NotRunning));
+        assert_eq!(boot_error(CantStartNoCommand, None), Err(TtsBootError::NotRunning));
+        assert_eq!(boot_error(PortTaken, None), Err(TtsBootError::NotRunning));
+        assert_eq!(boot_error(Start, Some(BootAttempt::Ready)), Ok(()));
+        assert_eq!(boot_error(Start, Some(BootAttempt::SpawnFailed)), Err(TtsBootError::StartFailed));
+        assert_eq!(boot_error(Start, Some(BootAttempt::Exited)), Err(TtsBootError::StartFailed));
+        assert_eq!(boot_error(Start, Some(BootAttempt::TimedOut)), Err(TtsBootError::StartTimeout));
+        assert_eq!(boot_error(Start, None), Err(TtsBootError::StartFailed));
+        assert_eq!(boot_error(Relocate, Some(BootAttempt::Ready)), Ok(()));
+        assert_eq!(boot_error(Relocate, Some(BootAttempt::TimedOut)), Err(TtsBootError::StartFailed));
+        assert_eq!(boot_error(Relocate, None), Err(TtsBootError::StartFailed));
+    }
+
+    #[test]
+    fn tts_idle_reap_skips_while_in_use_and_fires_after_the_limit() {
+        let limit = Duration::from_secs(600);
+        assert_eq!(tts_reap_reason(0, None, limit, false), None, "还没使用过不收");
+        assert_eq!(tts_reap_reason(1, Some(limit), limit, false), None, "正在合成不收");
+        assert_eq!(tts_reap_reason(0, Some(limit - Duration::from_secs(1)), limit, false), None);
+        assert_eq!(tts_reap_reason(0, Some(limit), limit, false), Some("空闲超时"));
+        assert_eq!(tts_reap_reason(0, Some(limit * 9), limit, true), None, "对话模式不收");
+    }
+
+    fn tts_cfg_on_dead_port(autostart: bool, command: &[&str]) -> crate::config::Config {
+        let port = {
+            let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            l.local_addr().unwrap().port()
+        };
+        let mut cfg = crate::config::Config::default();
+        cfg.talk_tts_engine = "http".into();
+        cfg.tts_url = Some(format!("http://127.0.0.1:{port}"));
+        cfg.talk_autostart = autostart;
+        cfg.talk_tts_start_command = command.iter().map(|s| s.to_string()).collect();
+        cfg
+    }
+
+    #[test]
+    fn ensure_tts_reports_not_running_when_it_may_not_or_cannot_start() {
+        let _g = registry_guard();
+        let cfg = tts_cfg_on_dead_port(false, &["/bin/sleep", "30"]);
+        assert_eq!(ensure_tts(&cfg), Err(TtsBootError::NotRunning), "关了自动拉起");
+        let cfg = tts_cfg_on_dead_port(true, &[]);
+        assert_eq!(ensure_tts(&cfg), Err(TtsBootError::NotRunning), "没有拉起命令");
+    }
+
+    #[test]
+    fn ensure_tts_reports_start_failed_when_the_command_cannot_run_or_exits() {
+        let _g = registry_guard();
+        let cfg = tts_cfg_on_dead_port(true, &["/nonexistent/agentear-tts"]);
+        assert_eq!(ensure_tts(&cfg), Err(TtsBootError::StartFailed), "命令起不来");
+        let cfg = tts_cfg_on_dead_port(true, &["/usr/bin/true"]);
+        assert_eq!(ensure_tts(&cfg), Err(TtsBootError::StartFailed), "进程马上退出");
+    }
+
+    #[test]
+    fn stop_playback_bumps_the_stop_epoch_even_when_nothing_is_playing() {
+        let before = stop_epoch();
+        stop_playback();
+        assert!(stop_epoch() > before, "冷启动等待期间的停止要靠它被看见");
+    }
+
+    #[test]
+    fn ensure_tts_is_a_no_op_for_the_say_engine() {
+        let mut cfg = crate::config::Config::default();
+        cfg.talk_tts_engine = "say".into();
+        assert!(ensure_tts(&cfg).is_ok());
     }
 
     #[test]
