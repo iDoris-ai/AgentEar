@@ -90,6 +90,10 @@ pub enum BuiltinAction {
     Mode,
     /// 把这句话（去掉指令短语之后的部分，为空则整句）记一条到 `kb/`。
     Note,
+    /// 翻译输入。值 = `en` / `zh` / `th`（目标语言）、`on`（开启，目标沿用当前，没有就英文）、
+    /// `off`（关闭）。**带槽位的 en/zh/th = 一次性**：只翻译槽位并上屏译文，不改配置；
+    /// 不带槽位 = 持续开启到该语言。见 [`translate_intent`]。
+    Translate,
 }
 
 impl BuiltinAction {
@@ -99,7 +103,8 @@ impl BuiltinAction {
             "tone" => Ok(Self::Tone),
             "mode" => Ok(Self::Mode),
             "note" => Ok(Self::Note),
-            other => bail!("未知的内置动作 {other:?}；可选：style / tone / mode / note"),
+            "translate" => Ok(Self::Translate),
+            other => bail!("未知的内置动作 {other:?}；可选：style / tone / mode / note / translate"),
         }
     }
 }
@@ -137,10 +142,18 @@ impl Command {
         match &self.action {
             Action::Builtin { name, value } => {
                 let action = BuiltinAction::parse(name)?;
-                if matches!(action, BuiltinAction::Style | BuiltinAction::Tone | BuiltinAction::Mode)
-                    && value.as_deref().map(str::trim).unwrap_or("").is_empty()
+                if matches!(
+                    action,
+                    BuiltinAction::Style | BuiltinAction::Tone | BuiltinAction::Mode | BuiltinAction::Translate
+                ) && value.as_deref().map(str::trim).unwrap_or("").is_empty()
                 {
                     bail!("内置动作 {name} 需要 value");
+                }
+                if action == BuiltinAction::Translate {
+                    let v = value.as_deref().unwrap_or("").trim();
+                    if !matches!(v, "en" | "zh" | "th" | "on" | "off") {
+                        bail!("translate 的 value 只能是 en / zh / th / on / off，收到 {v:?}");
+                    }
                 }
             }
             Action::OpenUrl { url } => check_scheme(url, &["http", "https", "mailto"])?,
@@ -160,6 +173,43 @@ fn check_scheme(url: &str, allowed: &[&str]) -> Result<()> {
         );
     }
     Ok(())
+}
+
+/// 翻译指令的解读结果。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TranslateIntent {
+    /// 关闭持续翻译。
+    Off,
+    /// 开启；目标语言沿用当前设置，当前是关闭就用英文。
+    On,
+    /// 持续开启到某语言（说了「翻译成英文」但后面没有内容）。
+    Persist(crate::translate::Target),
+    /// 一次性：只翻译槽位并上屏译文，**不改配置**。
+    Once(crate::translate::Target, String),
+}
+
+/// 一次命中是不是翻译指令。纯函数，守护进程的「上屏前预判」与指令执行共用。
+pub fn translate_intent(hit: &Hit) -> Option<TranslateIntent> {
+    use crate::translate::Target;
+    let Action::Builtin { name, value } = &hit.action else {
+        return None;
+    };
+    if BuiltinAction::parse(name).ok()? != BuiltinAction::Translate {
+        return None;
+    }
+    match value.as_deref().map(str::trim)? {
+        "off" => Some(TranslateIntent::Off),
+        "on" => Some(TranslateIntent::On),
+        v => {
+            let target = Target::parse(v)?;
+            let rest = hit.rest.trim();
+            Some(if rest.is_empty() {
+                TranslateIntent::Persist(target)
+            } else {
+                TranslateIntent::Once(target, rest.to_string())
+            })
+        }
+    }
 }
 
 /// 命中结果：命中的指令 + 短语之后的部分（槽位）。
@@ -650,6 +700,56 @@ pub fn default_commands() -> Vec<Command> {
             note: None,
             confirm: false,
         },
+        Command {
+            phrase: "开启翻译".into(),
+            aliases: vec!["打开翻译".into()],
+            action: Action::Builtin {
+                name: "translate".into(),
+                value: Some("on".into()),
+            },
+            note: Some("输入法模式的翻译输出：开（沿用当前目标语言，没有就英文）".into()),
+            confirm: false,
+        },
+        Command {
+            phrase: "关闭翻译".into(),
+            aliases: vec!["停止翻译".into(), "取消翻译".into()],
+            action: Action::Builtin {
+                name: "translate".into(),
+                value: Some("off".into()),
+            },
+            note: Some("输入法模式的翻译输出：关".into()),
+            confirm: false,
+        },
+        Command {
+            phrase: "翻译成英文".into(),
+            aliases: vec!["翻译成英语".into(), "翻译为英文".into(), "翻译为英语".into()],
+            action: Action::Builtin {
+                name: "translate".into(),
+                value: Some("en".into()),
+            },
+            note: Some("后面有内容：只翻译这一句并上屏译文；没有内容：持续翻译成英文".into()),
+            confirm: false,
+        },
+        Command {
+            phrase: "翻译成中文".into(),
+            aliases: vec!["翻译成汉语".into(), "翻译为中文".into(), "翻译成简体中文".into()],
+            action: Action::Builtin {
+                name: "translate".into(),
+                value: Some("zh".into()),
+            },
+            note: Some("后面有内容：只翻译这一句并上屏译文；没有内容：持续翻译成中文".into()),
+            confirm: false,
+        },
+        Command {
+            phrase: "翻译成泰语".into(),
+            aliases: vec!["翻译成泰文".into(), "翻译为泰语".into(), "翻译为泰文".into()],
+            action: Action::Builtin {
+                name: "translate".into(),
+                value: Some("th".into()),
+            },
+            note: Some("后面有内容：只翻译这一句并上屏译文；没有内容：持续翻译成泰语（模型卡只声明中英，泰语质量不稳）".into()),
+            confirm: false,
+        },
     ]
 }
 
@@ -1026,6 +1126,70 @@ mod tests {
         assert!(text("记一下 明天要交报告").is_some());
         assert!(text("请你用粤语").is_some());
         assert!(text("今天天气怎么样").is_none(), "普通问句不该被指令表抢走");
+    }
+
+    #[test]
+    fn translate_phrases_match_with_the_slot_from_the_original_text() {
+        let commands = default_commands();
+        let hit = match_text(&commands, "翻译成英文：今天 review Rust 代码").unwrap();
+        assert_eq!(hit.phrase, "翻译成英文");
+        assert_eq!(hit.rest, "今天 review Rust 代码", "槽位取原文：空格与大小写都在");
+        assert_eq!(
+            translate_intent(&hit),
+            Some(TranslateIntent::Once(crate::translate::Target::En, "今天 review Rust 代码".into()))
+        );
+        // 别名
+        let hit = match_text(&commands, "翻译成泰文，早上好").unwrap();
+        assert_eq!(
+            translate_intent(&hit),
+            Some(TranslateIntent::Once(crate::translate::Target::Th, "早上好".into()))
+        );
+        let hit = match_text(&commands, "翻译成中文: Good morning").unwrap();
+        assert_eq!(
+            translate_intent(&hit),
+            Some(TranslateIntent::Once(crate::translate::Target::Zh, "Good morning".into()))
+        );
+    }
+
+    #[test]
+    fn translate_without_a_slot_is_persistent_and_on_off_work() {
+        let commands = default_commands();
+        let t = |s: &str| translate_intent(&match_text(&commands, s).unwrap());
+        assert_eq!(t("翻译成英文"), Some(TranslateIntent::Persist(crate::translate::Target::En)));
+        assert_eq!(t("翻译成英文。"), Some(TranslateIntent::Persist(crate::translate::Target::En)));
+        assert_eq!(t("开启翻译"), Some(TranslateIntent::On));
+        assert_eq!(t("关闭翻译"), Some(TranslateIntent::Off));
+        assert_eq!(t("取消翻译"), Some(TranslateIntent::Off));
+    }
+
+    #[test]
+    fn translate_phrases_do_not_steal_or_get_stolen() {
+        let commands = default_commands();
+        // 既有短语不受影响
+        for (said, phrase) in [("说英语", "说英语"), ("搜索 translate", "搜索"), ("记一下 翻译成英文", "记一下")] {
+            assert_eq!(match_text(&commands, said).unwrap().phrase, phrase, "{said}");
+        }
+        // 普通句子、只是提到翻译的句子不触发
+        for said in ["今天要翻译一份文档", "请开启翻译功能的设计讨论"] {
+            let hit = match_text(&commands, said);
+            assert!(
+                hit.as_ref().and_then(translate_intent).is_none(),
+                "{said} 不该触发翻译：{hit:?}"
+            );
+        }
+        // 非翻译指令不被当成翻译
+        let hit = match_text(&commands, "搜索 rust").unwrap();
+        assert_eq!(translate_intent(&hit), None);
+    }
+
+    #[test]
+    fn translate_value_is_validated() {
+        let mut c = default_commands().into_iter().find(|c| c.phrase == "翻译成英文").unwrap();
+        assert!(c.validate().is_ok());
+        c.action = Action::Builtin { name: "translate".into(), value: Some("fr".into()) };
+        assert!(c.validate().is_err());
+        c.action = Action::Builtin { name: "translate".into(), value: None };
+        assert!(c.validate().is_err());
     }
 
     #[test]

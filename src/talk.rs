@@ -186,6 +186,10 @@ pub struct OpenAiCompat {
     /// 所以默认 `None` = 不写这个键——独立版默认那条路的请求体一个字节都不变。
     /// 直连 iDoris 时要写：它是网关，得知道要哪个模型。
     model: Option<String>,
+    /// 请求体里的 `max_tokens`。默认 160（对话回答要短）；翻译要按输入长度放大，
+    /// 否则长句译到一半被截断（`extract_content` 会把 `finish_reason != stop` 拒掉，
+    /// 但那样这一轮的翻译就白白失败了）。
+    max_tokens: u32,
 }
 
 impl OpenAiCompat {
@@ -195,7 +199,13 @@ impl OpenAiCompat {
             transport,
             timeout_secs,
             model: None,
+            max_tokens: 160,
         }
+    }
+
+    pub fn with_max_tokens(mut self, max_tokens: u32) -> Self {
+        self.max_tokens = max_tokens.max(1);
+        self
     }
 
     pub fn with_model(mut self, model: Option<String>) -> Self {
@@ -210,7 +220,7 @@ impl OpenAiCompat {
                 {"role": "system", "content": system},
                 {"role": "user", "content": user},
             ],
-            "max_tokens": 160,
+            "max_tokens": self.max_tokens,
             "temperature": 0.3,
         });
         if stream {
@@ -1965,46 +1975,99 @@ pub fn ensure_tts(cfg: &crate::config::Config) -> Result<(), TtsBootError> {
     ensure_one(cfg, spec)
 }
 
+/// 后台线程里在闸下做一件事：**先同步抢闸（抢到就保证后面的 `await_sidecars_for_turn`
+/// 看得见「正在拉起」），没抢到就在后台线程里有界地等闸再做**。
+///
+/// 以前遇闸被占就直接放弃（只在对话模式那条路上）：闸被翻译的 LLM 拉起、或宿主播报的 TTS
+/// 拉起占着时切进对话模式，TTS 就没人拉了，后面每一轮都只有文字。现在改成「等到闸再做」：
+/// 持闸方只会往前走到就绪 / 超时（不会反过来等我们），所以没有环形等待；
+/// `work` 本身是「连接优先」的（先探活），重复做只是多一次探测。
+fn spawn_gated(
+    name: &'static str,
+    gate: &'static StartupGate,
+    max_wait: Duration,
+    work: impl FnOnce() + Send + 'static,
+) -> bool {
+    let held = gate.try_begin();
+    // 用 Builder 而不是 `thread::spawn`：后者起线程失败会 panic，而闸已经占上了——
+    // 那样后面每一轮对话都会白等满 TURN_STARTUP_WAIT。
+    let spawned = std::thread::Builder::new().name(name.into()).spawn(move || {
+        if !held && !gate.acquire(max_wait) {
+            log::warn!("{name}：等别处拉边车等满 {max_wait:?}，这次放弃");
+            return;
+        }
+        // 放在 guard 里收尾：work 中途 panic 也要把闸放开。
+        struct Release(&'static StartupGate);
+        impl Drop for Release {
+            fn drop(&mut self) {
+                self.0.end();
+            }
+        }
+        let _done = Release(gate);
+        work();
+    });
+    match spawned {
+        Ok(_) => true,
+        Err(e) => {
+            if held {
+                gate.end();
+            }
+            log::error!("起 {name} 线程失败：{e}——这次不拉边车");
+            false
+        }
+    }
+}
+
 /// 起一条后台线程做 [`ensure_sidecars`]——**菜单和启动路径都不能被它卡住**。
 ///
 /// 90 秒的就绪等待放在主线程上，菜单栏会整整一分半不响应，
 /// 而用户此刻正在按录音键。
 ///
-/// **已经有一次拉起在进行时不再起第二次**（2026-09-26 补）：连着双击两次
-/// 会让两条线程都探到「没起」、各拉一个，第二个撞端口立刻退出，日志一片红。
+/// 已经有一次拉起在进行时**排队等它结束再做**（见 [`spawn_gated`]），而不是放弃：
+/// 连着双击两次时第二次等第一次做完、探到「已在跑」就结束，不会各拉一个。
 pub fn ensure_sidecars_async(cfg: &crate::config::Config) {
-    if !STARTUP.try_begin() {
-        log::info!("边车正在拉起中，这次不重复拉");
-        return;
-    }
     let cfg = cfg.clone();
-    // 用 Builder 而不是 `thread::spawn`：后者起线程失败会 panic，而闸已经占上了——
-    // 那样后面每一轮对话都会白等满 TURN_STARTUP_WAIT。
-    let spawned = std::thread::Builder::new()
-        .name("talk-sidecars".into())
-        .spawn(move || {
-            // 放在 guard 里收尾：ensure 中途 panic 也要把闸放开，
-            // 否则后面每一轮对话都会白等满 TURN_STARTUP_WAIT。
-            let _done = StartupDone;
-            let results = ensure_sidecars(&cfg);
-            let down: Vec<&str> = results
-                .iter()
-                .filter(|(_, up)| !up)
-                .map(|(name, _)| *name)
-                .collect();
-            if down.is_empty() {
-                log::info!("对话模式的边车都就绪了");
-            } else {
-                log::warn!(
-                    "对话模式还缺 {} 边车——这一轮会只有文字没有声音（跑 --diagnose 看详情）",
-                    down.join(" / ")
-                );
-            }
-        });
-    if let Err(e) = spawned {
-        STARTUP.end();
-        log::error!("起边车检查线程失败：{e}——这次不拉边车");
-    }
+    spawn_gated("talk-sidecars", &STARTUP, READY_TIMEOUT, move || {
+        let results = ensure_sidecars(&cfg);
+        let down: Vec<&str> = results
+            .iter()
+            .filter(|(_, up)| !up)
+            .map(|(name, _)| *name)
+            .collect();
+        if down.is_empty() {
+            log::info!("对话模式的边车都就绪了");
+        } else {
+            log::warn!(
+                "对话模式还缺 {} 边车——这一轮会只有文字没有声音（跑 --diagnose 看详情）",
+                down.join(" / ")
+            );
+        }
+    });
+}
+
+/// 输入法模式开了翻译：**只**保证 LLM 边车（不碰 TTS）。后台线程，菜单和启动都不卡。
+///
+/// 与 [`ensure_sidecars_async`] 共用同一把闸、同一个「排队等闸」规则（[`spawn_gated`]）：
+/// 翻译的 LLM 冷启动占着闸时切进对话模式，对话那次拉起排队、LLM 就绪后接着拉 TTS；
+/// 宿主冷启动 TTS 占闸时（FU-25）LLM 也不会漏拉。
+///
+/// 「只收自己拉起的」由 [`ensure_one`] 的登记表保证，用户手工起的 LLM 一律不动。
+/// 拉起命令为空时（默认）只连不拉，日志里会打出该跑哪条命令——翻译失败时原文照常上屏。
+pub fn ensure_llm_async(cfg: &crate::config::Config) {
+    let Some(spec) = sidecar_specs(cfg).into_iter().find(|s| s.name == "LLM") else {
+        log::info!("翻译：LLM 引擎不是外部边车（mock），不拉边车");
+        return;
+    };
+    let cfg = cfg.clone();
+    spawn_gated("translate-llm", &STARTUP, READY_TIMEOUT, move || {
+        match ensure_one(&cfg, spec) {
+            Ok(()) => log::info!("翻译：LLM 边车就绪"),
+            Err(e) => log::warn!(
+                "翻译：LLM 边车不可用（{}）——翻译会失败，原文照常上屏",
+                e.reason()
+            ),
+        }
+    });
 }
 
 /// 「边车正在被我们拉起」这件事的闸。**抽成结构体是为了能在测试里用局部实例**——
@@ -2041,6 +2104,20 @@ impl StartupGate {
         }
         *g = true;
         true
+    }
+
+    /// 有界地等到抢到闸。抢到返回 `true`，等满还没抢到返回 `false`。
+    pub fn acquire(&self, max: Duration) -> bool {
+        let deadline = Instant::now() + max;
+        loop {
+            if self.try_begin() {
+                return true;
+            }
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() || self.wait(left) == StartupWait::TimedOut {
+                return false;
+            }
+        }
     }
 
     /// 放闸并叫醒所有在等的回答线程。
@@ -3888,6 +3965,57 @@ mod tests {
     }
 
     // ---- 首轮与边车拉起赛跑（2026-09-26）----
+
+    #[test]
+    fn a_second_gated_job_queues_behind_the_first_and_still_runs() {
+        // 调度测试（M2）：LLM 冷启动占着闸时「切进对话模式」的那次拉起，
+        // 必须排队、等闸放开后**真的执行**，而不是遇闸就放弃。
+        static GATE: StartupGate = StartupGate::new();
+        let log = std::sync::Arc::new(std::sync::Mutex::new(Vec::<&'static str>::new()));
+        let (l1, l2) = (log.clone(), log.clone());
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        // ① 「翻译的 LLM 冷启动」：占闸并慢慢做
+        assert!(spawn_gated("t-llm", &GATE, Duration::from_secs(5), move || {
+            started_tx.send(()).unwrap();
+            std::thread::sleep(Duration::from_millis(300));
+            l1.lock().unwrap().push("llm-done");
+        }));
+        started_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        // ② 此刻「切进对话模式」：闸被占。它必须排队，之后要把 TTS 拉起来
+        assert!(spawn_gated("t-conv", &GATE, Duration::from_secs(5), move || {
+            l2.lock().unwrap().push("tts-started");
+        }));
+        assert!(!log.lock().unwrap().contains(&"tts-started"), "闸还被占着，不能抢跑");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !log.lock().unwrap().contains(&"tts-started") && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert_eq!(
+            *log.lock().unwrap(),
+            vec!["llm-done", "tts-started"],
+            "对话那次必须在 LLM 拉起结束之后执行（而不是被跳过）"
+        );
+        // 全部结束后闸是空的
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while GATE.wait(Duration::from_millis(10)) != StartupWait::NotStarting && Instant::now() < deadline {}
+        assert_eq!(GATE.wait(Duration::from_millis(1)), StartupWait::NotStarting);
+    }
+
+    #[test]
+    fn a_gated_job_gives_up_after_the_bounded_wait_and_releases_nothing() {
+        static GATE: StartupGate = StartupGate::new();
+        assert!(GATE.try_begin()); // 别处一直占着
+        let ran = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let r = ran.clone();
+        assert!(spawn_gated("t-give-up", &GATE, Duration::from_millis(100), move || {
+            r.store(true, std::sync::atomic::Ordering::SeqCst);
+        }));
+        std::thread::sleep(Duration::from_millis(400));
+        assert!(!ran.load(std::sync::atomic::Ordering::SeqCst), "等不到闸就不做");
+        // 等满放弃的那个线程不能把别人占着的闸放掉
+        assert_eq!(GATE.wait(Duration::from_millis(1)), StartupWait::TimedOut, "闸仍被原持有者占着");
+        GATE.end();
+    }
 
     #[test]
     fn startup_gate_refuses_a_second_concurrent_start() {

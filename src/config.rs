@@ -89,6 +89,51 @@ impl TalkMode {
     }
 }
 
+/// 输入法模式的**输出属性**：转写完之后要不要先翻译成另一种语言再上屏。
+///
+/// 默认 `Off`（缺键 = Off），老用户行为一个字节不变。它不是第三种「模式」：
+/// 翻译只改「上屏的是哪段文字」，录音 → raw 落盘 → 转写 → routes/kb 仍全部是原文。
+/// 对话模式不翻译（那条路是 LLM 回答 + TTS，翻译没有意义）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum InputTranslate {
+    #[default]
+    Off,
+    En,
+    Zh,
+    Th,
+}
+
+impl InputTranslate {
+    /// 菜单和文档都从这一份清单派生（顺序 = 菜单顺序 = tag 偏移）。
+    pub const ALL: &'static [InputTranslate] = &[
+        InputTranslate::Off,
+        InputTranslate::En,
+        InputTranslate::Zh,
+        InputTranslate::Th,
+    ];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            InputTranslate::Off => "off",
+            InputTranslate::En => "en",
+            InputTranslate::Zh => "zh",
+            InputTranslate::Th => "th",
+        }
+    }
+
+    /// 目标语言；`Off` = 不翻译。
+    pub fn target(self) -> Option<crate::translate::Target> {
+        use crate::translate::Target;
+        match self {
+            InputTranslate::Off => None,
+            InputTranslate::En => Some(Target::En),
+            InputTranslate::Zh => Some(Target::Zh),
+            InputTranslate::Th => Some(Target::Th),
+        }
+    }
+}
+
 /// 保留天数的默认值。`Default::default()` 给 0（= 永不清理），
 /// 不是我们要的，所以单列一个。
 fn default_retention_days() -> u32 {
@@ -296,6 +341,10 @@ pub struct Config {
     /// 所以**默认不是它**，而且**切换入口必须是可见的菜单项**（见 `tray.rs`）。
     #[serde(deserialize_with = "lenient")]
     pub talk_mode: TalkMode,
+    /// 输入法模式的翻译输出（见 [`InputTranslate`]）。**默认 `off`**；
+    /// 菜单「输入法输出」与语音指令「翻译成英文 / 关闭翻译」都改它，每轮现读。
+    #[serde(deserialize_with = "lenient")]
+    pub input_translate: InputTranslate,
     /// **旧字段（v0.6.0 引入，v0.7.0 起只读）**：`talk_enabled: true`
     /// 等价于 `talk_mode: "conversation"`。
     ///
@@ -630,6 +679,7 @@ impl Default for Config {
             kb_enabled: default_kb_enabled(),
             kb_dir: None,
             talk_mode: TalkMode::default(),
+            input_translate: InputTranslate::default(),
             talk_enabled_legacy: false,
             talk_lang: TalkLang::default(),
             talk_llm_engine: default_talk_llm_engine(),
@@ -866,6 +916,37 @@ mod tests {
         assert_eq!(c.asr_lang, AsrLang::Auto, "没有 asr_lang 字段时应取默认 Auto");
         assert!(c.llm_autostart, "老配置没有这个字段时应取默认 true");
         assert!(!c.correct_terms, "术语纠错默认关——它要一个额外的边车进程");
+    }
+
+    /// `input_translate` 缺键 = off；非法值只丢这一个字段；往返不变。
+    #[test]
+    fn input_translate_defaults_to_off_and_missing_key_is_off() {
+        assert_eq!(Config::default().input_translate, InputTranslate::Off);
+        assert_eq!(
+            serde_json::from_str::<Config>("{}").unwrap().input_translate,
+            InputTranslate::Off,
+            "老配置没有这个键：必须是 off"
+        );
+        for (raw, want) in [
+            ("en", InputTranslate::En),
+            ("zh", InputTranslate::Zh),
+            ("th", InputTranslate::Th),
+            ("off", InputTranslate::Off),
+        ] {
+            let c: Config = serde_json::from_str(&format!(r#"{{"input_translate":"{raw}"}}"#)).unwrap();
+            assert_eq!(c.input_translate, want);
+            assert_eq!(want.as_str(), raw, "as_str 必须与 serde 名一致");
+        }
+        // 非法值只丢这一个字段，不连累整份配置
+        let c: Config =
+            serde_json::from_str(r#"{"input_translate":"fr","retention_days":7}"#).unwrap();
+        assert_eq!(c.input_translate, InputTranslate::Off);
+        assert_eq!(c.retention_days, 7);
+        // 往返
+        let mut c = Config::default();
+        c.input_translate = InputTranslate::Th;
+        let back: Config = serde_json::from_str(&serde_json::to_string(&c).unwrap()).unwrap();
+        assert_eq!(back.input_translate, InputTranslate::Th);
     }
 
     /// **默认必须是输入法模式。** jason 2026-09-14 拍板：两种模式并存，
