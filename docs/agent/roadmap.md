@@ -61,13 +61,22 @@ AEC 那格也没解决（VPIO 内容级 0/5、**事件级 5/5**）。
   逐组件许可证表、方言人耳验收、上游版本锁定。
 - **T3.2.1 泰语 code-switch** — 独立于 F3.4，约 10 行改动，收益已实测。
 
-## M6 — 嵌入 Agent24（2026-09-27 起，**当前聚焦**）
+## M6 — 嵌入 Agent24（2026-09-27 起，**当前聚焦**；P0–P2 的 AgentEar 侧已完成，P3 可开工）
 
 独立开发阶段到 v0.23.1 为止。现在把 AgentEar 做成 Agent24 的 **A3 附着模块**：AgentEar 自己启动，
 向已经在跑的 Agent24 注册，Agent24 不在时仍能独立运行。约定见 [`docs/agent24-embedding.md`](../agent24-embedding.md)。
 
-- **F6.1 嵌入 Agent24** — P0 契约（`contracts/`）→ P1 transport 抽象 + fake host
-  → P2 单轮端到端（**阻塞**：等 Agent24 冻结 A3 附着协议）→ P3 提案闭环 → P4 流式。
+- **F6.1 嵌入 Agent24** — P0 契约（`contracts/`）✅ #95 → P1 transport 抽象 + fake host ✅ #96（v0.24.0）
+  → P2 单轮端到端 ✅（AgentEar 侧；#97/#99/#100，v0.25.0–v0.25.1；对真 agent24d E2E 记录见 tasks.md T6.1.2，含对 Agent24 main 复验五轮中一轮 24/3；C10 真机手测无完成记录）
+  → P3 提案闭环（`READY`，可开工）→ P4 流式（仍等 Agent24 的流式 model callback）。
+- **相关支线（2026-11 在做，均未合并）**：宿主 speak 时按需拉起 TTS（`fix/host-speak-tts`）。
+
+## 其他在途线（2026-11-10 记录）
+
+- **AgentEar Lite（ARM64 小安装包，模型按需下载）** — #109/#110 已合并；GitHub 预发布 `v0.27.0-preview.20261015.1`。后续步骤：未核实。
+- **App Store 分发** — `feat/app-store-sandbox`，`IN_PROGRESS`，本机 worktree 有未提交改动，无远端分支/PR，范围未核实。
+- **翻译输入** — `feat/translate-input`，仍在讨论模式切换手势，**没有已定设计**。
+- **录音上限 / Qwen3 解码上限** — #114 已合并未发版，待发新 speech-runtime。
 
 ## 后续（本轮之后，顺序未定）
 
@@ -78,8 +87,10 @@ AEC 那格也没解决（VPIO 内容级 0/5、**事件级 5/5**）。
 
 ---
 
-> **当前聚焦（2026-09-27）：M6 / F6.1 嵌入 Agent24。** P0 契约已提 PR；P1 可以开工；
-> P2 起要等 Agent24 冻结 A3 附着协议，那边的设计还要 jason 排期。
+> **当前聚焦（2026-11-10 更新）：M6 / F6.1 嵌入 Agent24。** P0–P2 的 AgentEar 侧已完成（P2 对真 agent24d 跑过端到端，含一次 24/3 偶发失败，见 tasks.md T6.1.2；C10 真机手测无完成记录）；
+> P3 可开工；P4 仍等 Agent24 的流式回调。另有 Lite / App Store / 翻译输入几条线，见上面「其他在途线」。
+>
+> （2026-09-27 的原文：P0 契约已提 PR；P1 可以开工；P2 起要等 Agent24 冻结 A3 附着协议，那边的设计还要 jason 排期。——已过期）
 > M3 的状态以 CLAUDE.md 与 `progress.md` 为准：V1 打断方式已定为推键式（长期终态），
 > 所以 AEC 与 VAD 自动打断不再是 V1 的必做项。
 >

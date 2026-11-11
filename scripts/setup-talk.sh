@@ -66,6 +66,41 @@ TTS_MODEL_DIR="$MODELS/voxcpm2-$QUANT"
 LLM_REPO="${AGENTEAR_TALK_LLM_REPO:-mlx-community/MiniCPM5-2B-mlx-4Bit}"
 TTS_REPO="${AGENTEAR_TALK_TTS_REPO:-mlx-community/VoxCPM2-$QUANT}"
 
+# ⚠️ T3.5.5：模型一律钉 commit（完整 40 位），不再下 main 的最新。
+# 这几个 commit 是 jason 机器上实测验证过的那一份（2026-09-15 起用，
+# 上游此后没有再动过，HF HEAD 与之一致，2026-11-10 复核）。
+# 升级 = 改这里 + 重跑 talk-e2e + 更新 docs/upstream-pins.md。
+LLM_REV_DEFAULT="86ad5182c5a8532a4681ab972011d34c3b89477a"
+case "$QUANT" in
+  4bit) TTS_REV_DEFAULT="dc9e5c187858da5f4a13dc4c247e297339216381" ;;
+  8bit) TTS_REV_DEFAULT="d52725898a0675703f7f9ddc5a4d1a3cdbb99032" ;;
+esac
+# 改了仓库就不能再用上面的 commit（那是另一个仓库的提交号）：
+# 必须同时用 AGENTEAR_TALK_*_REV 给出自己的 commit，不许退回下载最新。
+LLM_REV="${AGENTEAR_TALK_LLM_REV:-}"
+TTS_REV="${AGENTEAR_TALK_TTS_REV:-}"
+if [ -z "$LLM_REV" ]; then
+  [ "$LLM_REPO" = "mlx-community/MiniCPM5-2B-mlx-4Bit" ] \
+    || { echo "!! 改了 AGENTEAR_TALK_LLM_REPO 就必须同时给 AGENTEAR_TALK_LLM_REV（完整 commit）" >&2; exit 2; }
+  LLM_REV="$LLM_REV_DEFAULT"
+fi
+if [ -z "$TTS_REV" ]; then
+  [ "$TTS_REPO" = "mlx-community/VoxCPM2-$QUANT" ] \
+    || { echo "!! 改了 AGENTEAR_TALK_TTS_REPO 就必须同时给 AGENTEAR_TALK_TTS_REV（完整 commit）" >&2; exit 2; }
+  TTS_REV="$TTS_REV_DEFAULT"
+fi
+for rev in "$LLM_REV" "$TTS_REV"; do
+  case "$rev" in
+    [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]*) [ "${#rev}" -eq 40 ] || { echo "!! revision 必须是完整 40 位 commit：$rev" >&2; exit 2; } ;;
+    *) echo "!! revision 必须是完整 40 位 commit：$rev" >&2; exit 2 ;;
+  esac
+done
+
+# pip 依赖钉版本（2026-11-10 取自实测在用的 ~/.agentear/llm/venv）。
+# 不钉的话「重装一次环境」会悄悄换一套 mlx，而 mlx 的行为变化（stream、
+# 缓存 API 弃用）这个仓库已经踩过。升级 = 改这里 + 重跑 talk-e2e。
+PIP_PINS=(mlx==0.32.2 mlx-lm==0.31.3 mlx-audio==0.5.1 huggingface_hub==1.29.0)
+
 die() { echo "!! $*" >&2; exit 1; }
 note() { echo "==> $*"; }
 
@@ -120,7 +155,7 @@ else
     mkdir -p "$TALK_DIR"
     [ -d "$NEW_VENV" ] || "$PY" -m venv "$NEW_VENV"
     "$NEW_VENV/bin/python" -m pip install -q --upgrade pip
-    "$NEW_VENV/bin/python" -m pip install -q mlx-lm mlx-audio huggingface_hub
+    "$NEW_VENV/bin/python" -m pip install -q "${PIP_PINS[@]}"
   fi
   VENV="$NEW_VENV"
 fi
@@ -137,33 +172,30 @@ fi
 #
 # 但**仍然钉 revision**：模型目录必须能追溯到确切一次提交，
 # 否则「同一份权重」这句话没有依据（照 setup-llm.sh 的理由）。
-fetch_repo() {  # fetch_repo <repo> <目标目录> <必需文件名...>
-  local repo="$1" dest="$2"; shift 2
+fetch_repo() {  # fetch_repo <repo> <钉死的 revision> <目标目录> <必需文件名...>
+  local repo="$1" rev="$2" dest="$3"; shift 3
   mkdir -p "$dest"
-  echo "    $repo -> $dest"
+  echo "    $repo @ ${rev} -> $dest"
   env -u HF_ENDPOINT HF_HUB_DISABLE_TELEMETRY=1 \
-    "$VENV/bin/hf" download "$repo" --local-dir "$dest" >/dev/null \
+    "$VENV/bin/hf" download "$repo" --revision "$rev" --local-dir "$dest" >/dev/null \
     || die "$repo 下载失败（网络或 HF_ENDPOINT，确认能连 huggingface.co）"
   local missing=()
   for name in "$@"; do
     [ -s "$dest/$name" ] || missing+=("$name")
   done
   [ ${#missing[@]} -eq 0 ] || die "$repo 少了必需文件：${missing[*]}"
-  # 记下提交号，别只写「已下载」
-  local rev
-  rev="$(curl -sfL --max-time 60 "https://huggingface.co/api/models/${repo}" \
-    | "$VENV/bin/python" -c 'import json,sys; print(json.load(sys.stdin)["sha"])' 2>/dev/null || echo unknown)"
+  # 记下提交号（就是钉死的那个，不再事后去问 API——问到的是 HEAD，不一定是下的那份）
   printf 'repo=%s\nrevision=%s\nfetched=%s\n' "$repo" "$rev" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
     > "$dest/.installed"
   echo "    revision ${rev}"
 }
 
 note "下载 LLM：面壁 MiniCPM5-2B（4bit MLX，HF 计数 1.4 GB / du 显示 1.3G）"
-fetch_repo "$LLM_REPO" "$LLM_MODEL_DIR" \
+fetch_repo "$LLM_REPO" "$LLM_REV" "$LLM_MODEL_DIR" \
   config.json model.safetensors tokenizer.json tokenizer_config.json
 
 note "下载 TTS：VoxCPM2（${QUANT} MLX）"
-fetch_repo "$TTS_REPO" "$TTS_MODEL_DIR" \
+fetch_repo "$TTS_REPO" "$TTS_REV" "$TTS_MODEL_DIR" \
   config.json model.safetensors tokenizer.json tokenizer_config.json
 
 # 体积守卫：中断留下的残缺目录不该被当成可用模型（照 setup-llm.sh）。

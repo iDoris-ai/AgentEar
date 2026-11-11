@@ -314,7 +314,7 @@
         },
         "reason": {
           "type": "string",
-          "description": "自由字符串。已知值：barge_in / stop_command / tts_unavailable / superseded（见 contracts/README.md）。宿主只能拿它做展示，不得据此做分支判断。"
+          "description": "自由字符串。已知值：barge_in / stop_command / sidecar_not_running / start_failed / start_timeout / tts_unavailable / superseded（见 contracts/README.md）。宿主只能拿它做展示，不得据此做分支判断。"
         }
       },
       "allOf": [

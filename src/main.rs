@@ -2988,8 +2988,12 @@ pub(crate) fn resolve_data_root(
 }
 
 pub(crate) fn data_root() -> Result<PathBuf> {
-    let home = dirs::home_dir().context("找不到 home 目录")?;
+    // 显式覆盖不需要 home：取不到 home 时，设了 AGENTEAR_DATA 仍然要能用（#118 评审 N1）。
     let override_path = std::env::var("AGENTEAR_DATA").ok();
+    if let Some(p) = override_path.as_deref().filter(|p| !p.is_empty()) {
+        return Ok(PathBuf::from(p));
+    }
+    let home = dirs::home_dir().context("找不到 home 目录")?;
     let sandbox_id = std::env::var("APP_SANDBOX_CONTAINER_ID").ok();
     Ok(resolve_data_root(
         override_path.as_deref(),

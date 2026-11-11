@@ -129,6 +129,19 @@ fn lenient_qwen3_idle_secs<'de, D: Deserializer<'de>>(d: D) -> Result<u64, D::Er
         .unwrap_or_else(|_| default_qwen3_idle_secs()))
 }
 
+/// 我们拉起的 TTS 边车空闲多久后退出。和 Qwen3 常驻同一个数：
+/// 连着说不会被收掉，放着不用时那 2–3 GB 会还回去。
+fn default_tts_idle_secs() -> u64 {
+    600
+}
+
+fn lenient_tts_idle_secs<'de, D: Deserializer<'de>>(d: D) -> Result<u64, D::Error> {
+    let v = serde_json::Value::deserialize(d)?;
+    Ok(serde_json::from_value::<u64>(v)
+        .map(|n| n.max(60))
+        .unwrap_or_else(|_| default_tts_idle_secs()))
+}
+
 fn lenient_record_cue<'de, D: Deserializer<'de>>(d: D) -> Result<bool, D::Error> {
     let v = serde_json::Value::deserialize(d)?;
     Ok(serde_json::from_value(v).unwrap_or_else(|_| default_record_cue()))
@@ -364,10 +377,11 @@ pub struct Config {
     /// 或 `say`（零依赖兜底）。
     #[serde(deserialize_with = "lenient")]
     pub talk_tts_engine: String,
-    /// 对话模式的两个边车没在跑时，要不要**尝试按配置的命令拉起来**。
+    /// 边车没在跑时，要不要**尝试按配置的命令拉起来**。
     ///
     /// **默认 true**，但它只是兜底——正常路径永远是「按 URL 去连」
-    /// （ADR-0002 §8：连接优先、拉起兜底）。
+    /// （ADR-0002 §8：连接优先、拉起兜底）。对话模式拉 LLM 和 TTS；
+    /// 宿主的 `speak` 只拉 TTS（输入法模式不会预先启动边车）。
     #[serde(deserialize_with = "lenient")]
     pub talk_autostart: bool,
     /// 拉起 LLM 边车的命令，argv 形式（第一项是程序）。
@@ -383,6 +397,13 @@ pub struct Config {
     /// 拉起 TTS 边车的命令。语义同上。
     #[serde(deserialize_with = "lenient")]
     pub talk_tts_start_command: Vec<String>,
+    /// 我们自己拉起的 TTS 边车，空闲这么久就退出。默认 600 秒，最短 60。
+    ///
+    /// 宿主 `speak` 会在 TTS 没跑的时候按需拉起（约 2.4–3.4 GB）。
+    /// 只收我们拉起的那个进程，用户自己起的不动。判据与 Qwen3 常驻相同：
+    /// 有请求在飞就不收。
+    #[serde(deserialize_with = "lenient_tts_idle_secs")]
+    pub tts_idle_secs: u64,
     /// 对话用哪个音色（`--voices-dir` 里的名字）。**空 = 用边车的默认音色。**
     ///
     /// 「声色飘忽」的直接解法：不指定时 VoxCPM2 每次随机换说话人。
@@ -633,6 +654,7 @@ impl Default for Config {
             talk_autostart: default_autostart(),
             talk_llm_start_command: Vec::new(),
             talk_tts_start_command: Vec::new(),
+            tts_idle_secs: default_tts_idle_secs(),
             tts_url: None,
             talk_timeout_secs: default_talk_timeout_secs(),
             talk_city: default_talk_city(),
@@ -803,6 +825,17 @@ mod tests {
         assert_eq!(c.qwen3_idle_secs, 600);
         let c: Config = serde_json::from_str(r#"{"qwen3_model": "7b"}"#).unwrap();
         assert_eq!(c.qwen3_model, Qwen3Model::Small, "坏值退回默认，不连累别的字段");
+    }
+
+    /// 按需拉起的 TTS 用同一套空闲上限：缺字段是 600，太短抬到 60，坏值退回 600。
+    #[test]
+    fn tts_idle_has_a_floor_and_bad_values_fall_back() {
+        let c: Config = serde_json::from_str("{}").unwrap();
+        assert_eq!(c.tts_idle_secs, 600);
+        let c: Config = serde_json::from_str(r#"{"tts_idle_secs": 5}"#).unwrap();
+        assert_eq!(c.tts_idle_secs, 60, "太短等于刚拉起就被收掉");
+        let c: Config = serde_json::from_str(r#"{"tts_idle_secs": "x"}"#).unwrap();
+        assert_eq!(c.tts_idle_secs, 600);
     }
 
     #[test]
