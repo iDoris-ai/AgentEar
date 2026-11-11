@@ -989,7 +989,7 @@
   **FireRedTTS3 相应地从候选里移除**（引入它的唯一理由就是台湾腔）。
   VoxCPM2 的 9 种方言够用，不需要第二个 TTS 引擎。台湾腔记为已知缺口。
 
-### T3.5.5 上游版本锁定与回滚流程  `READY`
+### T3.5.5 上游版本锁定与回滚流程  `IN PROGRESS`（2026-11-10：清单/补锁/回滚/Qwen3 运行时能力探测见 [`docs/upstream-pins.md`](../upstream-pins.md)；vendor 二进制构建脚本与 whisper.cpp commit 核对留作后续）
 - 锁到 commit + release 资产 SHA-256（tag 会被移动、asset 会被替换）。
 - 保留已验证版本的本地副本或可复建脚本，写明回滚流程。
 - 加版本握手 + capability probe + CLI 输出契约测试；

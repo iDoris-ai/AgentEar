@@ -192,7 +192,9 @@ impl AsrEngine for SpeechSwiftEngine {
         let m = crate::config::get().qwen3_model;
         // 我们自己下的那份：版本钉死、装的时候跑过断网冒烟，不需要再探契约。
         if crate::qwen3::is_ready(m) {
-            return Ok(());
+            // 安装记录只证明下载时 sha 对；再问一次二进制自己认不认我们要传的参数
+            //（T3.5.5 版本握手）。不认就拒绝并给出修法，不等转写时静默错乱。
+            return crate::qwen3::probe_runtime_contract();
         }
         let out = Command::new(&self.legacy_bin).arg("--help").output().with_context(|| {
             format!(

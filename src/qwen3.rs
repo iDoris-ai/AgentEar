@@ -1513,9 +1513,125 @@ pub fn recovery_decision(
     }
 }
 
+// —— 版本握手 / 能力探测（T3.5.5）——
+//
+// 安装记录只证明「下的 tarball 的 sha 对」，不证明**现在磁盘上的二进制**认我们
+// 要传的参数（被手动替换、被别的版本覆盖、解包不全）。用到之前问二进制自己：
+// `--help` 里必须出现我们真的会传的每个参数；缺了就**拒绝使用并说怎么修**，
+// 而不是等转写时才报一个看不懂的参数错误（或者更糟——静默忽略了 `--context`）。
+
+/// `speech transcribe` 必须认的参数：和 `SpeechSwiftEngine::transcribe` 实际传的一一对应。
+pub const TRANSCRIBE_REQUIRED_FLAGS: [&str; 4] = ["--engine", "--model", "--language", "--context"];
+/// `speech-server` 必须认的参数：`ensure_server_locked` 传的。
+pub const SERVER_REQUIRED_FLAGS: [&str; 2] = ["--host", "--port"];
+
+/// 纯函数：根据三份 `--help` 输出算出缺了什么。空 = 全部具备。
+/// `speech --help` 里要有 `transcribe` 子命令；其余按上面两张表逐项查。
+pub fn contract_gaps(speech_help: &str, transcribe_help: &str, server_help: &str) -> Vec<String> {
+    let mut gaps = Vec::new();
+    if !speech_help.contains("transcribe") {
+        gaps.push("speech 没有 transcribe 子命令".to_string());
+    }
+    for f in TRANSCRIBE_REQUIRED_FLAGS {
+        if !transcribe_help.contains(f) {
+            gaps.push(format!("speech transcribe 不认 {f}"));
+        }
+    }
+    for f in SERVER_REQUIRED_FLAGS {
+        if !server_help.contains(f) {
+            gaps.push(format!("speech-server 不认 {f}"));
+        }
+    }
+    gaps
+}
+
+/// 把缺口变成用户能照着做的错误。回滚/重装步骤见 `docs/upstream-pins.md`。
+pub fn contract_error(gaps: &[String]) -> anyhow::Error {
+    anyhow::anyhow!(
+        "Qwen3-ASR 运行时 {SPEECH_VERSION} 与本程序不兼容：{}。\
+         已拒绝使用它。处理：删掉 ~/.agentear/models/qwen3/runtime/speech-{SPEECH_VERSION}/ \
+         和同目录下的 runtime-{SPEECH_VERSION}.installed 后重开设置窗口重新下载；\
+         或回滚到上一个已验证版本（见 docs/upstream-pins.md「回滚」）。",
+        gaps.join("；")
+    )
+}
+
+static CONTRACT_OK: AtomicBool = AtomicBool::new(false);
+
+/// 真跑三次 `--help`（都套断网沙箱，不会联网）并检查。**成功后本进程内不再重复**
+///（preflight 每轮都会调，三次进程启动不该摊到每一轮）；失败不缓存，修好就能恢复。
+pub fn probe_runtime_contract() -> Result<()> {
+    if CONTRACT_OK.load(Ordering::SeqCst) {
+        return Ok(());
+    }
+    let (Some(speech), Some(server)) = (speech_bin(), server_bin()) else {
+        bail!("数据目录未初始化");
+    };
+    let help = |bin: &Path, args: &[&str]| -> Result<String> {
+        let out = speech_command(bin)
+            .args(args)
+            .arg("--help")
+            .output()
+            .with_context(|| format!("运行 {} --help 失败", bin.display()))?;
+        // ArgumentParser 的 --help 打在 stdout；个别版本打 stderr，两边都收
+        Ok(format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        ))
+    };
+    let top = help(&speech, &[])?;
+    let sub = help(&speech, &["transcribe"])?;
+    let srv = help(&server, &[])?;
+    let gaps = contract_gaps(&top, &sub, &srv);
+    if !gaps.is_empty() {
+        return Err(contract_error(&gaps));
+    }
+    CONTRACT_OK.store(true, Ordering::SeqCst);
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 真实 v0.0.28 `--help` 的节选（2026-11-10 在 runtime 里实跑取得）：全部具备 = 无缺口。
+    const HELP_TOP: &str = "SUBCOMMANDS:\n  transcribe   Transcribe speech to text\n";
+    const HELP_SUB: &str = "  --engine <engine>\n  -m, --model <model>\n  --language <language>\n  --context <context>\n";
+    const HELP_SRV: &str = "USAGE: speech-server [--host <host>] [--port <port>] [--preload]\n";
+
+    #[test]
+    fn contract_passes_on_the_verified_help_output() {
+        assert!(contract_gaps(HELP_TOP, HELP_SUB, HELP_SRV).is_empty());
+    }
+
+    #[test]
+    fn contract_names_every_missing_flag() {
+        let gaps = contract_gaps("OVERVIEW: x", "  --engine\n", "no flags");
+        assert_eq!(gaps.len(), 1 + 3 + 2, "{gaps:?}");
+        for need in ["transcribe 子命令", "--model", "--language", "--context", "--host", "--port"] {
+            assert!(gaps.iter().any(|g| g.contains(need)), "缺口里要点名 {need}：{gaps:?}");
+        }
+        assert!(!gaps.iter().any(|g| g.contains("--engine")), "已有的不该报");
+    }
+
+    #[test]
+    fn contract_error_is_actionable() {
+        let msg = contract_error(&["speech-server 不认 --port".to_string()]).to_string();
+        assert!(msg.contains("--port") && msg.contains(SPEECH_VERSION));
+        assert!(msg.contains("runtime-") && msg.contains("upstream-pins.md"), "要说怎么修：{msg}");
+    }
+
+    /// 要求的参数表必须覆盖 `transcribe` 真的会传的参数，否则探测会放过它。
+    #[test]
+    fn required_flags_cover_what_transcribe_passes() {
+        let src = include_str!("engine.rs");
+        for (used, need) in [("\"--engine\"", "--engine"), ("\"--language\"", "--language"), ("--context=", "--context")] {
+            assert!(src.contains(used), "engine.rs 不再传 {need} 了？同步 TRANSCRIBE_REQUIRED_FLAGS");
+            assert!(TRANSCRIBE_REQUIRED_FLAGS.contains(&need));
+        }
+        assert!(TRANSCRIBE_REQUIRED_FLAGS.contains(&"--model"), "engine.rs 传 -m，对应 --model");
+    }
 
     #[test]
     fn default_model_is_the_small_one() {
