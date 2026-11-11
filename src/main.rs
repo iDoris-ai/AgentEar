@@ -3858,6 +3858,127 @@ mod host_wiring_tests {
         host::detach(&cfg);
     }
 
+    /// 本机计数监听：每个连进来的 TCP 连接 +1（http_post 一旦被本地执行就会连过来）。
+    fn counting_listener() -> (String, Arc<std::sync::atomic::AtomicUsize>) {
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/hook", l.local_addr().unwrap());
+        let n = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let n2 = n.clone();
+        std::thread::spawn(move || {
+            for _ in l.incoming().flatten() {
+                n2.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+        });
+        (url, n)
+    }
+
+    fn write_commands(store: &store::Store, json: &str) {
+        std::fs::write(commands::path_in(store.root()), json).unwrap();
+    }
+
+    fn hook_table(url: &str) -> String {
+        format!(
+            r#"[{{"phrase":"记到钩子","action":{{"type":"http_post","url":"{url}","body":"{{\"t\":\"{{rest}}\"}}"}}}}]"#
+        )
+    }
+
+    /// P3 验收一：拒绝 / 作废 / 被顶掉 / 确认——本地**一次**都不执行（执行方只有宿主）。
+    /// 同时验收二：confirm_reply 指向的就是宿主收到的那条 proposal（同一个 event_id），
+    /// 且 proposal 里的 action / prompt 与指令表同源。
+    #[test]
+    fn p3_reject_runs_nothing_and_confirm_points_at_the_same_proposal() {
+        let (_g, store, cfg) = setup();
+        let (url, hits) = counting_listener();
+        write_commands(&store, &hook_table(&url));
+        let fake = Arc::new(host::FakeHost::new());
+        host::attach(fake.clone());
+
+        // 1) 否定 → reject
+        assert!(matches!(run_command_turn(&store, &cfg, "记到钩子 买牛奶", HASH), CommandTurn::Asked));
+        assert!(matches!(run_command_turn(&store, &cfg, "不要", HASH), CommandTurn::Handled));
+        // 2) 别的话 → reject
+        run_command_turn(&store, &cfg, "记到钩子 买牛奶", HASH);
+        run_command_turn(&store, &cfg, "今天天气怎么样", HASH);
+        // 3) 紧接着说另一条指令：先当「别的话」reject 旧的，再提新的
+        run_command_turn(&store, &cfg, "记到钩子 一", HASH);
+        run_command_turn(&store, &cfg, "记到钩子 二", HASH);
+        // 4) 确认最后一条
+        run_command_turn(&store, &cfg, "确认", HASH);
+
+        let props = events_of(&fake, "proposal");
+        let replies = events_of(&fake, "confirm_reply");
+        assert_eq!(props.len(), 4);
+        let rs: Vec<(&str, &serde_json::Value)> = replies
+            .iter()
+            .map(|r| (r["payload"]["reply"].as_str().unwrap(), &r["payload"]["proposal_event_id"]))
+            .collect();
+        assert_eq!(
+            rs.iter().map(|r| r.0).collect::<Vec<_>>(),
+            ["reject", "reject", "reject", "confirm"]
+        );
+        // 同源：每条答复指向某条真实 proposal；confirm 指向「二」
+        assert_eq!(*rs[0].1, props[0]["event_id"]);
+        assert_eq!(*rs[1].1, props[1]["event_id"]);
+        assert_eq!(*rs[2].1, props[2]["event_id"], "旧 proposal 收到 reject，再提新的");
+        assert_eq!(*rs[3].1, props[3]["event_id"]);
+        let p = &props[3]["payload"];
+        assert_eq!(p["rest"], "二");
+        assert_eq!(p["action"]["type"], "http_post");
+        assert_eq!(p["action"]["url"], url.as_str(), "载荷里的动作就是指令表里那条");
+        assert_eq!(p["needs_confirm"], true);
+        assert!(p["prompt"].as_str().unwrap().contains('二'), "确认问句与槽位同源");
+
+        std::thread::sleep(Duration::from_millis(300));
+        assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 0, "AgentEar 本地零执行");
+        host::detach(&cfg);
+    }
+
+    /// P3 验收三：超出支持范围的 action type 在 AgentEar 侧安全拒绝——
+    /// 整张表被拒、不发 proposal、不执行、这一轮当普通输入。
+    #[test]
+    fn p3_unsupported_action_type_is_refused_safely() {
+        let (_g, store, cfg) = setup();
+        let fake = Arc::new(host::FakeHost::new());
+        host::attach(fake.clone());
+        for bad in [
+            r#"[{"phrase":"跑一下","action":{"type":"shell","cmd":"touch /tmp/p3-pwned"}}]"#,
+            r#"[{"phrase":"跑一下","action":{"type":"builtin","name":"rm_rf","value":"x"}}]"#,
+            r#"[{"phrase":"跑一下","action":{"type":"open_url","url":"file:///etc/passwd"}}]"#,
+        ] {
+            write_commands(&store, bad);
+            let turn = run_command_turn(&store, &cfg, "跑一下 东西", HASH);
+            assert!(matches!(turn, CommandTurn::NotMine), "{bad}");
+        }
+        assert!(events_of(&fake, "proposal").is_empty());
+        assert!(!host::has_awaiting());
+        assert!(!std::path::Path::new("/tmp/p3-pwned").exists());
+        host::detach(&cfg);
+    }
+
+    /// 过期的待确认：宿主收到 reject，之后的「确认」不再被当成答复。
+    #[test]
+    fn p3_expired_awaiting_tells_the_host_reject() {
+        let (_g, _store, cfg) = setup();
+        let fake = Arc::new(host::FakeHost::new());
+        host::attach(fake.clone());
+        host::await_confirm("evt_old".into(), Duration::from_millis(0));
+        std::thread::sleep(Duration::from_millis(20));
+        assert!(host::take_awaiting().is_none());
+        let r = events_of(&fake, "confirm_reply");
+        assert_eq!(r.len(), 1);
+        assert_eq!(r[0]["payload"]["reply"], "reject");
+        assert_eq!(r[0]["payload"]["proposal_event_id"], "evt_old");
+        // 被顶掉的也要告诉宿主
+        host::await_confirm("evt_a".into(), Duration::from_secs(30));
+        host::await_confirm("evt_b".into(), Duration::from_secs(30));
+        let r = events_of(&fake, "confirm_reply");
+        assert_eq!(r.len(), 2);
+        assert_eq!(r[1]["payload"]["proposal_event_id"], "evt_a");
+        assert_eq!(r[1]["payload"]["reply"], "reject");
+        assert_eq!(host::take_awaiting().as_deref(), Some("evt_b"));
+        host::detach(&cfg);
+    }
+
     /// 独立版对照：同一句话走原来的本地待确认，宿主一个事件都收不到。
     #[test]
     fn standalone_keeps_the_local_confirmation() {

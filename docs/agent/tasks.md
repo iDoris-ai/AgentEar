@@ -1362,9 +1362,11 @@
 ### T6.1.2a #97 评审跟进  `DONE`（2026-09-27，#98 合并，随 v0.25.1 发布）
 - `strip_nulls` 递归数组元素；`A24_BUSY` panic 兜底（drop guard）。验收：`cargo test -- strip_nulls_recurses busy_flag` 3 条绿，调用点变异红。
 
-### T6.1.3 P3 提案闭环  `READY`（T6.1.2 AgentEar 侧已 DONE：#97/#99/#100；对真 agent24d 的端到端见 T6.1.2 小节；2026-11-10 未开工）
+### T6.1.3 P3 提案闭环（AgentEar 侧）  `DONE`（2026-11-11；PR 号见合并记录。⚠️ 宿主侧「实际支持哪些 action、执行门」仍是 embedding.md §7.4 的 Agent24 待确认项，未对真 agent24d 实测）
 - 发 proposal，自己不执行；附着模式下关掉本地的语音确认，改发 `confirm_reply`（B8）。
 - **验收**：拒绝时零执行；确认的内容与执行载荷同源；超出支持范围的 action type 会被安全拒绝。
+- 现状核对：发 proposal / 附着时关本地确认 / `confirm_reply`（B8，schema 与 fixtures 早已就位）在 P2 阶段已接好；本次补齐缺口：① 过期、被顶掉的待确认现在也向宿主发 `reject`（原来静默丢，宿主会一直挂着）；② 三条验收各有 FakeHost 端到端单测（`p3_*`）：拒绝/别的话/确认全程本地零执行（本机计数监听验证 http_post 没被连）、`confirm_reply.proposal_event_id` 指向宿主收到的同一条 proposal 且 action/prompt 与指令表同源、指令表里的未知 action type（shell / 未知 builtin / `file:`）整表被拒、不发 proposal、不执行。
+- 未做：schema 无改动；未对真 agent24d 联调；宿主支持的 action 集合由 Agent24 决定。
 
 ### T6.1.4 P4 流式优化  `BLOCKED`（等 Agent24 的流式 model callback）
 - 支持取消、分句播报和背压，不改 P0 的语义。**验收**：首字起播中位数 ≤3.0 秒，n≥10，只报中位数和极值。
