@@ -150,20 +150,27 @@ gh pr merge <N> --squash --delete-branch
    verdict 用 `scripts/post_pr_review.sh` 发。
 2. **审批必须落在最后一次 push 之后**（GitHub 已强制，见 §2.3）。
    改了代码就重新审——**不要**拿旧的 approval 合新代码。
-3. **CI 绿是前提**，不是装饰：`required_status_checks.strict=true`、context = `test`。
+3. **CI 绿是前提**，不是装饰：context = `test`。「基于最新 main」从 2026-11-11 起由 **merge queue** 保证（见 §2.3），不再靠 `strict=true`。
 4. **文档跟着代码进同一个 PR**。仓库已经吃过两次「代码写完、实测做完、没提交没发版」的亏
    （见 `docs/agent/progress.md` 顶部）。
 
 ### 2.3 分支保护的真实配置（2026-09-16 实测 + 已加固）
 
 ```
-required_status_checks:        strict=true, contexts=["test"]     # CI 必须绿，且必须基于最新 main
+required_status_checks:        strict=false, contexts=["test"]    # CI 必须绿；「基于最新 main」交给 merge queue（2026-11-11）
 required_pull_request_reviews: required_approving_review_count=1
                                dismiss_stale_reviews=true         # 新 push 作废旧审批
                                require_last_push_approval=true    # 2026-09-16 加的，见下
 enforce_admins:                true                               # 管理员也不能绕过
 allow_force_pushes / deletions: false
 ```
+
+**merge queue（2026-11-11 起，仓库 ruleset「main merge queue」）**：`gh pr merge N --squash` 不再立即合并，
+而是把**已批准、CI 绿**的 PR 放进队列；GitHub 在「main + 该 PR」的临时合并提交上跑 `test`（CI 监听
+`merge_group` 事件），绿了才以 squash 落到 main。动机：此前 `strict=true` + `dismiss_stale_reviews`
+下，main 每前进一次，排在后面的 PR 都要「同步 main → 重新送审」（v0.29.0 时 #124/#125 各多走一轮）。
+队列不往 PR 分支推提交，所以审批不会被作废；「CI 在最新 main 上验证过」这条保证仍在，只是挪到了队列里。
+⚠️ 队列里的合并提交没有经过评审——它只是机械合并；**有冲突的 PR 进不了队列**，仍要人同步 main、重新送审。
 
 **`require_last_push_approval` 是这次补的那一项**：补之前，
 「先审 → 再 push 代码 → 直接合」在机制上是被 `dismiss_stale_reviews`

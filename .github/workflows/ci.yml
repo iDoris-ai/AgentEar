@@ -13,6 +13,9 @@ on:
   push:
     branches: [main]
   pull_request:
+  # merge queue（2026-11-11 启用）：入队的 PR 在临时合并提交上再跑一次 required check "test"，
+  # 不用每次 main 前进都「同步 main → 重新批准」。
+  merge_group:
 
 # 同一个 PR 连推几次时，取消上一次还没跑完的
 concurrency:
