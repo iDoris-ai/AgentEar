@@ -2615,19 +2615,35 @@ const DIAGNOSE_AUDIO_TIMEOUT: std::time::Duration = std::time::Duration::from_se
 /// 设了就整段跳过麦克风探测（集成测试用：它们不需要音频，也不该被 CoreAudio 拖住）。
 const DIAGNOSE_SKIP_AUDIO_ENV: &str = "AGENTEAR_DIAGNOSE_SKIP_AUDIO";
 
-/// 在独立线程里跑 `f`，最多等 `limit`；超时返回 `None`，线程留着自生自灭。
+/// [`probe_with_timeout`] 的三种失败，`--diagnose` 要如实分开报（别把 panic 说成「卡住」）。
+#[derive(Debug, PartialEq)]
+enum ProbeFail {
+    /// 线程开起来了，但 `limit` 内没返回
+    TimedOut,
+    /// 线程开起来了，没发结果就结束了（探测 panic）
+    Panicked,
+    /// 连线程都没开起来
+    SpawnFailed(String),
+}
+
+/// 在独立线程里跑 `f`，最多等 `limit`；超时线程留着自生自灭。
 fn probe_with_timeout<T: Send + 'static>(
     limit: std::time::Duration,
     f: impl FnOnce() -> T + Send + 'static,
-) -> Option<T> {
+) -> Result<T, ProbeFail> {
+    use std::sync::mpsc::RecvTimeoutError;
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::Builder::new()
         .name("diagnose-audio-probe".into())
         .spawn(move || {
             let _ = tx.send(f());
         })
-        .ok()?;
-    rx.recv_timeout(limit).ok()
+        .map_err(|e| ProbeFail::SpawnFailed(e.to_string()))?;
+    match rx.recv_timeout(limit) {
+        Ok(v) => Ok(v),
+        Err(RecvTimeoutError::Timeout) => Err(ProbeFail::TimedOut),
+        Err(RecvTimeoutError::Disconnected) => Err(ProbeFail::Panicked),
+    }
 }
 
 /// 麦克风探测本体（会被 CoreAudio 卡住，必须经 [`probe_with_timeout`] 调用）。
@@ -2676,11 +2692,17 @@ fn diagnose(vendor: &std::path::Path, data_root: &std::path::Path) -> Result<()>
         println!("  ⚪ 已跳过（{DIAGNOSE_SKIP_AUDIO_ENV} 已设置，测试/无人值守用）");
     } else {
         match probe_with_timeout(DIAGNOSE_AUDIO_TIMEOUT, probe_input_device) {
-            Some(lines) => lines.iter().for_each(|l| println!("{l}")),
-            None => println!(
+            Ok(lines) => lines.iter().for_each(|l| println!("{l}")),
+            Err(ProbeFail::TimedOut) => println!(
                 "  ❌ 麦克风无响应（{} s 没返回，可能在等待麦克风授权或设备被占用）；继续其余自检",
                 DIAGNOSE_AUDIO_TIMEOUT.as_secs()
             ),
+            Err(ProbeFail::Panicked) => {
+                println!("  ❌ 麦克风探测自己崩了（探测线程 panic，不是卡住）；继续其余自检")
+            }
+            Err(ProbeFail::SpawnFailed(e)) => {
+                println!("  ❌ 没能起麦克风探测线程：{e}；继续其余自检")
+            }
         }
     }
 
@@ -3571,9 +3593,13 @@ mod host_wiring_tests {
             std::thread::sleep(std::time::Duration::from_secs(30));
             1
         });
-        assert_eq!(r, None);
+        assert_eq!(r, Err(ProbeFail::TimedOut));
         assert!(t.elapsed() < std::time::Duration::from_secs(5));
-        assert_eq!(probe_with_timeout(std::time::Duration::from_secs(5), || 7), Some(7));
+        assert_eq!(probe_with_timeout(std::time::Duration::from_secs(5), || 7), Ok(7));
+        // 探测 panic 要报 Panicked，不能当成「卡住」
+        let r: Result<i32, ProbeFail> =
+            probe_with_timeout(std::time::Duration::from_secs(5), || panic!("boom"));
+        assert_eq!(r, Err(ProbeFail::Panicked));
     }
 
     /// `--diagnose`/`--fetch-thai` 跳过 preflight，但仍参与 Qwen3 恢复判定。

@@ -935,11 +935,32 @@ pub fn transcribe_long_oneshot(
     language: Option<&str>,
     context: &str,
 ) -> Result<crate::asr::Transcript> {
+    // 只收「这次临时拉起的」：调用前槽里已经有服务（常驻 / 预热 / 别的请求在用），
+    // 那不是我们的，不动它（L1）。
+    let spawned_by_us = server_pid().is_none();
     let r = server_transcribe(m, wav, language, context);
     if !crate::config::get().qwen3_resident {
-        stop_server("长录音一次性转写结束");
+        stop_ephemeral_server(spawned_by_us, "长录音一次性转写结束");
     }
     r
+}
+
+/// 停临时服务的判据：必须是这次自己拉起的，且已经没有请求在用它。纯函数，便于钉住。
+fn should_stop_ephemeral(spawned_by_us: bool, inflight: u32) -> bool {
+    spawned_by_us && inflight == 0
+}
+
+/// 按 [`should_stop_ephemeral`] 回收槽里的服务；不满足就留着（交给空闲回收）。
+/// 注意「调用前槽里没有服务」到「我们拉起它」之间有一个很小的窗口，期间别处恰好
+/// 拉起同一个服务时我们会把它收掉——代价只是对方下一轮多付一次冷启动，不丢转写。
+fn stop_ephemeral_server(spawned_by_us: bool, why: &str) {
+    let mut slot = SERVER.lock().unwrap_or_else(|e| e.into_inner());
+    let inflight = slot.as_ref().map_or(0, |s| s.inflight);
+    if slot.is_some() && should_stop_ephemeral(spawned_by_us, inflight) {
+        if let Some(mut s) = slot.take() {
+            kill_server(&mut s, why);
+        }
+    }
 }
 
 // —— 常驻服务 ——
@@ -1764,6 +1785,14 @@ mod tests {
             .and_then(|(_, v)| v)
             .map(|v| v.to_string_lossy().to_string());
         assert_eq!(val, Some(AGENTEAR_MLX_CACHE_MB.to_string()));
+    }
+
+    #[test]
+    fn ephemeral_server_is_only_stopped_when_ours_and_idle() {
+        assert!(should_stop_ephemeral(true, 0));
+        assert!(!should_stop_ephemeral(true, 1), "别的请求还在用，不能杀");
+        assert!(!should_stop_ephemeral(false, 0), "不是这次拉起的（常驻/预热），不能杀");
+        assert!(!should_stop_ephemeral(false, 3));
     }
 
     #[test]
