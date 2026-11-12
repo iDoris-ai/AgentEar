@@ -202,7 +202,7 @@ helper 含 `app-sandbox` + `inherit`。`codesign --verify --strict` 通过。沙
 | 剪贴板 | 无 | 无 | 低 |
 
 ### 6.3 jason 需要手动做的复测步骤
-1. `cd AgentEar-mas && AGENTEAR_DISTRIBUTION=app-store scripts/bundle.sh`，再 `open dist/AgentEar-MAS.app`（只会用 `~/Library/Containers/ai.idoris.agentear.mas/`，不碰直接分发版的 `~/.agentear`）。
+1. `AGENTEAR_DISTRIBUTION=app-store AGENTEAR_MAS_PROBE=1 scripts/bundle.sh`（`AGENTEAR_MAS_PROBE=1` 才带探针 `--mas-probe`；提审构建不带，见下），再 `open dist/AgentEar-MAS.app`（只会用 `~/Library/Containers/ai.idoris.agentear.mas/`，不碰直接分发版的 `~/.agentear`）。
 2. **组合键 + 麦克风 + 剪贴板**：菜单栏出现图标后，按 Ctrl+Shift+R 开始录音 → 系统弹「麦克风」→ 允许 → 说一句话 → 再按 Ctrl+Shift+R → 在任意文本框按 ⌘V，应粘出转写。记录：弹窗是否出现、热键是否触发、剪贴板里是否有文字、有没有任何文字被自动打进前台应用（应当没有）。
 3. **右 Command（稳定版论证用，需要临时改代码或用探针）**：运行 `AgentEar-MAS.app/Contents/MacOS/AgentEar --mas-probe`，在「系统设置 → 隐私与安全性 → 输入监控」里把 AgentEar-MAS 加进去后重跑，看 `CGPreflightListenEventAccess` 是否变 true；再用 `--debug-keys`（目前 MAS 子集不含右 Command 手势，需要把 `apply_limits` 里 trigger 那行临时注释才会起 tap）看按右 Command 是否有 flagsChanged 日志。
 4. 辅助功能 / PostEvent：同上在「辅助功能」里授权后看 `CGPreflightPostEventAccess` 与 `AXIsProcessTrusted` 各自变成什么（预期前者 true、后者仍 false）。
@@ -212,3 +212,14 @@ helper 含 `app-sandbox` + `inherit`。`codesign --verify --strict` 通过。沙
 - **SenseVoiceSmall 权重许可**：HF 标 `license: other`，MODEL_LICENSE v1.1 写「provided for reference and learning purposes only」，**全文不提商用**；FSMN-VAD 同属 FunASR 体系（HF 卡片写 apache-2.0，但与 FunASR README「以各模型卡为准」并存）。商用授权不明，不宜直接用于 App Store 商业发行；要么取得作者书面确认，要么换模型。
 - 候选：**Qwen3-ASR-0.6B（Apache-2.0，卡片+代码）**，中英泰，MLX 4bit 约 708 MB；缺点是冷启动与内存比 SenseVoice 差、需随包 speech-server（MAS 下签名/沙箱继承未验证）；保底 Whisper large-v3-turbo / small（MIT，whisper.cpp 已随包，中文弱）。VAD 可换 Silero（MIT）。
 - 详细对照表见协调者的调研记录（`research-asr-mas.md`，不入库）。本文件不据此改 ASR，选型是单独的决定。
+
+## 8. 提审构建的两条约定（2026-11-12，jason 同意「酌情处理」）
+
+- **bundle id 定为 `ai.idoris.agentear.mas`**（`bundle.sh` 的 MAS 默认值）。上架后不可改，App Store Connect 里注册同一个；
+  用户看不到它，商店与菜单栏显示的名字仍是 AgentEar。直接分发版保持 `ai.idoris.agentear`，两者 TCC 授权、沙箱容器互不相干。
+- **构建号与版本号分开**：`CFBundleShortVersionString` 仍取 `Cargo.toml` 的版本号；`CFBundleVersion` 取
+  `AGENTEAR_BUILD_NUMBER`（1–3 段点分数字，格式不对 `bundle.sh` 直接退出）。App Store 要求每次上传的构建号都比上一次大，
+  同一个 0.x.y 重传也要换号。不设时退回版本号并打一行警告——**只够本机原型**。直接分发版不受影响（构建号 = 版本号，与以前一字节相同）。
+- **沙箱探针不进提审构建**（#133 评审 L1）：`--mas-probe` / `--mas-probe-run` 移到 `src/mas_probe.rs`，单独的 cargo feature `mas-probe`
+  （隐含 `app-store`），`bundle.sh` 只有 `AGENTEAR_MAS_PROBE=1` 才开。`--mas-probe-run` 能在沙箱里执行任意命令、探针会枚举 `/Users`，
+  这些只是测量工具。CI 对 `mas-probe` 只做编译检查。

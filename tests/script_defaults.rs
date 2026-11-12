@@ -57,6 +57,17 @@ fn app_store_entitlements_enable_sandbox_and_microphone() {
         bundle.contains("assets/entitlements/AppStore.entitlements"),
         "App Store 签名要带上这份 entitlements"
     );
+    // #133 评审 L1：探针能在沙箱里跑任意命令，提审构建不能带。只有显式 AGENTEAR_MAS_PROBE=1 才开。
+    assert!(
+        bundle.contains("\"${AGENTEAR_MAS_PROBE:-}\" = \"1\"")
+            && bundle.matches("--features mas-probe").count() == 1,
+        "mas-probe feature 只能在 AGENTEAR_MAS_PROBE=1 分支里打开"
+    );
+    // App Store 每次上传 CFBundleVersion 必须递增：构建号与版本号分开。
+    assert!(
+        bundle.contains("<key>CFBundleVersion</key>\n    <string>$BUILD_NUMBER</string>"),
+        "CFBundleVersion 要用独立的构建号"
+    );
 }
 
 /// 默认档**只能**是 4bit，而且必须是显式写出来的默认值（不是「碰巧为空」）。
