@@ -12,6 +12,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 OUT="${1:-$ROOT/dist}"
 VERSION="$(grep -m1 '^version' "$ROOT/Cargo.toml" | cut -d'"' -f2)"
+BUILD_NUMBER="$VERSION"
 
 # bundle id 可覆盖。MAS 沙箱原型必须用独立的 id（如 ai.idoris.agentear.mas），
 # 否则和直接分发版共用 TCC 授权与沙箱容器。不设时与以前完全一致。
@@ -20,8 +21,24 @@ CARGO_FEATURES=()
 if [ "${AGENTEAR_DISTRIBUTION:-}" = "app-store" ]; then
   # App Store 版：独立的 .app 名与默认 bundle id，并只编 MAS 功能子集。
   APP="$OUT/AgentEar-MAS.app"
+  # 正式 bundle id（2026-11-12 定）：上架后不可改，App Store Connect 里注册同一个。
   BUNDLE_ID="${AGENTEAR_BUNDLE_ID:-ai.idoris.agentear.mas}"
-  CARGO_FEATURES=(--features app-store)
+  # 沙箱探针（--mas-probe / --mas-probe-run，能在沙箱里跑任意命令）只给本机原型，提审构建不含。
+  if [ "${AGENTEAR_MAS_PROBE:-}" = "1" ]; then
+    CARGO_FEATURES=(--features mas-probe)
+  else
+    CARGO_FEATURES=(--features app-store)
+  fi
+  # 构建号（CFBundleVersion）：App Store 要求每次上传都比上一次大，同一个 0.x.y 重传也得换号，
+  # 所以和版本号（CFBundleShortVersionString）分开。不设时退回版本号——只够本机原型用。
+  if [ -n "${AGENTEAR_BUILD_NUMBER:-}" ]; then
+    case "$AGENTEAR_BUILD_NUMBER" in
+      *[!0-9.]*|.*|*.|*..*|*.*.*.*) echo "AGENTEAR_BUILD_NUMBER 只能是 1–3 段点分数字（Apple 的 CFBundleVersion 格式，如 42 或 29.0.3），收到：${AGENTEAR_BUILD_NUMBER}" >&2; exit 1 ;;
+    esac
+    BUILD_NUMBER="$AGENTEAR_BUILD_NUMBER"
+  else
+    echo "⚠️  未设 AGENTEAR_BUILD_NUMBER：CFBundleVersion 用版本号 ${VERSION}，只适合本机原型；上传 App Store 前必须设一个递增的构建号" >&2
+  fi
 else
   APP="$OUT/AgentEar.app"
 fi
@@ -101,7 +118,7 @@ cat > "$APP/Contents/Info.plist" <<PLIST
     <key>CFBundleIdentifier</key>
     <string>$BUNDLE_ID</string>
     <key>CFBundleVersion</key>
-    <string>$VERSION</string>
+    <string>$BUILD_NUMBER</string>
     <key>CFBundleShortVersionString</key>
     <string>$VERSION</string>
     <key>CFBundleExecutable</key>

@@ -27,6 +27,8 @@ mod label;
 mod launch_agent;
 #[cfg(feature = "app-store")]
 mod mas;
+#[cfg(feature = "mas-probe")]
+mod mas_probe;
 mod paste;
 mod qwen3;
 mod route;
@@ -73,14 +75,14 @@ fn main() -> Result<()> {
     let vendor = vendor_root()?;
     log::debug!("vendor 目录: {}", vendor.display());
 
-    // MAS 沙箱探针：只在 app-store 构建里存在，放在一切配置/数据目录副作用之前。
-    #[cfg(feature = "app-store")]
+    // MAS 沙箱探针：只在 mas-probe 构建（本机原型）里存在，提审构建不含；放在一切配置/数据目录副作用之前。
+    #[cfg(feature = "mas-probe")]
     {
         if args.iter().any(|a| a == "--mas-probe") {
-            std::process::exit(mas::run_probe(&vendor));
+            std::process::exit(mas_probe::run_probe(&vendor));
         }
         if let Some(i) = args.iter().position(|a| a == "--mas-probe-run") {
-            std::process::exit(mas::run_probe_run(&args[i + 1..]));
+            std::process::exit(mas_probe::run_probe_run(&args[i + 1..]));
         }
     }
 
