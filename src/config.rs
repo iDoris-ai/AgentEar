@@ -809,7 +809,8 @@ pub fn get() -> Config {
 ///
 /// 所以用两把：`SAVE` 只序列化写者（保证落盘顺序和改动顺序一致），
 /// `CURRENT` 的写锁只护住内存里那几纳秒的改动。读者永远不会等磁盘。
-pub fn update(f: impl FnOnce(&mut Config)) {
+/// 返回值：配置是否成功落盘（内存里的改动不管怎样都已生效）。
+pub fn update(f: impl FnOnce(&mut Config)) -> bool {
     // 先拿 SAVE，全程持有到落盘结束——写者之间因此是严格串行的。
     let _writer = SAVE.lock().unwrap_or_else(|e| e.into_inner());
     let snapshot = {
@@ -818,8 +819,12 @@ pub fn update(f: impl FnOnce(&mut Config)) {
         f(cfg);
         cfg.clone()
     }; // CURRENT 的写锁在这里就放了，读者不必等下面的磁盘 IO
-    if let Err(e) = save(&snapshot) {
-        log::error!("保存配置失败: {e:#}");
+    match save(&snapshot) {
+        Ok(()) => true,
+        Err(e) => {
+            log::error!("保存配置失败: {e:#}");
+            false
+        }
     }
 }
 

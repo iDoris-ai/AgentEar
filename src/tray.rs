@@ -155,10 +155,9 @@ fn should_switch_back(
 }
 
 /// 升级空档的运行时补完之后调用（`qwen3::start` 的安装成功回调）。
-/// **磁盘标记已经被清过了**——`qwen3::install`（`start` 和 `install_blocking`
-/// 共用的核心函数）在往下走到这个回调之前，成功路径上已经统一清掉
-/// `runtime-recovering.json`（PR #106 评审第 3 轮：收敛到一个地方清，
-/// 这里不用重复清一遍）。这个函数剩下要做的只是：这一次装好之后，
+/// **磁盘标记此时还在**（FU-21）：`qwen3::install` 不再清它，要等回切落盘之后
+/// （`switch_to_qwen3`）或用户放弃恢复时才清，免得「运行时已装好、回切未落盘」时丢线索。
+/// 这个函数要做的是：这一次装好之后，
 /// 要不要真的把识别引擎切回去。
 pub fn on_qwen3_runtime_recovered(m: crate::qwen3::Qwen3Model) {
     let recovering = {
@@ -182,7 +181,14 @@ pub fn on_qwen3_runtime_recovered(m: crate::qwen3::Qwen3Model) {
         switch_to_qwen3(m);
     } else {
         log::info!("{} 运行时补完；用户已经手动选了别的引擎，不强行换回", m.label());
+        // 安装核心不再清标记（FU-21）；不回切时由这里收尾，免得标记残留误触发下次回切。
+        abandon_qwen3_recovery();
     }
+}
+
+/// FU-21：启动时发现「运行时已装好、标记还在」，直接回切（不下载）。
+pub fn switch_back_after_interrupted_recovery(m: crate::qwen3::Qwen3Model) {
+    switch_to_qwen3(m);
 }
 
 /// 把识别引擎切到某一档 Qwen3（已确认装好）。常驻开着就顺手预热。
@@ -190,11 +196,18 @@ fn switch_to_qwen3(m: crate::qwen3::Qwen3Model) {
     // 任何切到某一档 Qwen3 的路径都经过这里（用户点了已装好的模型、下载完成后
     // 自动切过去、恢复完成换回去）——收在这一处清掉恢复线索，不用在每个调用点
     // 分别记得清（PR #106 评审第 3 轮）。
-    abandon_qwen3_recovery();
-    config::update(|c| {
+    // FU-21：先把回切落盘，**再**清恢复标记——反过来的话，两步之间退出就丢了线索。
+    let saved = config::update(|c| {
         c.asr_backend = crate::engine::AsrBackend::SpeechSwift;
         c.qwen3_model = m;
     });
+    if saved {
+        abandon_qwen3_recovery();
+    } else {
+        // L1：没落盘就保留标记，下次启动 SwitchBack 再来一遍
+        *QWEN3_RECOVERING.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        log::warn!("回切配置保存失败：保留恢复标记，下次启动重试");
+    }
     let resident = config::get().qwen3_resident;
     log::info!(
         "识别引擎改为 {}（{}，下次录音生效）",
@@ -2544,6 +2557,7 @@ mod tests {
             qwen3::read_recovering_marker().is_some(),
             /* configured_backend_is_speech_swift */ false,
             /* is_daemon */ true,
+            /* model_ready */ false,
         );
         assert_eq!(action, qwen3::RecoveryAction::None, "不该重新发起对用户已放弃模型的恢复");
 

@@ -481,6 +481,11 @@ pub fn install_blocking(m: Qwen3Model) -> Result<()> {
     });
     let r = install(m, &cancel);
     JOBS.lock().unwrap_or_else(|e| e.into_inner())[m.index()] = None;
+    // M1：`--fetch-qwen3`「只装不选」——没有回调去回切，保持改动前的行为：装好即清标记，
+    // 不让下次守护进程启动悄悄回切。（`start` 的后台路径不清，等回调回切后再清。）
+    if r.is_ok() {
+        clear_recovering_marker();
+    }
     r
 }
 
@@ -648,14 +653,13 @@ fn install(m: Qwen3Model, cancel: &AtomicBool) -> Result<()> {
     smoke(m).map_err(|e| io_err(format!("加载冒烟失败: {e:#}")))?;
     write_marker(&model_marker(m).context("数据目录未初始化")?, m.revision())?;
     download::sync_dir(&root);
-    // 任何一次成功安装（不管是 `start` 的后台线程、`install_blocking` 的
-    // `--fetch-qwen3`，还是哪个模型）都会先确保共享的运行时装好（上面
-    // `need_runtime` 那一段），所以这里是「运行时现在肯定装好了」的唯一汇合点：
-    // 不管升级恢复标记当初记的是不是这个 `m`，运行时装好之后那个标记都已经
-    // 没有意义了（PR #106 评审第 3 轮阻塞项：「on_qwen3_installed /
-    // install_blocking 成功之后也要清」，放在这个共用的核心函数里比在每个
-    // 调用方分别清更不容易漏）。
-    clear_recovering_marker();
+    // ⚠️ FU-21：这里**不清**升级恢复标记。运行时到这一刻已经装好（安装记录先于
+    // 回调落盘），但「回切 asr_backend = speech_swift」要等调用方的回调
+    // （`tray::on_qwen3_runtime_recovered` → `switch_to_qwen3`）做完；若这里先清、
+    // 回调前进程退出，下次启动 `gap` 为假、标记也没了，就永久停在 SenseVoice。
+    // 标记只在回切落盘之后（`switch_to_qwen3` 里）或用户放弃恢复时清。
+    // 标记还在而运行时已装好 = 「只差回切」，下次守护进程启动走
+    // `RecoveryAction::SwitchBack`，不再下载。
     Ok(())
 }
 
@@ -951,6 +955,10 @@ fn should_stop_ephemeral(spawned_by_us: bool, inflight: u32) -> bool {
 }
 
 /// 按 [`should_stop_ephemeral`] 回收槽里的服务；不满足就留着（交给空闲回收）。
+/// FU-26：这里走 [`kill_server`] = `retire_server`（同步 SIGTERM）+ [`await_exit`]
+/// （2 s 不退就硬杀并回收），与 `stop_server` 对槽里服务的处理一致，兜底是有的。
+/// 它不 join `TERMINATORS`——那些只是别处内存回收挂在后台的旧服务，SIGTERM 已同步发出；
+/// 一次性命令退出前由 `ServerGuard` 的 `stop_server` 统一 join。
 /// 注意「调用前槽里没有服务」到「我们拉起它」之间有一个很小的窗口，期间别处恰好
 /// 拉起同一个服务时我们会把它收掉——代价只是对方下一轮多付一次冷启动，不丢转写。
 fn stop_ephemeral_server(spawned_by_us: bool, why: &str) {
@@ -1555,6 +1563,10 @@ pub enum RecoveryAction {
     Note,
     /// 是恢复场景，且该发起下载（守护进程）：写标记、退回 builtin、后台下载。
     Download,
+    /// FU-21：运行时与模型都已装好（没有空档），但标记还在——上一次恢复在
+    /// 「运行时落盘」与「回切 asr_backend」之间被打断。守护进程直接回切，不再下载；
+    /// 回切落盘后由调用方清标记。一次性 CLI 不动（交给守护进程）。
+    SwitchBack,
 }
 
 /// - `gap`：这个模型「装过但现在用不了，且运行时缺失」
@@ -1566,6 +1578,7 @@ pub enum RecoveryAction {
 ///   判断「这是该恢复的场景」；有标记之后就不再依赖它，因为它随时可能已经被
 ///   同一次 preflight 的退回逻辑改写成 `builtin`（这正是这次修的 bug：不能让
 ///   「标记还在、但配置已经被我们自己改掉」被误判成「不是恢复场景」）。
+/// - `model_ready`：`is_ready(模型)`——没有空档且它为真，才可能是「只差回切」。
 /// - `is_daemon`：只有长驻的守护进程才发起下载线程——一次性 CLI 子命令等不到
 ///   下载跑完就退出了（运行时约 99 MB，守护进程里实测几秒钟内能完成，但一次性
 ///   命令通常比这个还快），交给下一次守护进程启动去接着做。
@@ -1574,8 +1587,16 @@ pub fn recovery_decision(
     marker_present: bool,
     configured_backend_is_speech_swift: bool,
     is_daemon: bool,
+    model_ready: bool,
 ) -> RecoveryAction {
-    if !gap || (!marker_present && !configured_backend_is_speech_swift) {
+    if !gap {
+        // FU-21：没有空档，但标记还在且模型已就绪 = 只差回切
+        if marker_present && model_ready && is_daemon {
+            return RecoveryAction::SwitchBack;
+        }
+        return RecoveryAction::None;
+    }
+    if !marker_present && !configured_backend_is_speech_swift {
         return RecoveryAction::None;
     }
     if is_daemon {
@@ -2000,28 +2021,37 @@ mod tests {
     fn recovery_decision_truth_table() {
         use RecoveryAction::*;
         // 没有空档：不管别的条件是什么，都不是恢复场景
-        assert_eq!(recovery_decision(false, true, true, true), None);
-        assert_eq!(recovery_decision(false, false, false, false), None);
+        assert_eq!(recovery_decision(false, true, true, true, false), None);
+        assert_eq!(recovery_decision(false, false, false, false, false), None);
 
         // 有空档，但既没有标记也没有「配置里选着 speech_swift」这条线索——
         // 不是恢复场景（比如用户从没装过，或者早就手动切走了）
-        assert_eq!(recovery_decision(true, false, false, true), None);
-        assert_eq!(recovery_decision(true, false, false, false), None);
+        assert_eq!(recovery_decision(true, false, false, true, false), None);
+        assert_eq!(recovery_decision(true, false, false, false, false), None);
 
         // 首次发现（还没有标记）：靠配置判断
-        assert_eq!(recovery_decision(true, false, true, true), Download, "守护进程首次发现，该发起下载");
-        assert_eq!(recovery_decision(true, false, true, false), Note, "一次性 CLI 首次发现，只记标记");
+        assert_eq!(recovery_decision(true, false, true, true, false), Download, "守护进程首次发现，该发起下载");
+        assert_eq!(recovery_decision(true, false, true, false, false), Note, "一次性 CLI 首次发现，只记标记");
 
         // 已经有标记（哪怕配置这时已经被退回成 builtin 了）：仍然要恢复——
         // 这正是评审要修的那条 bug：不能只看 asr_backend。
         assert_eq!(
-            recovery_decision(true, true, false, true),
+            recovery_decision(true, true, false, true, false),
             Download,
             "标记在、配置已被退回成 builtin：守护进程仍要重试"
         );
-        assert_eq!(recovery_decision(true, true, false, false), Note, "同上，但这次是一次性 CLI");
+        assert_eq!(recovery_decision(true, true, false, false, false), Note, "同上，但这次是一次性 CLI");
         // 标记在、配置碰巧还是 speech_swift：同样要恢复（两条线索都指向恢复）
-        assert_eq!(recovery_decision(true, true, true, true), Download);
+        assert_eq!(recovery_decision(true, true, true, true, false), Download);
+
+        // FU-21：没有空档、标记还在、模型就绪 = 只差回切（不论配置是 builtin 还是 speech_swift）
+        assert_eq!(recovery_decision(false, true, false, true, true), SwitchBack, "运行时装好了、回切没落盘");
+        assert_eq!(recovery_decision(false, true, true, true, true), SwitchBack, "配置已是 speech_swift 也走一遍，幂等并清标记");
+        assert_eq!(recovery_decision(false, true, false, false, true), None, "一次性 CLI 不回切");
+        assert_eq!(recovery_decision(false, true, false, true, false), None, "模型没就绪（被删了）：不回切");
+        assert_eq!(recovery_decision(false, false, false, true, true), None, "没有标记：不是恢复");
+        // 有空档时 model_ready 不影响原判断
+        assert_eq!(recovery_decision(true, true, false, true, true), Download);
     }
 
     /// ①「boot 1 中断 → boot 2 仍能恢复」：模拟两次启动。
@@ -2030,13 +2060,13 @@ mod tests {
         // boot 1：守护进程，配置还是 speech_swift，还没有标记——决定发起下载。
         // 调用方据此会写标记、把配置退回 builtin，然后下载被打断（进程被杀 /
         // 网络失败，这个决策函数看不出两者的区别，也不需要看出）。
-        let boot1 = recovery_decision(true, false, true, true);
+        let boot1 = recovery_decision(true, false, true, true, false);
         assert_eq!(boot1, RecoveryAction::Download);
 
         // boot 2：配置已经是 builtin 了（boot 1 退回时持久化的那一步），
         // 但标记还在——仍要重试。如果这里看的是 asr_backend 而不是标记，
         // 这一步会错判成 None，用户就永久卡在 SenseVoice 上了。
-        let boot2 = recovery_decision(true, true, false, true);
+        let boot2 = recovery_decision(true, true, false, true, false);
         assert_eq!(boot2, RecoveryAction::Download, "标记保住了恢复的线索，boot 2 仍要重试");
     }
 
@@ -2045,17 +2075,17 @@ mod tests {
     /// `Note` 分支只写标记、在内存里退回 builtin，不碰磁盘上的 `asr_backend`。
     #[test]
     fn one_shot_cli_only_notes_does_not_download() {
-        assert_eq!(recovery_decision(true, false, true, false), RecoveryAction::Note);
-        assert_eq!(recovery_decision(true, true, false, false), RecoveryAction::Note);
+        assert_eq!(recovery_decision(true, false, true, false, false), RecoveryAction::Note);
+        assert_eq!(recovery_decision(true, true, false, false, false), RecoveryAction::Note);
     }
 
     /// ③ 下载失败后下次启动仍会重试：失败和「被杀」对这个决策函数是同一件事——
-    /// 两者都不会调 `clear_recovering_marker()`（只有真正装好那一刻才调），
+    /// 两者都不会调 `clear_recovering_marker()`（只有回切落盘或用户放弃时才调），
     /// 所以下一次启动看到的都是「标记在、配置可能已经是 builtin」，
     /// 与 `boot_1_interrupted_boot_2_still_recovers` 是同一条断言。
     #[test]
     fn failed_download_is_retried_next_boot() {
-        assert_eq!(recovery_decision(true, true, false, true), RecoveryAction::Download);
+        assert_eq!(recovery_decision(true, true, false, true, false), RecoveryAction::Download);
     }
 
     #[test]
