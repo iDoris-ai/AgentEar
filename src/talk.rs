@@ -3481,9 +3481,15 @@ mod tests {
 
     #[test]
     fn free_local_port_gives_a_bindable_port() {
-        let p = free_local_port().expect("本机总该有一个空闲端口");
-        assert_ne!(p, 0);
-        std::net::TcpListener::bind(("127.0.0.1", p)).expect("刚分到的端口应当能 bind");
+        // 「分到 → 放掉 → 再 bind」之间端口可能被并行跑的别的测试抢走（CI 上 #131/#133 各红过一次 AddrInUse）。
+        // 这个窗口是 free_local_port 的固有语义（分到的端口只是「此刻空闲」），所以测试只要求
+        // 「几次里至少一次能 bind」，不要求每一次都赢下竞态。
+        let ok = (0..5).any(|_| {
+            let p = free_local_port().expect("本机总该有一个空闲端口");
+            assert_ne!(p, 0);
+            std::net::TcpListener::bind(("127.0.0.1", p)).is_ok()
+        });
+        assert!(ok, "连续 5 次分到的端口都 bind 不上");
     }
 
     /// 覆盖只对「同一个配置地址」生效：用户改了 config，旧覆盖必须失效。
