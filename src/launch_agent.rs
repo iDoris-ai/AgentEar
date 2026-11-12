@@ -154,6 +154,11 @@ fn plist_contents(exe: &Path) -> String {
 /// 现读 + 持锁，保证"最后落盘的就是当前最新配置"，不管两个调用点
 /// 谁先谁后开始跑。
 pub fn apply() {
+    // Mac App Store 版（feature app-store）：本路径不存在。
+    if cfg!(feature = "app-store") {
+        log::info!("开机自启（LaunchAgent）：App Store 版不提供，忽略");
+        return;
+    }
     static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
     let _guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let enabled = crate::config::get().launch_at_login;

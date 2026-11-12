@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- 随包的 helper 可执行文件（llama-funasr-sensevoice、whisper-cli）：
+         沙箱 + inherit，继承 AgentEar 主进程的沙箱。inherit 不能和别的沙箱
+         entitlement 同时出现。 -->
+    <key>com.apple.security.app-sandbox</key>
+    <true/>
+    <key>com.apple.security.inherit</key>
+    <true/>
+</dict>
+</plist>

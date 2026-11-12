@@ -11,11 +11,23 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 OUT="${1:-$ROOT/dist}"
-APP="$OUT/AgentEar.app"
 VERSION="$(grep -m1 '^version' "$ROOT/Cargo.toml" | cut -d'"' -f2)"
 
+# bundle id 可覆盖。MAS 沙箱原型必须用独立的 id（如 ai.idoris.agentear.mas），
+# 否则和直接分发版共用 TCC 授权与沙箱容器。不设时与以前完全一致。
+BUNDLE_ID="${AGENTEAR_BUNDLE_ID:-ai.idoris.agentear}"
+CARGO_FEATURES=()
+if [ "${AGENTEAR_DISTRIBUTION:-}" = "app-store" ]; then
+  # App Store 版：独立的 .app 名与默认 bundle id，并只编 MAS 功能子集。
+  APP="$OUT/AgentEar-MAS.app"
+  BUNDLE_ID="${AGENTEAR_BUNDLE_ID:-ai.idoris.agentear.mas}"
+  CARGO_FEATURES=(--features app-store)
+else
+  APP="$OUT/AgentEar.app"
+fi
+
 echo "==> 构建 release"
-cargo build --release --manifest-path "$ROOT/Cargo.toml"
+cargo build --release ${CARGO_FEATURES[@]+"${CARGO_FEATURES[@]}"} --manifest-path "$ROOT/Cargo.toml"
 
 # ⚠️ **体积守卫：vendor/ 里不该出现推理用的模型权重。**
 #
@@ -87,7 +99,7 @@ cat > "$APP/Contents/Info.plist" <<PLIST
     <key>CFBundleDisplayName</key>
     <string>AgentEar</string>
     <key>CFBundleIdentifier</key>
-    <string>ai.idoris.agentear</string>
+    <string>$BUNDLE_ID</string>
     <key>CFBundleVersion</key>
     <string>$VERSION</string>
     <key>CFBundleShortVersionString</key>
@@ -181,8 +193,16 @@ fi
 # 也会限制子进程，和现在这份本机安装包不是同一条分发路径。
 # ⚠️ 这只是把签名分支备好；现有 bundle 还过不了 MAS 审核，见 docs/app-store.md。
 if [ "${AGENTEAR_DISTRIBUTION:-}" = "app-store" ]; then
-  echo "==> App Store 沙箱（assets/entitlements/AppStore.entitlements）"
-  codesign --force --deep --options runtime \
+  echo "==> App Store 沙箱（assets/entitlements/AppStore.entitlements，bundle id ${BUNDLE_ID}）"
+  # 随包可执行文件先逐个签：沙箱 + inherit（继承父进程的沙箱）。
+  # 不能用 --deep：它会把嵌套二进制重签成不带 entitlements 的。
+  for bin in "$APP/Contents/Resources/vendor/bin/"*; do
+    [ -f "$bin" ] || continue
+    codesign --force --options runtime \
+      --entitlements "$ROOT/assets/entitlements/AppStoreHelper.entitlements" \
+      --sign "$SIGN_ID" "$bin" 2>&1 | sed 's/^/    /'
+  done
+  codesign --force --options runtime \
     --entitlements "$ROOT/assets/entitlements/AppStore.entitlements" \
     --sign "$SIGN_ID" "$APP" 2>&1 | sed 's/^/    /'
 else
@@ -240,6 +260,8 @@ fi
 # 发布用压缩包。用 ditto 而非 zip，它会保留资源分支与签名
 echo "==> 打包发布件"
 ZIP="$OUT/AgentEar-$VERSION-macos-arm64.zip"
+# MAS 原型包只在本机沙箱验证用，不能和直接分发的发布件同名
+[ "${AGENTEAR_DISTRIBUTION:-}" = "app-store" ] && ZIP="$OUT/AgentEar-MAS-$VERSION-macos-arm64-local.zip"
 rm -f "$ZIP"
 ditto -c -k --sequesterRsrc --keepParent "$APP" "$ZIP"
 echo "    $ZIP ($(du -h "$ZIP" | cut -f1))"

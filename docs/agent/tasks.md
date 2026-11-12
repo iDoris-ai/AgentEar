@@ -1409,10 +1409,14 @@
 
 ## 进行中的三条线（2026-11-10 记录；只写能核实的）
 
-### T-APPSTORE-1 App Store 分发：沙箱底座 + 可行性审计（原 T7.1）  `DONE`（阶段 0；PR #118 → `da7c570`，2026-11-11）。阶段 1 真机沙箱原型与「MAS 版功能子集」待 jason 拍板，见 `docs/app-store.md`
+### T-APPSTORE-1 App Store 分发：沙箱底座 + 可行性审计（原 T7.1）  阶段 0 `DONE`（PR #118 → `da7c570`）；阶段 1 沙箱原型 + 阶段 2 `app-store` 功能子集 `DONE`（本 PR，2026-11-11，见下）；阶段 3 提审工程未做（没有 Apple Distribution 证书）
 - 做法：`assets/entitlements/AppStore.entitlements`；`bundle.sh` 的 `AGENTEAR_DISTRIBUTION=app-store` 签名分支；`resolve_data_root`（沙箱数据进容器，HOME 已在容器时不嵌套）；审计结论见 `docs/app-store.md`。
 - 结论：现状不能原样上 MAS，4 个硬阻塞（右 Command/CGEventTap、自动 ⌘V、运行时下载 speech-server、Python 边车）；可行子集 = 输入法模式 + 随包 SenseVoice + 组合键 + 剪贴板。
-- 下一步：阶段 1 沙箱原型（真机验证标「未核实」的项）。默认构建行为不变。
+- 阶段 1（实测，`docs/app-store.md` §6）：沙箱 HOME=容器 Data；Carbon 热键注册 OSStatus 0；listen-only `CGEventTap` 授权前可创建；随包 helper 签 sandbox+inherit 后能拉起，`--transcribe` 中英逐字正确；curl/afplay/open/sh 能跑；NSPasteboard 写读 OK。`say -o` 在沙箱里只写出 4096 字节（原因未查）。
+- 阶段 2：cargo feature `app-store`（默认关、默认构建不变）：`mas::apply_limits` 压制配置（组合键、不自动上屏、输入法模式、无 Qwen3/翻译/自启/LLM 自动拉起）；download/builtin_download/qwen3 下载、LaunchAgent、Agent24 附着、对话边车入口 early return；菜单与设置窗口隐藏对应项；`--mas-probe` / `--mas-probe-run`；`bundle.sh` 独立 bundle id 与 helper 逐个签；CI 加 `cargo test --features app-store`。
+- 稳定版找回右 Command（输入监控，listen-only tap）/ 自动上屏（PostEvent，审核高风险）的权限与风险：`docs/app-store.md` §6.2。
+- **未实测（需人工，§6.3）**：真实 TCC 弹窗、Ctrl+Shift+R 真触发、麦克风真录音、授权后右 Command 事件、`open` 是否真拉起浏览器、菜单/设置窗口的实际外观。
+- **上架阻塞（非沙箱）**：SenseVoice 权重许可商用不明（§7）。
 
 ### T-HOSTSPEAK-1 宿主 speak 时按需拉起 TTS  `DONE`（PR #120 → `299694e`，2026-11-11，未单独发版）
 - 宿主 `speak` 遇 TTS 未运行时按对话模式同一套逻辑按需拉起（连接优先、端口避让），拉起在播放线程；失败原因细分 `sidecar_not_running` / `start_failed` / `start_timeout`，`tts_unavailable` 只留给合成/播放失败（`/1` 内兼容加法，fixtures 同步）。

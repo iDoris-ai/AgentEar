@@ -418,6 +418,11 @@ fn set_job(m: Qwen3Model, f: impl FnOnce(&mut Job)) {
 /// `on_installed` 在安装记录落地之后调用（要不要切过去由调用方按用户此刻的意图定，
 /// 和泰语模型的 `THAI_INTENT` 同一个理由：下载要几分钟，用户可能中途改主意）。
 pub fn start(m: Qwen3Model, on_installed: fn(Qwen3Model)) {
+    // Mac App Store 版（feature app-store）：本路径不存在。
+    if cfg!(feature = "app-store") {
+        log::info!("Qwen3 运行时/模型下载：App Store 版不提供，忽略");
+        return;
+    }
     let cancel = {
         let mut jobs = JOBS.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(j) = &jobs[m.index()] {
@@ -471,6 +476,11 @@ pub fn cancel(m: Qwen3Model) {
 
 /// 同步安装（给 `--fetch-qwen3` 用）：在当前线程跑，进度打到 stderr。
 pub fn install_blocking(m: Qwen3Model) -> Result<()> {
+    // Mac App Store 版（feature app-store）：本路径不存在。
+    if cfg!(feature = "app-store") {
+        log::info!("Qwen3 运行时/模型下载：App Store 版不提供，忽略");
+        return Err(anyhow::anyhow!("App Store 版不提供 Qwen3（运行时下载可执行文件违反审核指南 2.5.2）"));
+    }
     let cancel = Arc::new(AtomicBool::new(false));
     JOBS.lock().unwrap_or_else(|e| e.into_inner())[m.index()] = Some(Job {
         phase: 1,
