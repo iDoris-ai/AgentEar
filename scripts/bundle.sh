@@ -44,7 +44,17 @@ else
 fi
 
 echo "==> 构建 release"
-cargo build --release ${CARGO_FEATURES[@]+"${CARGO_FEATURES[@]}"} --manifest-path "$ROOT/Cargo.toml"
+# 拷贝用 cargo **这次实际产出**的可执行文件路径，不写死 $ROOT/target/release（#135 评审 L1）：
+# 设了 CARGO_TARGET_DIR 时，写死的路径会拷到 $ROOT/target 里上一次（可能带探针）的旧构建。
+# json 走 stdout、编译诊断照常打到 stderr（json-render-diagnostics）。
+BIN="$(cargo build --release ${CARGO_FEATURES[@]+"${CARGO_FEATURES[@]}"} --manifest-path "$ROOT/Cargo.toml" \
+  --message-format=json-render-diagnostics \
+  | sed -n 's|.*"executable":"\([^"]*/agentear\)".*|\1|p' | tail -1)"
+if [ -z "$BIN" ] || [ ! -x "$BIN" ]; then
+  echo "!! 没从 cargo 输出里拿到 agentear 可执行文件路径（收到：${BIN:-空}）" >&2
+  exit 1
+fi
+echo "    可执行文件：${BIN}"
 
 # ⚠️ **体积守卫：vendor/ 里不该出现推理用的模型权重。**
 #
@@ -83,7 +93,19 @@ echo "==> 组装 $APP"
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 
-cp "$ROOT/target/release/agentear" "$APP/Contents/MacOS/AgentEar"
+cp "$BIN" "$APP/Contents/MacOS/AgentEar"
+
+# 提审构建里不许有沙箱探针（能在沙箱里执行任意命令）；原型构建里必须有，否则复测步骤用不了。
+# 对**拷进包里的那份**断言，而不是只信 feature 参数。
+if [ "${AGENTEAR_DISTRIBUTION:-}" = "app-store" ]; then
+  if grep -q -a -- "--mas-probe-run" "$APP/Contents/MacOS/AgentEar"; then HAS_PROBE=1; else HAS_PROBE=0; fi
+  if [ "${AGENTEAR_MAS_PROBE:-}" = "1" ] && [ "$HAS_PROBE" = 0 ]; then
+    echo "!! AGENTEAR_MAS_PROBE=1 但包里的二进制没有探针" >&2; exit 1
+  fi
+  if [ "${AGENTEAR_MAS_PROBE:-}" != "1" ] && [ "$HAS_PROBE" = 1 ]; then
+    echo "!! 提审构建里混进了沙箱探针（--mas-probe-run），拒绝打包" >&2; exit 1
+  fi
+fi
 
 # ASR 二进制与模型随 bundle 走，运行时从 Resources/vendor 读。
 #
