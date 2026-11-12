@@ -169,8 +169,18 @@ allow_force_pushes / deletions: false
 而是把**已批准、CI 绿**的 PR 放进队列；GitHub 在「main + 该 PR」的临时合并提交上跑 `test`（CI 监听
 `merge_group` 事件），绿了才以 squash 落到 main。动机：此前 `strict=true` + `dismiss_stale_reviews`
 下，main 每前进一次，排在后面的 PR 都要「同步 main → 重新送审」（v0.29.0 时 #124/#125 各多走一轮）。
-队列不往 PR 分支推提交，所以审批不会被作废；「CI 在最新 main 上验证过」这条保证仍在，只是挪到了队列里。
+队列本身不往 PR 分支推提交（推送触发的 `dismiss_stale_reviews` 不会因它发生）；「CI 在最新 main 上验证过」这条保证仍在，只是挪到了队列里。
 ⚠️ 队列里的合并提交没有经过评审——它只是机械合并；**有冲突的 PR 进不了队列**，仍要人同步 main、重新送审。
+
+**怎么入队**：本仓库没开 auto-merge，`gh pr merge N --squash` 在有队列的分支上会失败（「Auto merge is not allowed」）。
+用 GraphQL 入队：
+
+```bash
+id=$(gh pr view N --json id -q .id)
+gh api graphql -f query="mutation{enqueuePullRequest(input:{pullRequestId:\"$id\"}){mergeQueueEntry{state position}}}"
+```
+
+之后 `gh pr view N --json state` 等到 `MERGED`。2026-11-11 起 #129–#134 都这样合并的。
 
 **`require_last_push_approval` 是这次补的那一项**：补之前，
 「先审 → 再 push 代码 → 直接合」在机制上是被 `dismiss_stale_reviews`

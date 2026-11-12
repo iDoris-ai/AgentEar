@@ -62,6 +62,9 @@ jobs:
       # 默认构建的上面几步不受影响（feature 默认关）。
       - name: App Store 功能子集（cargo feature app-store）
         run: cargo test --locked --features app-store --bin agentear --test script_defaults
+      # 沙箱探针（feature mas-probe，只给本机原型）至少要能编译，否则复测步骤用不了。
+      - name: App Store 沙箱探针能编译（cargo feature mas-probe）
+        run: cargo check --locked --features mas-probe --bin agentear
 
       # Python 边车（services/tts）的测试。**这一步原来是漏的**，代价实测到了：
       # v0.16.0 把方言 instruct 改成「只写方言名」时有一条测试当场变红，
