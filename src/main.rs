@@ -3998,7 +3998,16 @@ mod host_wiring_tests {
         host::await_confirm("evt_old".into(), Duration::from_millis(0));
         std::thread::sleep(Duration::from_millis(20));
         assert!(host::take_awaiting().is_none());
-        let r = events_of(&fake, "confirm_reply");
+        // 到点定时线程（FU-28）可能已经把槽取走、但还没把 reject 发出去（被系统切走了）：
+        // 此刻立刻数事件会偶发数到 0（#142 的 merge queue 上红过一次）。最多等 3 秒等它到。
+        let mut r = events_of(&fake, "confirm_reply");
+        for _ in 0..60 {
+            if !r.is_empty() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+            r = events_of(&fake, "confirm_reply");
+        }
         assert_eq!(r.len(), 1);
         assert_eq!(r[0]["payload"]["reply"], "reject");
         assert_eq!(r[0]["payload"]["proposal_event_id"], "evt_old");
