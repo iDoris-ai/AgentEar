@@ -154,7 +154,8 @@ else
    注意 pyenv 之类只在交互式 shell 里生效——非交互环境下先 export PATH，或直接用绝对路径"
     mkdir -p "$TALK_DIR"
     [ -d "$NEW_VENV" ] || "$PY" -m venv "$NEW_VENV"
-    "$NEW_VENV/bin/python" -m pip install -q --upgrade pip
+    # FU-24：pip 本身也钉版本（2026-11-13 取自本机实测在用的 26.1.1），不再 --upgrade 到最新。
+    "$NEW_VENV/bin/python" -m pip install -q pip==26.1.1
     "$NEW_VENV/bin/python" -m pip install -q -c "$ROOT/scripts/pins/venv-constraints.txt" "${PIP_PINS[@]}"
   fi
   VENV="$NEW_VENV"
@@ -172,8 +173,8 @@ fi
 #
 # 但**仍然钉 revision**：模型目录必须能追溯到确切一次提交，
 # 否则「同一份权重」这句话没有依据（照 setup-llm.sh 的理由）。
-fetch_repo() {  # fetch_repo <repo> <钉死的 revision> <目标目录> <必需文件名...>
-  local repo="$1" rev="$2" dest="$3"; shift 3
+fetch_repo() {  # fetch_repo <repo> <钉死的 revision> <目标目录> <清单> <清单对应的默认 revision> <必需文件名...>
+  local repo="$1" rev="$2" dest="$3" manifest="$4" default_rev="$5"; shift 5
   mkdir -p "$dest"
   echo "    $repo @ ${rev} -> $dest"
   env -u HF_ENDPOINT HF_HUB_DISABLE_TELEMETRY=1 \
@@ -184,6 +185,15 @@ fetch_repo() {  # fetch_repo <repo> <钉死的 revision> <目标目录> <必需�
     [ -s "$dest/$name" ] || missing+=("$name")
   done
   [ ${#missing[@]} -eq 0 ] || die "$repo 少了必需文件：${missing[*]}"
+  # FU-24：逐文件 sha256 校验（清单 scripts/pins/*.sha256，大文件取自 HF API lfs.oid）。
+  # 清单只对默认 revision 有效；用 AGENTEAR_TALK_*_REV 覆盖时无从校验，明说跳过。
+  if [ "$rev" = "$default_rev" ]; then
+    echo "    校验 sha256（$(grep -vc '^#' "$manifest") 个文件）"
+    (cd "$dest" && grep -v '^#' "$manifest" | shasum -a 256 -c --quiet) \
+      || die "$repo 的 sha256 与钉死的清单不符（镜像被改动或下载损坏）。删掉 $dest 重跑"
+  else
+    echo "!! $repo revision 被覆盖为 ${rev}，跳过 sha256 清单校验" >&2
+  fi
   # 记下提交号（就是钉死的那个，不再事后去问 API——问到的是 HEAD，不一定是下的那份）
   printf 'repo=%s\nrevision=%s\nfetched=%s\n' "$repo" "$rev" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
     > "$dest/.installed"
@@ -192,10 +202,12 @@ fetch_repo() {  # fetch_repo <repo> <钉死的 revision> <目标目录> <必需�
 
 note "下载 LLM：面壁 MiniCPM5-2B（4bit MLX，HF 计数 1.4 GB / du 显示 1.3G）"
 fetch_repo "$LLM_REPO" "$LLM_REV" "$LLM_MODEL_DIR" \
+  "$ROOT/scripts/pins/minicpm5-2b-4bit.sha256" "$LLM_REV_DEFAULT" \
   config.json model.safetensors tokenizer.json tokenizer_config.json
 
 note "下载 TTS：VoxCPM2（${QUANT} MLX）"
 fetch_repo "$TTS_REPO" "$TTS_REV" "$TTS_MODEL_DIR" \
+  "$ROOT/scripts/pins/voxcpm2-${QUANT}.sha256" "$TTS_REV_DEFAULT" \
   config.json model.safetensors tokenizer.json tokenizer_config.json
 
 # 体积守卫：中断留下的残缺目录不该被当成可用模型（照 setup-llm.sh）。
