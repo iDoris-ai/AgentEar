@@ -78,7 +78,7 @@ if [ "${AGENTEAR_BUNDLE_DRY_RUN:-}" = "1" ]; then
 fi
 case "$VENDOR_STATE" in
   symlink|external-symlink)
-    echo "!! vendor/ 是符号链接，或内含指向包外的符号链接（${VENDOR_BAD:-$ROOT/vendor}）：cp -R 只会拷链接，签名会改写链接指向的真实文件。请实拷：cp -R <源>/vendor $ROOT/vendor" >&2
+    echo "!! vendor/ 是符号链接，或内含绝对路径 / 含 .. 的符号链接（${VENDOR_BAD:-$ROOT/vendor}）。判定从严：这类链接可能指向包外，cp -R 只会拷链接、签名会改写链接指向的真实文件；即使它其实指向包内也一律拒绝。请实拷：cp -R <源>/vendor $ROOT/vendor" >&2
     exit 1 ;;
 esac
 [ "${AGENTEAR_BUNDLE_DRY_RUN:-}" = "1" ] && exit 0

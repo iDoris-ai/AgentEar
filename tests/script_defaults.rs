@@ -390,6 +390,19 @@ fn bundle_refuses_symlinked_vendor() {
     assert!(err.contains("实拷"));
     fs::remove_file(root.join("vendor/bin/asr")).unwrap();
 
+    // 相对 `../` 链接（删掉脚本里 `*..*` 那半个匹配时，只有这条会变红）
+    symlink("../../elsewhere/bin", root.join("vendor/bin/rel")).unwrap();
+    let (rc, m, err) = dry_run(&script, &[]);
+    assert_eq!((rc, m["vendor"].as_str()), (1, "external-symlink"));
+    assert!(err.contains("一律拒绝"), "报错要说明从严判定");
+    fs::remove_file(root.join("vendor/bin/rel")).unwrap();
+
+    // 包内的纯相对链接放行
+    symlink("sibling", root.join("vendor/bin/inner")).unwrap();
+    let (rc, m, _) = dry_run(&script, &[]);
+    assert_eq!((rc, m["vendor"].as_str()), (0, "ok"));
+    fs::remove_file(root.join("vendor/bin/inner")).unwrap();
+
     // vendor 本身是链接
     fs::remove_dir_all(root.join("vendor")).unwrap();
     symlink(&real, root.join("vendor")).unwrap();
