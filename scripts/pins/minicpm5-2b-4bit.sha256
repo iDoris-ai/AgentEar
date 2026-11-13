@@ -1,0 +1,11 @@
+# mlx-community/MiniCPM5-2B-mlx-4Bit @ 86ad5182c5a8532a4681ab972011d34c3b89477a（2026-11-13）
+# 大文件 sha256 = HF API tree 的 lfs.oid；小文件按该 commit 的 resolve URL 下载后实算。格式同 shasum -a 256
+11ad7efa24975ee4b0c3c3a38ed18737f0658a5f75a0a96787b576a78a023361  .gitattributes
+cf98b02b630215d7aa7e38f77a5f4d6cc48d3cccd762bbe16d967e0ced5075ba  README.md
+cc945752db555d60949b16989df4ccfeb52a313d6b4b5c5229dd786e2e9fcf1c  chat_template.jinja
+deb9ca33e863cbc84a9ab7209cd924fc05505dc33270c807d47f1b78fbd53a50  config.json
+9ac4f32e5f32358697a9f438a3ea89ef80e6ba786c72c49e932f9f21c122fdb1  generation_config.json
+10162e41ac75b135f716a0bd01e04a3f030bae1f31e278acc9ec286a97f5609c  model.safetensors
+ccf202e0a06fe3c7eb8f354cfb29412a5e64956ad895413d4d9267ae4b3a6045  model.safetensors.index.json
+3e065a558a034185fe299917b398685c1facd0169a9eea1e629eb30c171fed81  tokenizer.json
+53ebae74bf014903b1ad5ec943749ee59b61e0756e80fc2b7ee09df3d84a2b42  tokenizer_config.json

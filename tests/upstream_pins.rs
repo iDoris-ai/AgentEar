@@ -221,6 +221,9 @@ fn hf_weight_manifests_exist_and_are_verified() {
     for (rel, must_have, script) in [
         ("scripts/pins/ornith-1.0-9b-6bit.sha256", "model-00001-of-00002.safetensors", "scripts/setup-llm.sh"),
         ("scripts/pins/distill-whisper-th-large-v3.sha256", "model.safetensors", "scripts/build-thai-model.sh"),
+        ("scripts/pins/minicpm5-2b-4bit.sha256", "model.safetensors", "scripts/setup-talk.sh"),
+        ("scripts/pins/voxcpm2-4bit.sha256", "model.safetensors", "scripts/setup-talk.sh"),
+        ("scripts/pins/voxcpm2-8bit.sha256", "model.safetensors", "scripts/setup-talk.sh"),
     ] {
         let body = read(rel);
         let mut found = false;
@@ -232,7 +235,12 @@ fn hf_weight_manifests_exist_and_are_verified() {
         assert!(found, "{rel} 缺 {must_have}");
         let name = rel.rsplit('/').next().unwrap();
         let sbody = read(script);
-        assert!(sbody.contains(name) && sbody.contains("shasum -a 256 -c"), "{script} 没有用 {name} 校验");
+        // voxcpm2 两档在脚本里写成 voxcpm2-${QUANT}.sha256。
+        let templ = name.replace("voxcpm2-4bit", "voxcpm2-${QUANT}").replace("voxcpm2-8bit", "voxcpm2-${QUANT}");
+        assert!(
+            (sbody.contains(name) || sbody.contains(&templ)) && sbody.contains("shasum -a 256 -c"),
+            "{script} 没有用 {name} 校验"
+        );
     }
 }
 
@@ -255,4 +263,15 @@ fn vendor_asr_build_pins_commits_and_docs_record_binaries() {
     ] {
         assert!(doc.contains(needle), "docs/upstream-pins.md 要记 {needle}");
     }
+}
+
+/// FU-24：setup-talk.sh 的 pip 不再 `--upgrade pip` 到最新，而是钉版本。
+#[test]
+fn setup_talk_pins_pip_itself() {
+    let body = read("scripts/setup-talk.sh");
+    assert!(!body.contains("--upgrade pip"), "setup-talk.sh 不许再 --upgrade pip");
+    assert!(
+        code_lines(&body, "#").iter().any(|l| l.contains("pip install -q pip==")),
+        "setup-talk.sh 要用 pip==<版本> 钉住 pip 自身"
+    );
 }
