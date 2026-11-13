@@ -1,0 +1,11 @@
+# mlx-community/VoxCPM2-8bit @ d52725898a0675703f7f9ddc5a4d1a3cdbb99032（2026-11-13）
+# 大文件 sha256 = HF API tree 的 lfs.oid；小文件按该 commit 的 resolve URL 下载后实算。格式同 shasum -a 256
+7eac21484d4fcba4c70abb89e50573c40a723a3f0fd1bd848ed30264b1cf40c3  .gitattributes
+0d642ce09804a3517762ab1a6a9997bd0263d229ec39fc4a0f767868298a8709  README.md
+005406ee534a26bc1821055f8c38ffa46fa6c3d3362bd04af5673a44689d92b8  config.json
+c07c59aca742fe8f53384a3da4d8a3b3fd98ddc77066dd4bd35b51e08c34a72f  model.safetensors
+068594063e37662c02b21acf42ebb334ef6a74fb810e68a2368f88f08351de76  special_tokens_map.json
+e3947e1ab2948247ec8b1bcf85ab78b5e713ae050343e4a1f86eb54e9105f2b5  test_en.wav
+0ccb6231c3b6b20baa5fd6f6af41cfd2364b8a64a0d537e021fd6bbd06e61e37  test_id.wav
+f8984687e4a92a3503d521396d454b7d68e9fdaab2a0288eb3536c7c1aa4bc20  tokenizer.json
+466575c55f0cf49530666c2e46ed14f26237dbd227ba7f4bb3bbec93df90edfc  tokenizer_config.json

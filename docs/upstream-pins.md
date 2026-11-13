@@ -39,22 +39,23 @@
 | 间接 pip 依赖（mlx-metal、mlx-vlm、numpy…） | 约束文件（`-c`）= 2026-11-11 `uv pip freeze` 全量 57 个包；`setup-llm.sh` / `setup-talk.sh` 安装时带上 | `scripts/pins/venv-constraints.txt` |
 | 理解层 LLM 权重 Ornith 6bit 逐文件 sha256 | 12 个文件；大文件取 HF API `lfs.oid`，小文件按该 commit 的 resolve URL 实算；`setup-llm.sh` 下载后 `shasum -a 256 -c`。本机 `~/.agentear/llm/models/ornith` 实测全部 OK。用 `AGENTEAR_LLM_REV` 覆盖 revision 时清单不适用，脚本明说跳过 | `scripts/pins/ornith-1.0-9b-6bit.sha256` |
 | 泰语微调权重 distill-whisper-th-large-v3 逐文件 sha256 | 11 个文件，取法同上；`build-thai-model.sh` 在转换前校验（镜像内容也要过） | `scripts/pins/distill-whisper-th-large-v3.sha256` |
+| 对话 LLM MiniCPM5-2B / TTS VoxCPM2 4bit、8bit 逐文件 sha256 | 各 9 个文件（`hf download` 会拉整个仓库，含 README / 示例 wav，清单全覆盖）；大文件取 HF API `lfs.oid`，小文件按该 commit 的 resolve URL 实算（2026-11-13，FU-24 收尾）。`setup-talk.sh` 下载后 `shasum -a 256 -c`；用 `AGENTEAR_TALK_*_REV` 覆盖 revision 时清单不适用，明说跳过。本机 `~/.agentear/talk/models/{minicpm5-2b-4bit,voxcpm2-4bit,voxcpm2-8bit}` 只读实测三份全部 OK | `scripts/pins/minicpm5-2b-4bit.sha256` / `voxcpm2-4bit.sha256` / `voxcpm2-8bit.sha256` |
+| `setup-talk.sh` 新建 venv 时的 pip | 钉 `pip==26.1.1`（本机实测在用的版本），不再 `--upgrade pip` | `scripts/setup-talk.sh` |
+| README「从源码构建」的下载示例 | FunASR tarball 与二进制、SenseVoice / FSMN-VAD GGUF 全部带 sha256 校验，GGUF 改用 `builtin_models.rs` 里钉的 commit（不再 `resolve/main`）；tarball 与二进制 sha 在 2026-11-13 重新下载实算，与记载一致 | `README.md` |
 
 **复建实测（2026-11-11，机器负载高）**：`scripts/build-vendor-asr.sh` 两个目标都跑了一次，各约 1.5 分钟（FunASR 只编 sensevoice 一个 target）。
 
 - `whisper-cli` 自编产物 sha256 = `322b8ce3…0603`，**与 vendor 副本逐字节相同**（同一台机器、同一工具链，所以这一次可复现；换工具链不保证）。
 - `llama-funasr-sensevoice` 自编产物 sha256 = `76190ea7686330d3ed9e0731d34ef369af9a8d37dbdb67861776fb5e0e0d3864`，**与官方预编译 `49d66b2f…` 不同**（官方是 GitHub runner 编的，路径、编译器、`GGML_NATIVE=OFF` 之外的细节都可能不同）。行为：用 `AGENTEAR_VENDOR` 指向自编产物，`agentear --transcribe` 一段中文 `say` 和一段英文 `say`，转写文本与 vendor 副本**完全相同**（只有 2 段合成语音，耗时在高负载下无参考价值）。
-- 想要逐字节一致的 sensevoice：直接下官方 tarball，核对上面的 tarball sha256 与二进制 sha256（README「从源码构建」里的 curl 命令即是；注意它没有校验 sha256，是遗留项）。
+- 想要逐字节一致的 sensevoice：直接下官方 tarball，核对上面的 tarball sha256 与二进制 sha256（README「从源码构建」里的命令即是，已带 sha256 校验）。
 
 ### 1.4 仍然没锁住的（诚实清单）
 
 | 项 | 现状 | 风险 / 后续 |
 |---|---|---|
-| 泰语要求文件的版本是**未经完整重跑验证**的 | 取自本机 `~/venvs/ml` 里实装的 torch 2.12.0 / transformers 5.15.1 / numpy 2.4.4 …；2026-08-28 那次跑通转换的版本**没有记录**，本次也没有重下 3 GB 权重跑完整转换 | 下一次实际重跑 `build-thai-model.sh` 时，若转换失败或产物 sha12 指纹不符，改要求文件并记录；torch 的间接依赖与 `--hash` 未做 |
-| `pip install --upgrade pip` | `setup-talk.sh` 里新建 venv 时仍升级 pip 到最新 | 只是安装器本身，不影响运行时行为 |
+| 泰语要求文件的版本是**未经完整重跑验证**的 | 取自本机 `~/venvs/ml` 里实装的 torch 2.12.0 / transformers 5.15.1 / numpy 2.4.4 …；2026-08-28 那次跑通转换的版本**没有记录**。**2026-11-13 评估后未重跑，原因：资源**——`sysctl vm.swapusage` 显示 swap 总 20480 MB、已用 20085 MB、剩余仅 395 MB（门槛 2 GB），磁盘可用 389 GB 本身够；转换要下约 3 GB 权重并加载 torch，在 swap 几乎耗尽时跑有拖垮 jason 在用机器的风险 | 等 swap 有余量（剩余 ≥ 2 GB）时重跑 `scripts/build-thai-model.sh`，比较量化后 .bin 的 sha12 指纹与现发布版；不符就改要求文件并记录。torch 的间接依赖与 `--hash` 未做 |
 | 约束文件来自一个 venv 的 freeze | 该 venv 同时装了 mlx-dspark / mlx-vlm / fastapi 等，约束对 talk venv 多余但无害；没有 `--hash` | 要更严：`uv pip compile --generate-hashes` |
-| README 里 `funasr-llamacpp-macos-arm64.tar.gz` 的下载命令 | 没校验 tarball sha256，且 SenseVoice/VAD 的 GGUF 用 `resolve/main`（README 示例；运行时下载走 `builtin_models.rs`，已钉） | 文档示例，不影响发布包；后续可补 sha256 校验 |
-| 对话 LLM / TTS（MiniCPM5 / VoxCPM2）权重文件 sha256 | 只钉到 commit（HF 对 commit 内容不可变），无逐文件 sha | 够用；要更严就照 `scripts/pins/*.sha256` 补 |
+| 对话 LLM / TTS 清单与 pip 钉的「新装」路径未实跑 | 清单在本机已有目录上用 `shasum -c` 验证过（OK）；`setup-talk.sh` 的校验分支与 `pip==26.1.1` 只过了语法检查（`lint-shell.sh`）与单测，**没有在干净目录重新下载 4 GB+ 模型、也没有新建 venv 实跑** | 下一次新机器 / 干净目录跑 `scripts/setup-talk.sh` 时留意 |
 
 ## 2. 版本握手 / 能力探测
 
