@@ -1115,19 +1115,62 @@ pub fn flush(timeout: Duration) -> bool {
 struct Awaiting {
     event_id: String,
     deadline: Instant,
+    /// 发出 proposal 时的连接代号（FU-27）：换了一代连接后，旧会话的 proposal id 不许再发给新宿主。
+    generation: u64,
+    /// 本条待确认的唯一序号：到点定时器靠它认出「还是不是我盯着的那一条」（FU-28）。
+    seq: u64,
 }
 static AWAITING: Mutex<Option<Awaiting>> = Mutex::new(None);
+/// 连接代号：每次 `attach` +1。
+static GENERATION: AtomicU64 = AtomicU64::new(0);
+static AWAIT_SEQ: AtomicU64 = AtomicU64::new(0);
+
+/// 当前连接代号。发 proposal 前读一次，传给 `await_confirm_in`。
+pub fn generation() -> u64 {
+    GENERATION.load(Ordering::SeqCst)
+}
+
+/// 取走的一条待确认：带着它所属的连接代号。
+pub struct Awaited {
+    pub event_id: String,
+    pub generation: u64,
+}
+
+/// 补发 `confirm_reply` 给 `a` 那条 proposal。**连接代号对不上就丢弃并记日志**（FU-27）。
+/// 返回是否真的交给了投递队列（代号不符 / 没附着 / 没有队列时为 false，调用方要如实告诉用户）。
+///
+/// 核对代号与入队在**同一把 `EMITTER` 锁里**完成，`attach` 也在这把锁里换队列并 +1 代号
+/// （#140 评审 L1）：否则「核对通过 → attach 换上新队列 → 入队」会把旧会话的 proposal id 发给新宿主。
+pub fn reply_to(a: &Awaited, confirm: bool, text: Option<&str>) -> bool {
+    if !attached() {
+        return false;
+    }
+    let slot = EMITTER.lock().unwrap_or_else(|p| p.into_inner());
+    let current = generation();
+    if a.generation != current {
+        log::warn!(
+            "proposal {} 属于上一代连接（{} ≠ {}），不向新宿主补发 confirm_reply",
+            a.event_id,
+            a.generation,
+            current
+        );
+        return false;
+    }
+    emit_locked(&slot, "confirm_reply", confirm_reply_payload(&a.event_id, confirm, text)).is_some()
+}
 
 /// 附着到一个宿主：换 session、状态进 Attached。
 pub fn attach(link: Arc<dyn HostLink>) {
     log::info!("附着到宿主：{}", link.name());
     // 换新附着：旧那一代的队列作废，**新连接的事件绝不被旧队列带走**，旧事件也不再发往旧宿主。
-    if let Some(old) = EMITTER
-        .lock()
-        .unwrap_or_else(|p| p.into_inner())
-        .replace(start_outbox(link.clone()))
+    // 换队列与代号 +1 在同一把锁里（#140 评审 L1）：`reply_to` 也持这把锁核对代号，
+    // 所以不存在「新队列已就位、代号还是旧的」的窗口。
     {
-        old.cancel();
+        let mut slot = EMITTER.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some(old) = slot.replace(start_outbox(link.clone())) {
+            old.cancel();
+        }
+        GENERATION.fetch_add(1, Ordering::SeqCst);
     }
     *LINK.write().unwrap_or_else(|p| p.into_inner()) = Some(link);
     *STATE.lock().unwrap_or_else(|p| p.into_inner()) = AttachState::Attached;
@@ -1193,6 +1236,11 @@ pub fn emit(ty: &str, payload: Value) -> Option<String> {
         return None;
     }
     let slot = EMITTER.lock().unwrap_or_else(|p| p.into_inner());
+    emit_locked(&slot, ty, payload)
+}
+
+/// `emit` 的入队部分，调用方已持有 `EMITTER` 锁（`reply_to` 要把核对代号与入队放在同一把锁里）。
+fn emit_locked(slot: &Option<Outbox>, ty: &str, payload: Value) -> Option<String> {
     let outbox = slot.as_ref()?;
     let ev = outbox.emitter.next(ty, payload);
     let id = ev["event_id"].as_str().unwrap_or_default().to_string();
@@ -1206,29 +1254,65 @@ pub fn emit(ty: &str, payload: Value) -> Option<String> {
 
 /// 记一条等宿主答复的 proposal（只留一条，新的顶掉旧的——与独立版同一个理由：
 /// 挂两条时用户说「确认」我们不知道他确认的是哪条）。
+/// 同时起一个到点即发的定时（FU-28）：过了 `ttl` 还没人答复，就向宿主发 reject，
+/// 不必等用户下一次说话 / 按键。
 pub fn await_confirm(proposal_event_id: String, ttl: Duration) {
+    await_confirm_in(proposal_event_id, ttl, generation());
+}
+
+/// 同上，连接代号由调用方给（发 proposal 之前读的那个）。
+pub fn await_confirm_in(proposal_event_id: String, ttl: Duration, generation: u64) {
+    let seq = AWAIT_SEQ.fetch_add(1, Ordering::SeqCst) + 1;
     let old = {
         let mut slot = AWAITING.lock().unwrap_or_else(|p| p.into_inner());
         slot.replace(Awaiting {
             event_id: proposal_event_id,
             deadline: Instant::now() + ttl,
+            generation,
+            seq,
         })
     };
     if let Some(old) = old {
         log::info!("新的待确认顶掉了旧的（{}），告诉宿主作废", old.event_id);
         // P3：被顶掉的 proposal 在宿主那边不能一直挂着等——明确发 reject，零执行。
-        emit("confirm_reply", confirm_reply_payload(&old.event_id, false, None));
+        reply_to(&Awaited { event_id: old.event_id, generation: old.generation }, false, None);
+    }
+    // 到点定时：后台线程睡到期限，醒来只在「槽里还是我这一条」时才发。
+    // 已确认 / 拒绝 / 被顶掉 / 断开都会让槽里的 seq 变掉，于是定时自然失效，不需要显式取消。
+    let spawned = std::thread::Builder::new().name("host-await-expiry".into()).spawn(move || {
+        std::thread::sleep(ttl + Duration::from_millis(5));
+        let expired = {
+            let mut slot = AWAITING.lock().unwrap_or_else(|p| p.into_inner());
+            match slot.as_ref() {
+                Some(a) if a.seq == seq => slot.take(),
+                _ => None,
+            }
+        };
+        if let Some(a) = expired {
+            log::info!("待确认到点未答复（{}），告诉宿主作废", a.event_id);
+            reply_to(&Awaited { event_id: a.event_id, generation: a.generation }, false, None);
+        }
+    });
+    if let Err(e) = spawned {
+        log::warn!("起不了待确认到点定时线程（{e}）：退回「下一次说话 / 按键时才发 reject」");
     }
 }
 
 /// 取走还没过期的那条待确认（过期的顺手丢掉，并向宿主发 reject，免得它一直挂着）。
 pub fn take_awaiting() -> Option<String> {
+    take_awaiting_gen().map(|a| a.event_id)
+}
+
+/// 同 `take_awaiting`，但带着连接代号，答复时用 `reply_to` 核对。
+pub fn take_awaiting_gen() -> Option<Awaited> {
     let taken = AWAITING.lock().unwrap_or_else(|p| p.into_inner()).take();
     match taken {
-        Some(a) if Instant::now() <= a.deadline => Some(a.event_id),
+        Some(a) if Instant::now() <= a.deadline => {
+            Some(Awaited { event_id: a.event_id, generation: a.generation })
+        }
         Some(a) => {
             log::info!("待确认已过期作废（{}），告诉宿主作废", a.event_id);
-            emit("confirm_reply", confirm_reply_payload(&a.event_id, false, None));
+            reply_to(&Awaited { event_id: a.event_id, generation: a.generation }, false, None);
             None
         }
         None => None,
