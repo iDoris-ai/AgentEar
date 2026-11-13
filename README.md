@@ -77,10 +77,13 @@ git clone git@github.com:iDoris-ai/AgentEar.git && cd AgentEar
 # ASR 运行时与模型不入库,需要单独下载到 vendor/
 mkdir -p vendor/bin vendor/models
 # 下载后一律核对 sha256（与 src/builtin_models.rs、docs/upstream-pins.md 一致；不符就停）
-curl -sSfL -o /tmp/funasr-llamacpp.tar.gz \
+set -e   # 任何一步失败（含 sha 不符）就停，别让后面的步骤接着跑
+TMP="$(mktemp -d)"   # 私有临时目录，别用固定的 /tmp 路径（共享机器上校验与解压之间可能被换文件）
+curl -sSfL -o "$TMP/funasr-llamacpp.tar.gz" \
   https://github.com/modelscope/FunASR/releases/download/runtime-llamacpp-v0.1.9/funasr-llamacpp-macos-arm64.tar.gz
-echo "2d5786784ad09d8f4def1d942f678728638fe601d00acf0dad7cf094a9328363  /tmp/funasr-llamacpp.tar.gz" | shasum -a 256 -c - \
-  && tar xzf /tmp/funasr-llamacpp.tar.gz -C vendor/bin
+echo "2d5786784ad09d8f4def1d942f678728638fe601d00acf0dad7cf094a9328363  $TMP/funasr-llamacpp.tar.gz" | shasum -a 256 -c -
+tar xzf "$TMP/funasr-llamacpp.tar.gz" -C vendor/bin
+rm -rf "$TMP"
 chmod +x vendor/bin/llama-funasr-*
 echo "49d66b2f79d439e2db7933627e1deb9eb7f3ebf0d708473757828130f3619435  vendor/bin/llama-funasr-sensevoice" | shasum -a 256 -c -
 B=https://huggingface.co/FunAudioLLM
