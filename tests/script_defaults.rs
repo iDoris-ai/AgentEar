@@ -263,3 +263,138 @@ fn both_sidecar_scripts_read_their_port_from_the_env() {
     assert!(talk.contains("\"AGENTEAR_TTS_PORT\"") && talk.contains("\"AGENTEAR_TALK_LLM_PORT\""),
         "src/talk.rs 的 port_env_var 与脚本读的变量名要一致");
 }
+
+// ---- bundle.sh 干跑行为测试（FU-29 / FU-30）----
+// 上面那些断言只 grep 脚本文本，行为改坏仍绿；这里真跑 `AGENTEAR_BUNDLE_DRY_RUN=1`
+// （不编译、不拷贝、不签名）并断言它打印的 key=value。
+
+fn dry_run(script: &std::path::Path, envs: &[(&str, &str)]) -> (i32, std::collections::HashMap<String, String>, String) {
+    let mut cmd = std::process::Command::new("/bin/bash");
+    cmd.arg(script).env("AGENTEAR_BUNDLE_DRY_RUN", "1");
+    for k in ["AGENTEAR_DISTRIBUTION", "AGENTEAR_MAS_PROBE", "AGENTEAR_BUILD_NUMBER", "AGENTEAR_BUNDLE_ID"] {
+        cmd.env_remove(k);
+    }
+    for (k, v) in envs {
+        cmd.env(k, v);
+    }
+    let out = cmd.output().expect("跑不起 bundle.sh");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let map = stdout
+        .lines()
+        .filter_map(|l| l.split_once('=').map(|(k, v)| (k.to_string(), v.to_string())))
+        .collect();
+    (out.status.code().unwrap_or(-1), map, String::from_utf8_lossy(&out.stderr).into_owned())
+}
+
+fn real_bundle_script() -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/bundle.sh")
+}
+
+fn cargo_version() -> String {
+    read("Cargo.toml")
+        .lines()
+        .find(|l| l.starts_with("version"))
+        .and_then(|l| l.split('"').nth(1))
+        .expect("Cargo.toml 没有 version")
+        .to_string()
+}
+
+#[test]
+fn bundle_dry_run_direct_distribution() {
+    let v = cargo_version();
+    let (rc, m, _) = dry_run(&real_bundle_script(), &[]);
+    assert_eq!(rc, 0);
+    assert_eq!(m["cargo_features"], "");
+    assert_eq!(m["bundle_id"], "ai.idoris.agentear");
+    assert_eq!(m["app_name"], "AgentEar.app");
+    assert_eq!(m["build_number"], v);
+    assert_eq!(m["short_version"], v);
+    assert_eq!(m["probe_assert"], "none");
+}
+
+#[test]
+fn bundle_dry_run_app_store_has_no_probe_by_default() {
+    let (rc, m, _) = dry_run(&real_bundle_script(), &[("AGENTEAR_DISTRIBUTION", "app-store")]);
+    assert_eq!(rc, 0);
+    assert_eq!(m["cargo_features"], "--features app-store");
+    assert_eq!(m["bundle_id"], "ai.idoris.agentear.mas");
+    assert_eq!(m["app_name"], "AgentEar-MAS.app");
+    assert_eq!(m["probe_assert"], "must-not-have");
+    // 未设构建号：退回版本号
+    assert_eq!(m["build_number"], cargo_version());
+}
+
+#[test]
+fn bundle_dry_run_app_store_probe_only_when_asked() {
+    let (rc, m, _) = dry_run(
+        &real_bundle_script(),
+        &[("AGENTEAR_DISTRIBUTION", "app-store"), ("AGENTEAR_MAS_PROBE", "1")],
+    );
+    assert_eq!(rc, 0);
+    assert_eq!(m["cargo_features"], "--features mas-probe");
+    assert_eq!(m["probe_assert"], "must-have");
+    // 直接分发版里 AGENTEAR_MAS_PROBE 不起作用
+    let (_, m, _) = dry_run(&real_bundle_script(), &[("AGENTEAR_MAS_PROBE", "1")]);
+    assert_eq!(m["cargo_features"], "");
+    assert_eq!(m["probe_assert"], "none");
+}
+
+#[test]
+fn bundle_dry_run_build_number_is_separate_from_version() {
+    let (rc, m, _) = dry_run(
+        &real_bundle_script(),
+        &[("AGENTEAR_DISTRIBUTION", "app-store"), ("AGENTEAR_BUILD_NUMBER", "7")],
+    );
+    assert_eq!(rc, 0);
+    assert_eq!(m["build_number"], "7");
+    assert_eq!(m["short_version"], cargo_version());
+}
+
+#[test]
+fn bundle_dry_run_rejects_malformed_build_number() {
+    let (rc, m, err) = dry_run(
+        &real_bundle_script(),
+        &[("AGENTEAR_DISTRIBUTION", "app-store"), ("AGENTEAR_BUILD_NUMBER", "1.2.3.4")],
+    );
+    assert_eq!(rc, 1, "四段构建号必须 exit 1");
+    assert!(m.is_empty(), "校验失败时不该打印任何 key=value");
+    assert!(err.contains("AGENTEAR_BUILD_NUMBER"));
+}
+
+/// FU-30：vendor 是符号链接（或含指向包外的链接）时拒绝打包。在临时 ROOT 里造结构，不碰真实 vendor。
+#[test]
+fn bundle_refuses_symlinked_vendor() {
+    use std::os::unix::fs::symlink;
+    let root = std::env::temp_dir().join(format!("agentear-bundle-fu30-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(root.join("scripts")).unwrap();
+    fs::copy(real_bundle_script(), root.join("scripts/bundle.sh")).unwrap();
+    fs::write(root.join("Cargo.toml"), "[package]\nname = \"x\"\nversion = \"0.0.1\"\n").unwrap();
+    let script = root.join("scripts/bundle.sh");
+
+    // 没有 vendor：干跑照常通过并报 missing
+    let (rc, m, _) = dry_run(&script, &[]);
+    assert_eq!((rc, m["vendor"].as_str()), (0, "missing"));
+
+    // 真实目录：ok
+    let real = root.join("elsewhere");
+    fs::create_dir_all(real.join("bin")).unwrap();
+    fs::create_dir_all(root.join("vendor/bin")).unwrap();
+    let (rc, m, _) = dry_run(&script, &[]);
+    assert_eq!((rc, m["vendor"].as_str()), (0, "ok"));
+
+    // 内部含指向包外的链接
+    symlink(real.join("bin"), root.join("vendor/bin/asr")).unwrap();
+    let (rc, m, err) = dry_run(&script, &[]);
+    assert_eq!((rc, m["vendor"].as_str()), (1, "external-symlink"));
+    assert!(err.contains("实拷"));
+    fs::remove_file(root.join("vendor/bin/asr")).unwrap();
+
+    // vendor 本身是链接
+    fs::remove_dir_all(root.join("vendor")).unwrap();
+    symlink(&real, root.join("vendor")).unwrap();
+    let (rc, m, _) = dry_run(&script, &[]);
+    assert_eq!((rc, m["vendor"].as_str()), (1, "symlink"));
+
+    let _ = fs::remove_dir_all(&root);
+}
