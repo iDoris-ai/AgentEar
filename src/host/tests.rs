@@ -1189,3 +1189,76 @@ fn event_fixtures_agree_with_the_schema() {
     }
     assert!(seq_events > 0, "sequences 里一条事件都没有");
 }
+
+fn reply_events(fake: &FakeHost) -> Vec<Value> {
+    assert!(flush(Duration::from_secs(2)));
+    fake.events().into_iter().filter(|e| e["type"] == "confirm_reply").collect()
+}
+
+/// FU-27：换了一代连接后，旧会话的 proposal 不许再向新宿主补发 reject。
+#[test]
+fn stale_generation_reply_is_dropped() {
+    let _g = global_lock();
+    let old_host = Arc::new(FakeHost::new());
+    attach(old_host.clone());
+    await_confirm("evt_old".into(), Duration::from_secs(30));
+    let taken = take_awaiting_gen().expect("有待确认");
+    // 取走之后、答复之前，连接重连换了一代
+    let new_host = Arc::new(FakeHost::new());
+    attach(new_host.clone());
+    assert!(!reply_to(&taken, false, None), "旧代的 proposal 不发");
+    assert!(reply_events(&new_host).is_empty(), "新宿主不该收到旧 proposal id");
+    // 同代的照发
+    await_confirm("evt_new".into(), Duration::from_secs(30));
+    let taken = take_awaiting_gen().unwrap();
+    assert!(reply_to(&taken, true, None));
+    assert_eq!(reply_events(&new_host).len(), 1);
+}
+
+/// FU-28：到点自动发 reject，用户不出声也一样。
+#[test]
+fn expiry_timer_sends_reject_without_user_input() {
+    let _g = global_lock();
+    let fake = Arc::new(FakeHost::new());
+    attach(fake.clone());
+    await_confirm("evt_t".into(), Duration::from_millis(30));
+    std::thread::sleep(Duration::from_millis(300));
+    let r = reply_events(&fake);
+    assert_eq!(r.len(), 1, "到点发且只发一次");
+    assert_eq!(r[0]["payload"]["reply"], "reject");
+    assert_eq!(r[0]["payload"]["proposal_event_id"], "evt_t");
+    assert!(take_awaiting().is_none(), "槽已被定时清掉");
+    assert_eq!(reply_events(&fake).len(), 1, "之后取走也不重复发");
+}
+
+/// FU-28：已确认 / 被顶掉的，定时器醒来不再发。
+#[test]
+fn expiry_timer_is_inert_after_confirm_or_replace() {
+    let _g = global_lock();
+    let fake = Arc::new(FakeHost::new());
+    attach(fake.clone());
+    // 已确认：取走并发 confirm
+    await_confirm("evt_c".into(), Duration::from_millis(30));
+    let taken = take_awaiting_gen().unwrap();
+    assert!(reply_to(&taken, true, None));
+    // 被顶掉：旧的收到 reject（顶掉那次），新的长期有效
+    await_confirm("evt_a".into(), Duration::from_millis(30));
+    await_confirm("evt_b".into(), Duration::from_secs(30));
+    std::thread::sleep(Duration::from_millis(300));
+    let r = reply_events(&fake);
+    let got: Vec<(String, String)> = r
+        .iter()
+        .map(|e| {
+            (
+                e["payload"]["proposal_event_id"].as_str().unwrap().to_string(),
+                e["payload"]["reply"].as_str().unwrap().to_string(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        got,
+        vec![("evt_c".into(), "confirm".into()), ("evt_a".into(), "reject".into())],
+        "evt_c 只有 confirm；evt_a 只在被顶掉时 reject 一次；evt_b 未到期"
+    );
+    assert_eq!(take_awaiting().as_deref(), Some("evt_b"));
+}

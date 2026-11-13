@@ -2044,12 +2044,12 @@ fn attached_keypress_confirm() -> bool {
     if !host::attached() {
         return false;
     }
-    let Some(proposal) = host::take_awaiting() else {
+    let Some(proposal) = host::take_awaiting_gen() else {
         return false;
     };
-    log::info!("短按录音键 → 向宿主确认 proposal {proposal}");
+    log::info!("短按录音键 → 向宿主确认 proposal {}", proposal.event_id);
     println!("✔ 已确认（按键，交给 Agent24 执行）");
-    host::emit("confirm_reply", host::confirm_reply_payload(&proposal, true, None));
+    host::reply_to(&proposal, true, None);
     true
 }
 
@@ -2069,10 +2069,10 @@ fn run_command_turn_attached(
     text: &str,
     content_hash: &str,
 ) -> CommandTurn {
-    if let Some(proposal) = host::take_awaiting() {
+    if let Some(proposal) = host::take_awaiting_gen() {
         let judged = commands::classify_confirmation(text);
         let confirm = host::confirm_reply_for(Some(text));
-        host::emit("confirm_reply", host::confirm_reply_payload(&proposal, confirm, Some(text)));
+        host::reply_to(&proposal, confirm, Some(text));
         match judged {
             commands::Reply::Confirm => {
                 println!("✔ 已确认，交给 Agent24 执行");
@@ -2112,6 +2112,7 @@ fn run_command_turn_attached(
         proposal["commands_path"] = serde_json::Value::String(host::tilde_path(p));
     }
     let needs_confirm = proposal["needs_confirm"].as_bool().unwrap_or(false);
+    let generation = host::generation();
     let event_id = host::emit("proposal", proposal);
     match (&hit.action, event_id) {
         (commands::Action::Builtin { .. }, _) => {
@@ -2124,7 +2125,7 @@ fn run_command_turn_attached(
         }
         (_, Some(id)) if needs_confirm => {
             let ttl = Duration::from_secs(cfg.command_confirm_secs.max(5));
-            host::await_confirm(id, ttl);
+            host::await_confirm_in(id, ttl, generation);
             println!("❓ 已交给 Agent24 确认（{}）", hit.phrase);
             CommandTurn::Asked
         }
