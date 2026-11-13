@@ -1262,3 +1262,30 @@ fn expiry_timer_is_inert_after_confirm_or_replace() {
     );
     assert_eq!(take_awaiting().as_deref(), Some("evt_b"));
 }
+
+/// #140 评审 L3：发 proposal 前读的代号已过期（读完代号、登记之前连接换了一代），
+/// 这条旧代的待确认被新的顶掉、或到点，都不许向新宿主发 reject。
+#[test]
+fn displaced_or_expired_entry_of_an_older_generation_is_not_sent() {
+    let _g = global_lock();
+    let old_host = Arc::new(FakeHost::new());
+    attach(old_host.clone());
+    let stale_gen = generation();
+    let new_host = Arc::new(FakeHost::new());
+    attach(new_host.clone());
+    // 被顶掉
+    await_confirm_in("evt_stale_a".into(), Duration::from_secs(30), stale_gen);
+    await_confirm("evt_cur".into(), Duration::from_secs(30));
+    // 到点
+    let _ = take_awaiting();
+    await_confirm_in("evt_stale_b".into(), Duration::from_millis(30), stale_gen);
+    std::thread::sleep(Duration::from_millis(300));
+    let ids: Vec<String> = reply_events(&new_host)
+        .iter()
+        .map(|e| e["payload"]["proposal_event_id"].as_str().unwrap().to_string())
+        .collect();
+    assert!(
+        !ids.iter().any(|i| i.starts_with("evt_stale")),
+        "旧代的 proposal 不该发给新宿主：{ids:?}"
+    );
+}

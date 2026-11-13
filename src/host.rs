@@ -1137,33 +1137,41 @@ pub struct Awaited {
 }
 
 /// 补发 `confirm_reply` 给 `a` 那条 proposal。**连接代号对不上就丢弃并记日志**（FU-27）。
-/// 返回是否真的发了。
+/// 返回是否真的交给了投递队列（代号不符 / 没附着 / 没有队列时为 false，调用方要如实告诉用户）。
+///
+/// 核对代号与入队在**同一把 `EMITTER` 锁里**完成，`attach` 也在这把锁里换队列并 +1 代号
+/// （#140 评审 L1）：否则「核对通过 → attach 换上新队列 → 入队」会把旧会话的 proposal id 发给新宿主。
 pub fn reply_to(a: &Awaited, confirm: bool, text: Option<&str>) -> bool {
-    if a.generation != generation() {
+    if !attached() {
+        return false;
+    }
+    let slot = EMITTER.lock().unwrap_or_else(|p| p.into_inner());
+    let current = generation();
+    if a.generation != current {
         log::warn!(
             "proposal {} 属于上一代连接（{} ≠ {}），不向新宿主补发 confirm_reply",
             a.event_id,
             a.generation,
-            generation()
+            current
         );
         return false;
     }
-    emit("confirm_reply", confirm_reply_payload(&a.event_id, confirm, text));
-    true
+    emit_locked(&slot, "confirm_reply", confirm_reply_payload(&a.event_id, confirm, text)).is_some()
 }
 
 /// 附着到一个宿主：换 session、状态进 Attached。
 pub fn attach(link: Arc<dyn HostLink>) {
     log::info!("附着到宿主：{}", link.name());
     // 换新附着：旧那一代的队列作废，**新连接的事件绝不被旧队列带走**，旧事件也不再发往旧宿主。
-    if let Some(old) = EMITTER
-        .lock()
-        .unwrap_or_else(|p| p.into_inner())
-        .replace(start_outbox(link.clone()))
+    // 换队列与代号 +1 在同一把锁里（#140 评审 L1）：`reply_to` 也持这把锁核对代号，
+    // 所以不存在「新队列已就位、代号还是旧的」的窗口。
     {
-        old.cancel();
+        let mut slot = EMITTER.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some(old) = slot.replace(start_outbox(link.clone())) {
+            old.cancel();
+        }
+        GENERATION.fetch_add(1, Ordering::SeqCst);
     }
-    GENERATION.fetch_add(1, Ordering::SeqCst);
     *LINK.write().unwrap_or_else(|p| p.into_inner()) = Some(link);
     *STATE.lock().unwrap_or_else(|p| p.into_inner()) = AttachState::Attached;
     crate::tray::set_host_disconnected(false);
@@ -1228,6 +1236,11 @@ pub fn emit(ty: &str, payload: Value) -> Option<String> {
         return None;
     }
     let slot = EMITTER.lock().unwrap_or_else(|p| p.into_inner());
+    emit_locked(&slot, ty, payload)
+}
+
+/// `emit` 的入队部分，调用方已持有 `EMITTER` 锁（`reply_to` 要把核对代号与入队放在同一把锁里）。
+fn emit_locked(slot: &Option<Outbox>, ty: &str, payload: Value) -> Option<String> {
     let outbox = slot.as_ref()?;
     let ev = outbox.emitter.next(ty, payload);
     let id = ev["event_id"].as_str().unwrap_or_default().to_string();

@@ -2048,8 +2048,12 @@ fn attached_keypress_confirm() -> bool {
         return false;
     };
     log::info!("短按录音键 → 向宿主确认 proposal {}", proposal.event_id);
-    println!("✔ 已确认（按键，交给 Agent24 执行）");
-    host::reply_to(&proposal, true, None);
+    if host::reply_to(&proposal, true, None) {
+        println!("✔ 已确认（按键，交给 Agent24 执行）");
+    } else {
+        // #140 评审 L2：确认没送到就不能报「已确认」——宿主那边什么也不会执行。
+        println!("⚠️ 确认没送达 Agent24（连接已重连或断开），这条指令不会执行，请重说一遍");
+    }
     true
 }
 
@@ -2072,7 +2076,12 @@ fn run_command_turn_attached(
     if let Some(proposal) = host::take_awaiting_gen() {
         let judged = commands::classify_confirmation(text);
         let confirm = host::confirm_reply_for(Some(text));
-        host::reply_to(&proposal, confirm, Some(text));
+        let delivered = host::reply_to(&proposal, confirm, Some(text));
+        if !delivered && judged != commands::Reply::Other {
+            // #140 评审 L2：答复没送到就不能报「已确认 / 已取消」。取消没送到也无害（宿主不会执行），但要如实说。
+            println!("⚠️ 答复没送达 Agent24（连接已重连或断开），刚才那条指令不会执行");
+            return CommandTurn::Handled;
+        }
         match judged {
             commands::Reply::Confirm => {
                 println!("✔ 已确认，交给 Agent24 执行");
