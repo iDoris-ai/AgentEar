@@ -43,6 +43,45 @@ else
   APP="$OUT/AgentEar.app"
 fi
 
+
+# vendor 检查（FU-30，2026-11-13 事故）：`cp -R` 遇到符号链接只拷链接本身，随后的签名会顺着链接
+# 改写**包外**真实的 vendor 二进制（实际发生过：主 checkout 的 sensevoice 被改写后被系统 SIGTRAP 杀掉）。
+# 选「报错退出」而不是 `cp -RL`：解引用拷贝会悄悄把任意包外文件打进发布件，
+# 报错能逼人显式实拷（`cp -R <源>/vendor <此处>/vendor`），行为可预期。
+# 包内的相对链接（不含 `..`、不是绝对路径）放行。
+VENDOR_STATE=ok
+if [ -L "$ROOT/vendor" ]; then
+  VENDOR_STATE=symlink
+elif [ -d "$ROOT/vendor" ]; then
+  while IFS= read -r l; do
+    [ -z "$l" ] && continue
+    t="$(readlink "$l")"
+    case "$t" in /*|*..*) VENDOR_STATE=external-symlink; VENDOR_BAD="$l -> $t"; break ;; esac
+  done < <(find "$ROOT/vendor" -type l)
+else
+  VENDOR_STATE=missing
+fi
+
+# 干跑：不编译、不拷贝、不签名，只打印将要用的参数后退出（FU-29）。
+# 构建号格式校验与 vendor 符号链接检查在上面已经照常生效。tests/script_defaults.rs 靠它做行为测试。
+if [ "${AGENTEAR_BUNDLE_DRY_RUN:-}" = "1" ]; then
+  if [ "${AGENTEAR_DISTRIBUTION:-}" != "app-store" ]; then PROBE_ASSERT=none
+  elif [ "${AGENTEAR_MAS_PROBE:-}" = "1" ]; then PROBE_ASSERT=must-have
+  else PROBE_ASSERT=must-not-have; fi
+  echo "cargo_features=${CARGO_FEATURES[*]-}"
+  echo "bundle_id=${BUNDLE_ID}"
+  echo "build_number=${BUILD_NUMBER}"
+  echo "short_version=${VERSION}"
+  echo "app_name=$(basename "$APP")"
+  echo "probe_assert=${PROBE_ASSERT}"
+  echo "vendor=${VENDOR_STATE}"
+fi
+case "$VENDOR_STATE" in
+  symlink|external-symlink)
+    echo "!! vendor/ 是符号链接，或内含指向包外的符号链接（${VENDOR_BAD:-$ROOT/vendor}）：cp -R 只会拷链接，签名会改写链接指向的真实文件。请实拷：cp -R <源>/vendor $ROOT/vendor" >&2
+    exit 1 ;;
+esac
+[ "${AGENTEAR_BUNDLE_DRY_RUN:-}" = "1" ] && exit 0
 echo "==> 构建 release"
 # 拷贝用 cargo **这次实际产出**的可执行文件路径，不写死 $ROOT/target/release（#135 评审 L1）：
 # 设了 CARGO_TARGET_DIR 时，写死的路径会拷到 $ROOT/target 里上一次（可能带探针）的旧构建。
