@@ -255,10 +255,15 @@ pub fn run_probed(cmd: &mut Command) -> std::io::Result<Output> {
 
     let status = child.wait();
     stop.store(true, Ordering::Relaxed);
-    let stdout = h_out.and_then(|h| h.join().ok()).unwrap_or_default();
-    let stderr = h_err.and_then(|h| h.join().ok()).unwrap_or_default();
+    let joined = |h: Option<std::thread::JoinHandle<Vec<u8>>>| match h {
+        Some(h) => h.join().map_err(|_| std::io::Error::other("读子进程输出的线程 panic")),
+        None => Ok(Vec::new()),
+    };
+    // 读线程出问题就报错，**不能**当成「子进程没输出」放行（那会变成一次空转写）。
+    let stdout = joined(h_out);
+    let stderr = joined(h_err);
     let _ = sampler.join();
-    let status = status?;
+    let (status, stdout, stderr) = (status?, stdout?, stderr?);
 
     let f = first.load(Ordering::Relaxed);
     let probe = AsrProbe {
