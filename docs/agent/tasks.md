@@ -1347,6 +1347,10 @@
 - 起因：jason 升级到 v0.25.2 首启弹「AgentEar wants to access key ai.idoris.agentear.agent24 … login keychain password」。自签证书无 Team ID → 钥匙串分区按 cdhash 认 app → 每次升级都弹。jason 拍板改存 `<数据目录>/agent24/token`（0600）。
 - 迁移：配对过但无 token 文件 → 代跑 `attach add` 重新签发；不读、不删旧钥匙串项（都会弹框），旧 token 随轮换作废。
 - 验证：7 处调用点变异全红；隔离 agent24d 实测全新配对 / 迁移（旧 token auth_failed）/ 宽权限拒用 / daemon 不在时迁移。
+### T6.1.6 输入法模式分段耗时 + 系统快照（FU-31）  `DONE`（2026-11-14，本 PR；真实热键/录音下未跑，见 CLAUDE.md「输入法模式的分段耗时与系统快照」）
+- `src/input_timings.rs`：`InputRecord`（分段 + `sys_start`/`sys_end` 快照）、`run_probed`（SenseVoice/whisper 子进程的 spawn 耗时 / 首字节 / 峰值 RSS）、`report`（慢轮归因 + 分桶）。`main.rs::finish()` 打点；`engine.rs` 只在 Qwen3 退回处加 `note_fallback()`。
+- 测试：分段累加 ≈ 总时延、快照缺字段降级、分桶边界、滚动后读取、隐私（字符串值 ⊆ 枚举 + 键白名单）、`run_probed` 真子进程。
+
 ### T6.1.5 每轮分段耗时（看得到 + 落盘积累）  `DONE`（2026-09-27，PR #102 → `f7b358c`，v0.26.0 已发布；文中「待 jason 手测」一项无验收记录，未核实）
 - 需求：jason（经 agent24-13 转述）——本地模型卖点是隐私和快，每轮要看到毫秒级耗时并落盘，作为定位慢点的依据。
 - 做法：`src/timings.rs`（全局时钟 + 线程绑定轮次；缺段省略不填 0）；菜单栏「上一轮：说完→出声」；`--timings [--last N]`（中位数/p90/最大值，最近秩）；
