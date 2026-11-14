@@ -239,32 +239,20 @@ impl AsrEngine for SpeechSwiftEngine {
         let cfg = crate::config::get();
         let m = cfg.qwen3_model;
         let ours = crate::qwen3::is_ready(m);
-        if ours && cfg.qwen3_resident {
-            match crate::qwen3::server_transcribe(m, wav, Self::lang_flag(lang), &self.context) {
-                Ok(t) => return Ok(t),
-                // 常驻服务出问题不能让这一轮丢字：退回逐次调用，慢 1–2 s 但有结果。
-                Err(e) => log::warn!("Qwen3-ASR 常驻服务失败，这一轮退回逐次调用：{e:#}"),
-            }
+        // FU-31：我们自己的运行时一律走补丁版 speech-server（认 AGENTEAR_OFFLINE，
+        // 不联网问 Hub）；官方 `speech` CLI 不认它，在断网沙箱里每次卡约 2 分钟，
+        // 所以**不再有 CLI 退路**。失败直接返回错误，由 `Dispatch` 退回 SenseVoice。
+        // 常驻开着：用常驻服务；关着：临时拉起、转完即停（不分录音长短）。
+        if ours {
+            return if cfg.qwen3_resident {
+                crate::qwen3::server_transcribe(m, wav, Self::lang_flag(lang), &self.context)
+            } else {
+                crate::qwen3::transcribe_long_oneshot(m, wav, Self::lang_flag(lang), &self.context)
+            };
         }
-        // 一次性 CLI 的解码上限是上游 448 且改不了（见 `qwen3::ONESHOT_LONG_WAV_SECS`）：
-        // 超过约 1 分钟的录音改走临时拉起的补丁版 speech-server（上限 6144）。
-        // 失败退回下面的 CLI——被截断也比整轮丢掉强。
-        if ours && !cfg.qwen3_resident && crate::qwen3::oneshot_needs_server(crate::qwen3::wav_secs(wav)) {
-            match crate::qwen3::transcribe_long_oneshot(m, wav, Self::lang_flag(lang), &self.context) {
-                Ok(t) => return Ok(t),
-                Err(e) => log::warn!("长录音一次性转写（临时服务）失败，退回 CLI（可能被截断到 448 token）：{e:#}"),
-            }
-        }
-        let bin = if ours {
-            crate::qwen3::speech_bin().context("数据目录未初始化")?
-        } else {
-            self.legacy_bin.clone()
-        };
-        let mut cmd = if ours {
-            crate::qwen3::speech_command(&bin)
-        } else {
-            Command::new(&bin)
-        };
+        // 下面只剩「没有我们自己的运行时、PATH 上 brew 装的 speech」这条老路径。
+        let bin = self.legacy_bin.clone();
+        let mut cmd = Command::new(&bin);
         // 模型档位来自配置：默认 0.6B（小内存）。T3.5.1 实测 1.7B 在英文 /
         // 中英混说上更准（`docs/benchmarks-asr-zh-en.md`），要用户自己选。
         cmd.arg("transcribe")
@@ -433,6 +421,12 @@ pub struct Dispatch {
     speech: SpeechSwiftEngine,
 }
 
+/// Qwen3 失败后要不要退回 SenseVoice：只在选了 speech_swift 且没被 `--asr-backend` 锁死时。
+/// 锁死是排障用，要看到真实错误，不静默换引擎。纯函数，便于钉住。
+fn should_fall_back_to_builtin(selected: AsrBackend, pinned: bool) -> bool {
+    selected == AsrBackend::SpeechSwift && !pinned
+}
+
 impl Dispatch {
     fn selected(&self) -> AsrBackend {
         self.pinned.unwrap_or_else(|| crate::config::get().asr_backend)
@@ -466,7 +460,17 @@ impl AsrEngine for Dispatch {
     }
 
     fn transcribe(&self, wav: &Path, lang: AsrLang) -> Result<Transcript> {
-        self.current()?.transcribe(wav, lang)
+        let r = self.current()?.transcribe(wav, lang);
+        // FU-31：Qwen3 失败（模型文件缺失 / 服务起不来 / 超时）时退回 SenseVoice，这一轮不丢字。
+        if let (Err(e), Ok(b)) = (&r, &self.builtin) {
+            if should_fall_back_to_builtin(self.selected(), self.pinned.is_some()) {
+                log::warn!("Qwen3-ASR 转写失败，这一轮退回 SenseVoice：{e:#}");
+                return b
+                    .transcribe(wav, lang)
+                    .with_context(|| format!("Qwen3-ASR 失败（{e:#}），退回 SenseVoice 也失败"));
+            }
+        }
+        r
     }
 }
 
@@ -486,6 +490,13 @@ pub fn build_dynamic(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn qwen3_failure_falls_back_to_sensevoice_unless_pinned() {
+        assert!(should_fall_back_to_builtin(AsrBackend::SpeechSwift, false));
+        assert!(!should_fall_back_to_builtin(AsrBackend::SpeechSwift, true), "锁死 = 排障，不换引擎");
+        assert!(!should_fall_back_to_builtin(AsrBackend::Builtin, false), "本来就是 SenseVoice");
+    }
+
     use super::*;
 
     /// 验收判据之一：**未知后端名要给出可操作的错误**，

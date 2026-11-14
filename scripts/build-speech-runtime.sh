@@ -36,9 +36,10 @@ OFFICIAL_BYTES=99089736
 # 我们发布的 agentear 补丁版的「修订号」。换补丁内容（不换上游版本）时只加这个数字；
 # 换上游版本（SPEECH_VERSION）时连 UPSTREAM_TAG 一起改。
 # .2：Qwen3 解码上限 448→6144，盖住设置里最长的 15 分钟。
-# src/qwen3.rs 的 SPEECH_VERSION 仍指向已发布的 .1。这个 tarball 发出去之前不要改它，
+# .3：AGENTEAR_OFFLINE=1 时加载模型不再先联网问 Hub（FU-31）。
+# src/qwen3.rs 的 SPEECH_VERSION 要等对应 tarball 发布之后才改。这个 tarball 发出去之前不要改它，
 # 否则安装器会去下还不存在的 asset，然后退回 SenseVoice。
-AGENTEAR_REV="2"
+AGENTEAR_REV="${AGENTEAR_REV:-3}"
 OUT_NAME="speech-macos-arm64-${UPSTREAM_TAG}-agentear.${AGENTEAR_REV}.tar.gz"
 
 die() { echo "!! $*" >&2; exit 1; }
@@ -161,7 +162,7 @@ cat > "$PATCH_NOTE" <<EOF
 AgentEar 仓库里的 \`patches/speech-swift-v0.0.28-agentear.patch\`
 （https://github.com/iDoris-ai/AgentEar/blob/main/patches/speech-swift-v0.0.28-agentear.patch）。
 
-补丁做了两件事：
+补丁做了三件事：
 
 1. 缓存。原版 Qwen3-ASR 转写路径每次请求后不释放 MLX 的 Metal 缓冲区，
    常驻服务长时间跑会涨到几十 GB。补丁加一个默认不生效的环境变量
@@ -171,6 +172,10 @@ AgentEar 仓库里的 \`patches/speech-swift-v0.0.28-agentear.patch\`
    448 大约两分钟就写满，HTTP 仍是 200，后半段被丢掉。
    6144 盖住设置里最长的 15 分钟。短句遇到 EOS 会提前停。
    这一项不看环境变量，编进二进制里。
+3. 离线加载。上游加载模型时总是先联网问 HuggingFace Hub 再看本地缓存，
+   在禁出站网络的沙箱里要卡约 2 分钟。补丁加环境变量 \`AGENTEAR_OFFLINE=1\`：
+   本地缓存完整就直接加载、不发任何请求；不完整立刻报错，不重试。
+   不设它时与官方版一致。AgentEar 起 speech-server 时才会设它。
 
 上游许可证（Apache License 2.0）全文与各静态链接依赖（mlx-swift 等，MIT 或
 Apache-2.0）的许可/声明文件已随本包放在 \`LICENSES/\` 目录下

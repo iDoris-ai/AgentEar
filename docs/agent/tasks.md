@@ -1428,3 +1428,9 @@
 - 做了：`config.input_translate`（off/en/zh/th，缺键 = off）；菜单「输入法输出」子菜单 + 菜单栏 `→EN` 标记；语音指令（开启/关闭翻译、翻译成X、「翻译成X：……」一次性）；`src/translate.rs`（专用提示词、15 s 超时、任何失败退回原文）；仅拉 LLM 边车的 `talk::ensure_llm_async`；CLI `--translate <文字> --to en|zh|th`；译文另存 `derived/translations/`。
 - **未验收**：没有真实按键 / 真机菜单点击；泰语目标质量没有可测办法（模型卡只声明中英）；译文落盘目录只被写、没有任何读取方。
 - 已知局限：翻译在 worker 线程里同步做，最长 15 s 内读不到下一次按键；默认指令表只对没有 `commands.json` 的新用户生效，老用户要手工加。
+
+### T3.5.11 Qwen3 加载不再联网问 Hub（FU-31）  `DONE`（本 PR；发版待定）
+- **现象**：jason 机器上 Qwen3-ASR 转写约 118 s 才报 `failedToDownload ... Operation not permitted`（逐次 CLI 与常驻服务都一样）。
+- **根因**：上游 `HuggingFaceDownloader.downloadWeights` 先问 Hub 再看缓存；沙箱（SANDBOX_PROFILE 禁出站 TCP）下系统给 POSIX EPERM，上游只把几种 `URLError` 当离线，于是重试约 2 分钟。
+- **做法**：补丁（`patches/speech-swift-v0.0.28-agentear.patch` 第 3 项）在 `downloadWeights` / `downloadFiles` / `downloadFilesByteWeighted` 三个入口加 `AGENTEAR_OFFLINE=1`；运行时 `.3`；`speech_command` 无条件设变量；`SpeechSwiftEngine` 对自己的运行时不再走官方 CLI（去掉 `ONESHOT_LONG_WAV_SECS` 门槛），`Dispatch` 在 Qwen3 失败时退回 SenseVoice（`--asr-backend` 锁死时不退）；安装冒烟改走补丁版服务。
+- **验证与未验证项**：见 PR 正文。
