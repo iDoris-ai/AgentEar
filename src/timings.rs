@@ -332,7 +332,7 @@ fn seal(c: Clock, outcome: &'static str, end: Instant) -> Timings {
 }
 
 /// 追加一行；超过 [`ROTATE_BYTES`] 先滚动。
-pub fn append(path: &std::path::Path, rec: &Record) -> std::io::Result<()> {
+pub fn append<T: Serialize>(path: &std::path::Path, rec: &T) -> std::io::Result<()> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
@@ -344,6 +344,16 @@ pub fn append(path: &std::path::Path, rec: &Record) -> std::io::Result<()> {
     line.push('\n');
     let mut f = std::fs::OpenOptions::new().create(true).append(true).open(path)?;
     f.write_all(line.as_bytes())
+}
+
+/// 追加一条别的类型的记录（输入法模式的 `"kind":"input"`）到同一个文件。
+/// 没调过 [`init`]（单测 / 某些 CLI）就不写；写失败只 warn，不影响这一轮。
+pub fn append_default<T: Serialize>(rec: &T) {
+    if let Some(path) = FILE.get() {
+        if let Err(e) = append(path, rec) {
+            log::warn!("分段耗时没写进 {}：{e}（不影响这一轮）", path.display());
+        }
+    }
 }
 
 fn secs(ms: Option<u64>) -> String {
@@ -388,6 +398,15 @@ pub fn last() -> Option<Timings> {
 
 /// 读回落盘记录（只读当前文件；坏行跳过）。
 pub fn read_records(path: &std::path::Path) -> Vec<serde_json::Value> {
+    // 先读滚动出去的旧文件（`timings.1.jsonl`），再读当前的：滚动之后统计不该一下子清零。
+    let mut out: Vec<serde_json::Value> = Vec::new();
+    for p in [path.with_extension("1.jsonl"), path.to_path_buf()] {
+        out.extend(read_one(&p));
+    }
+    out
+}
+
+fn read_one(path: &std::path::Path) -> Vec<serde_json::Value> {
     std::fs::read_to_string(path)
         .unwrap_or_default()
         .lines()
@@ -419,6 +438,9 @@ pub const REPORT_FIELDS: &[&str] = &[
 /// `--timings` 的报表：按（llm_via, model）分组，每段报中位数 / p90 / 最大值与样本数。
 /// 只报这三个数——仓库规矩：**不报一个好看的区间**。
 pub fn report(records: &[serde_json::Value], last_n: Option<usize>) -> String {
+    // 输入法模式的 `"kind":"input"` 行有自己的一节（`input_timings::report`），这里跳过。
+    let records: Vec<serde_json::Value> =
+        records.iter().filter(|r| r["kind"] != crate::input_timings::KIND).cloned().collect();
     let rs: Vec<&serde_json::Value> = match last_n {
         Some(n) if n < records.len() => records[records.len() - n..].iter().collect(),
         _ => records.iter().collect(),

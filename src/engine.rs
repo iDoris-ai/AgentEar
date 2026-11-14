@@ -243,7 +243,10 @@ impl AsrEngine for SpeechSwiftEngine {
             match crate::qwen3::server_transcribe(m, wav, Self::lang_flag(lang), &self.context) {
                 Ok(t) => return Ok(t),
                 // 常驻服务出问题不能让这一轮丢字：退回逐次调用，慢 1–2 s 但有结果。
-                Err(e) => log::warn!("Qwen3-ASR 常驻服务失败，这一轮退回逐次调用：{e:#}"),
+                Err(e) => {
+                    crate::input_timings::note_fallback();
+                    log::warn!("Qwen3-ASR 常驻服务失败，这一轮退回逐次调用：{e:#}")
+                }
             }
         }
         // 一次性 CLI 的解码上限是上游 448 且改不了（见 `qwen3::ONESHOT_LONG_WAV_SECS`）：
@@ -252,7 +255,10 @@ impl AsrEngine for SpeechSwiftEngine {
         if ours && !cfg.qwen3_resident && crate::qwen3::oneshot_needs_server(crate::qwen3::wav_secs(wav)) {
             match crate::qwen3::transcribe_long_oneshot(m, wav, Self::lang_flag(lang), &self.context) {
                 Ok(t) => return Ok(t),
-                Err(e) => log::warn!("长录音一次性转写（临时服务）失败，退回 CLI（可能被截断到 448 token）：{e:#}"),
+                Err(e) => {
+                    crate::input_timings::note_fallback();
+                    log::warn!("长录音一次性转写（临时服务）失败，退回 CLI（可能被截断到 448 token）：{e:#}")
+                }
             }
         }
         let bin = if ours {

@@ -575,6 +575,16 @@ ADR-0003 的**组织档适配器（memos）还没做**，等真有企业需求�
 clippy **刻意不加 `-D warnings`**（既有 13 条警告，加了会让 CI 长期红，
 而长期红的 CI 等于没有 CI）。CI **不需要 `vendor/`**（实测移走后 203 全绿）。
 
+### 输入法模式的分段耗时与系统快照（FU-31，jason 2026-11-14「转写时快时慢」）
+
+- **起因**：同一段 20 秒录音同一个二进制，重跑 7.7 / 6.3 / 27 s，SenseVoice 正常约 1 s；怀疑是机器负载/内存（load 113 / 10 核、swap 几乎满）而不是 AgentEar，但日志里没有分段数据，**没法证明**。
+- **每一轮输入法模式**往 `derived/timings.jsonl` 追加一行 `"kind":"input"`（对话模式的老记录不动；`--timings` 的对话那一节忽略 input 行），并打一行 INFO：`⏱ 输入轮 总 … = 提交 + ASR（拉起 / 解码）+ 纠错 + 标签 + 落库 + 上屏 | 其他 … 索引(上屏后) … | 录音 … | load x/N核 swap a/bG 压力 p`。各环节在 DEBUG 级别另有开始/结束打点（`RUST_LOG=debug`）。代码 `src/input_timings.rs`，段的口径写在该文件顶部——**看数字前先读那段**。
+- **看法**：`agentear --timings` 末尾「输入法模式」一节：各段 n / 中位数 / p90 / 最大值；「慢轮归因」把总时延 > 2×中位数的轮列出来，标最大段与占比，并按 load/核数（≤1 / 1–2 / >2）、swap 使用率（<50% / 50–90% / >90%）分桶给总时延中位数。**n < 10 的组一律写「样本不足，不下结论」。** 要回答「慢是不是机器忙」：看 ASR 合计的慢轮是否集中在高 load / 高 swap 桶，并看「拉起→首字节」（模型加载 + 换页）还是「解码」在涨。
+- **系统快照**（轮次开始、结束各一份）：`getloadavg` / `hw.logicalcpu` / `vm.swapusage` / `kern.memorystatus_vm_pressure_level` / `proc_pidinfo` 的 RSS——**不起子进程**（`top`/`vm_stat` 在高负载下本身就慢）；拿不到的字段省略。ASR 子进程的 RSS 是 50 ms 采样的峰值，只有内置引擎有。
+- ⚠️ **`asr_spawn_to_first_byte` 只有内置引擎（SenseVoice / whisper 泰语）测得到**：从 `spawn()` 到子进程第一次写出任何字节（stdout/stderr）。Qwen3（常驻 / 逐次 CLI）路径只有 `asr_total`，未改它们的逻辑，只在「退回」处记 `backend_fallback`（outcome 为 `fallback`）。
+- **隐私**：只存数字与封闭枚举（`kind`/`backend`/`outcome`），有测试断言记录里没有枚举之外的字符串值。写盘失败只 warn。文件 10 MB 滚动成 `timings.1.jsonl`（约 3 万轮），`--timings` 读两个文件。
+- ⚠️ **没在真实热键 / 真实录音下跑过**：单测 + 真 SenseVoice 子进程的探针测试 + 手造数据验过 `--timings` 格式；真实录音的数据要 jason 用起来之后才有。老的对话计时仍会给输入法轮另写一条 `mode:"input_method"` 的旧格式行（只有 ASR 与总时长），`--timings` 的对话那节里会看到，别和新的 input 行混为一谈。
+
 **构建与测试**：
 
 ```bash
