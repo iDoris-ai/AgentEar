@@ -46,3 +46,4 @@
 - [ ] FU-33 · B · src=PR#145 评审 Medium · 2026-11-15 · 安装冒烟与实时听写抢同一个全局 `SERVER` 槽（`qwen3.rs` `ensure_server_locked`）：用户在 0.6B 上听写、同时安装 1.7B 时，冒烟会杀掉不同模型的在跑服务（不看 `inflight`），那句话退到 SenseVoice；反过来听写也会杀掉冒烟的服务。修法候选：冒烟用独立的临时服务（不进全局槽），或杀之前看 inflight
 - [ ] FU-34 · C · src=PR#145 评审 Low–Medium · 2026-11-15 · 冒烟判「是不是我拉起的」用 `server_pid().is_none()`：槽里本有别的模型的服务时，冒烟替换它之后 `spawned_by_us=false`，新起的服务留到 600 s 空闲回收。修法：按 pid 记归属
 - [ ] FU-35 · C · src=PR#145 评审 Low · 2026-11-15 · `Dispatch::transcribe` 失败后再调一次 `self.selected()`：用户在这一句转写中途切到 SenseVoice 时，托盘杀服务、请求失败，第二次读到的已是 Builtin，兜底被抑制，这一句丢掉。修法：请求前读一次快照
+- [ ] FU-36 · C · src=PR#145 评审残留 · 2026-11-15 · ① 注释里还写「退回 CLI」；② 契约探针仍在查 `speech transcribe --help`，现在没人用；③ `--asr-bench` 的 `*-cli` 标签在未锁定后端时，Qwen3 失败会静默量到 SenseVoice 的数字；④ 缺一条驱动 `Dispatch` 兜底的行为测试；⑤ 兜底只写 `log::warn`：已装用户的 .3 运行时不跑冒烟，.3 加载不了时会一直静默用 SenseVoice（应有可见提示）；泰语兜底实际走 whisper，日志文案不准
