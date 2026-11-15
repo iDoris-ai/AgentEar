@@ -64,6 +64,13 @@ M1 完成；**知识库投递 + 全文检索默认开（v0.4.2）**；M2 理解�
   （`qwen3::read/write/clear_recovering_marker` + `qwen3::recovery_decision`
   这个纯函数判断要不要重试/要不要真的发起下载）。一次性 CLI 子命令遇到这种
   空档只记标记、不发起下载（`RecoveryAction::Note`），交给下一次守护进程启动。
+- ⚠️ **上游加载库每次先联网问 Hub，沙箱下 EPERM 不被当成离线，会卡约 2 分钟（FU-31，v0.29.2 修）**：
+  speech-swift 的 `HuggingFaceDownloader.downloadWeights` 无条件先 `fetchManifest`，之后才看本地缓存；
+  沙箱禁了出站 TCP，系统返回 POSIX `Operation not permitted`，上游只认几种 `URLError`，于是重试 5 次后抛
+  `failedToDownload`（实测约 118 s）。运行时 `speech-runtime-v0.0.28-agentear.3` 的补丁让它认 `AGENTEAR_OFFLINE=1`
+  （`speech_command` 无条件设）：缓存完整就不发请求，不完整立刻报错。**官方 `speech` CLI 不认这个变量**，所以一次性转写
+  一律走临时拉起的补丁版 speech-server（不再分长短、没有 CLI 退路），失败退回 SenseVoice（`Dispatch`，日志写原因）。
+  模型是我们按 pin 死的 commit 装的，不该有「检查更新」；**不要再把 CLI 加回 Qwen3 的转写路径**。
 - GGUF 路线（llama.cpp）另开 **T3.5.7** 评准确率，没做。
 
 **M3 实时对话（ADR-0007）：V1 的通话链路已随 v0.6.0 发布；v0.7.0 给了它产品入口。**

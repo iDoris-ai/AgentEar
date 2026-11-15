@@ -6,8 +6,8 @@
 #
 # ## 改了什么、为什么
 #
-# 两件事，都在 Sources/AudioServer/AudioServer.swift 的 `dispatchTranscribe`
-# `qwen3-asr` 分支。
+# 三件事。前两件在 Sources/AudioServer/AudioServer.swift 的 `dispatchTranscribe`
+# `qwen3-asr` 分支，第三件在 Sources/AudioCommon/HuggingFaceDownloader.swift。
 #
 # 1. Metal 缓存（T3.5.9，docs/data/qwen3-memory-2026-10/README.md）。
 #    这条路径每次请求后不释放 MLX 用过的 Metal 缓冲区。0.6B 档又没有上游给
@@ -25,6 +25,17 @@
 #    用的是 4096，按他们的语速余量大约两成，所以这里留得更宽。
 #    短句遇到 EOS 会提前停。三条返回都传同一份 options。
 #    这一项不看环境变量。
+#
+# 3. 离线加载（FU-31）。上游每次加载模型都先去 HuggingFace Hub 取清单，之后才看
+#    本地缓存够不够；只有 URLError 的几种码才会退回缓存。AgentEar 把 speech 进程
+#    放在禁出站 TCP 的 sandbox-exec 里，连接被拒时系统给的是 POSIX
+#    `Operation not permitted`，上游不认它是离线，重试 5 次约 2 分钟后抛
+#    failedToDownload。模型是 AgentEar 按钉死的 commit + 逐文件 sha 装好的，
+#    本来就不该有「检查更新」。补丁加环境变量 `AGENTEAR_OFFLINE=1`：
+#    `downloadWeights` / `downloadFiles` / `downloadFilesByteWeighted` 三个入口
+#    先看本地缓存，够用就直接返回、不发任何网络请求；不够就立刻抛错
+#    （文案含 `AGENTEAR_OFFLINE: model files missing`），不重试、不 sleep。
+#    不设该变量时与上游一致。
 #
 # Package.swift 的那一行只是把 `MLX` 产品加进 AudioServer target 的依赖。
 #
@@ -57,8 +68,78 @@ index c16593e..7fa17dd 100644
                  .product(name: "Hummingbird", package: "hummingbird"),
                  .product(name: "HummingbirdWebSocket", package: "hummingbird-websocket"),
                  // Pulled in via hummingbird-websocket but we keep the explicit
+diff --git a/Sources/AudioCommon/HuggingFaceDownloader.swift b/Sources/AudioCommon/HuggingFaceDownloader.swift
+index cdec578..2df416d 100644
+--- a/Sources/AudioCommon/HuggingFaceDownloader.swift
++++ b/Sources/AudioCommon/HuggingFaceDownloader.swift
+@@ -126,6 +126,23 @@ public enum HuggingFaceDownloader {
+         return true
+     }
+ 
++    // ---- Modified by AgentEar (https://github.com/iDoris-ai/AgentEar) ----
++    // AGENTEAR_OFFLINE=1: models are installed by the host app at a pinned
++    // revision, so a "check the Hub for updates" round-trip is never wanted.
++    // Upstream always asks the Hub first and only falls back to the cache on a
++    // URLError; under a network-denying sandbox the OS reports POSIX EPERM,
++    // which is not treated as "offline", so every load retried for ~2 minutes.
++    // With the variable set: cache complete -> return with zero requests;
++    // cache incomplete -> throw at once (no retry, no sleep).
++    static var agentearOffline: Bool {
++        ProcessInfo.processInfo.environment["AGENTEAR_OFFLINE"] == "1"
++    }
++
++    static func agentearOfflineMiss(_ modelId: String, _ what: String) -> DownloadError {
++        .failedToDownload("AGENTEAR_OFFLINE: model files missing for \(modelId): \(what)")
++    }
++    // ---- end AgentEar modification ----
++
+     // MARK: - Download
+ 
+     /// Download model files from HuggingFace, discovering weights by glob.
+@@ -167,6 +184,16 @@ public enum HuggingFaceDownloader {
+             return patterns
+         }()
+ 
++        // ---- Modified by AgentEar: see agentearOffline ----
++        if agentearOffline {
++            guard cachedBundleSatisfies(globs: globs, in: directory) else {
++                throw agentearOfflineMiss(modelId, "incomplete cache in \(directory.path)")
++            }
++            progressHandler?(1.0)
++            return
++        }
++        // ---- end AgentEar modification ----
++
+         do {
+             try await performDownload(
+                 modelId: modelId,
+@@ -245,8 +272,9 @@ public enum HuggingFaceDownloader {
+ 
+         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+ 
+-        if offlineMode {
++        if offlineMode || agentearOffline {
+             if let missing = firstUnsatisfiedPattern(files, in: directory) {
++                if agentearOffline { throw agentearOfflineMiss(modelId, missing) }
+                 throw DownloadError.failedToDownload(
+                     "\(modelId) offline cache miss: nothing matching \(missing) in \(directory.path)")
+             }
+@@ -333,11 +361,12 @@ public enum HuggingFaceDownloader {
+         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+         let safeFiles = try files.map(validatedRelativePath)
+ 
+-        if offlineMode {
++        if offlineMode || agentearOffline {
+             let missing = safeFiles.first {
+                 !FileManager.default.fileExists(atPath: directory.appendingPathComponent($0).path)
+             }
+             if let missing {
++                if agentearOffline { throw agentearOfflineMiss(modelId, missing) }
+                 throw DownloadError.failedToDownload(
+                     "\(modelId) offline cache miss: \(missing) is not present in \(directory.path)")
+             }
 diff --git a/Sources/AudioServer/AudioServer.swift b/Sources/AudioServer/AudioServer.swift
-index c841518..94e7277 100644
+index c841518..f196963 100644
 --- a/Sources/AudioServer/AudioServer.swift
 +++ b/Sources/AudioServer/AudioServer.swift
 @@ -4,6 +4,7 @@ import HummingbirdCore
@@ -69,7 +150,7 @@ index c841518..94e7277 100644
  import Qwen3TTS
  import Qwen3TTSCoreML
  import CosyVoiceTTS
-@@ -1686,6 +1687,29 @@ func dispatchTranscribe(
+@@ -1686,7 +1687,30 @@ func dispatchTranscribe(
          return (try? model.transcribeAudio(audio16k, sampleRate: 16000, language: language)) ?? ""
      case "qwen3-asr":
          let model = try await state.loadQwen3ASR(modelId: variant.modelId)
@@ -100,3 +181,4 @@ index c841518..94e7277 100644
 +            audio: audio16k, sampleRate: 16000, options: asrOptions)
      default:
          throw RealtimeDispatchError.engineNotEnabled(kind: "ASR", engine: variant.engine)
+     }
