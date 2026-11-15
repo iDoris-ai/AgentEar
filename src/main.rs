@@ -37,6 +37,7 @@ mod sidecar;
 mod store;
 mod talk;
 mod terms;
+mod input_timings;
 mod timings;
 mod translate;
 mod tray;
@@ -763,6 +764,7 @@ fn main() -> Result<()> {
             println!("还没有分段耗时记录（{}）——跑一轮对话或输入法之后再看", path.display());
         } else {
             print!("{}", timings::report(&recs, last_n));
+            print!("{}", input_timings::report(&recs, last_n));
             println!("
 来源：{}", path.display());
         }
@@ -1588,6 +1590,11 @@ fn finish(state: State, store: &store::Store, asr: &dyn engine::AsrEngine) -> Re
         "input_method"
     };
     let turn_id = timings::begin_at(t_release, turn_mode, Some((secs * 1000.0) as u64), asr.name());
+    // 输入法模式的分段耗时 + 系统快照（`src/input_timings.rs`）。只在输入法模式记；
+    // 采样不起子进程、拿不到的字段省略，绝不影响这一轮。
+    let mut itr = (turn_mode == "input_method").then(|| {
+        input_timings::InputRecord::new(asr.name(), Some((secs * 1000.0) as u64), input_timings::capture())
+    });
     tray::set(tray::Status::Transcribing);
 
     // raw 先落盘并走完提交协议，再谈转写。
@@ -1600,10 +1607,27 @@ fn finish(state: State, store: &store::Store, asr: &dyn engine::AsrEngine) -> Re
         committed.path.display()
     );
     println!("✓ 已保存 {secs:.1}s 录音");
+    if let Some(r) = itr.as_mut() {
+        r.key_to_commit_ms = Some(input_timings::ms(t_release.elapsed()));
+    }
 
+    log::debug!("ASR 开始（距松键 {:.0}ms）", t_release.elapsed().as_secs_f32() * 1000.0);
+    input_timings::begin_asr();
     let t_asr = Instant::now();
     let transcribed = asr.transcribe(&committed.path, asr_lang);
     timings::mark(timings::Stage::AsrDone);
+    let asr_elapsed = t_asr.elapsed();
+    let asr_probe = input_timings::take_probe();
+    let asr_fallback = input_timings::take_fallback();
+    log::debug!(
+        "ASR 结束 {:.0}ms（拉起→首字节 {:?}ms，spawn {:?}ms，后端退回 {asr_fallback}）",
+        asr_elapsed.as_secs_f32() * 1000.0,
+        asr_probe.and_then(|p| p.first_byte_ms),
+        asr_probe.map(|p| p.spawn_ms),
+    );
+    if let Some(r) = itr.as_mut() {
+        r.set_asr(asr_elapsed, asr_probe, asr_fallback);
+    }
     match transcribed {
         Ok(t) if !t.text.is_empty() => {
             log::debug!(
@@ -1617,6 +1641,10 @@ fn finish(state: State, store: &store::Store, asr: &dyn engine::AsrEngine) -> Re
             // 边车没起、超时、返回垃圾，一律退回原文继续上屏——
             // 用户宁可拿到一句有错别字的话，也不想按完键什么都没有。
             let cfg = config::get();
+            let t_correct = Instant::now();
+            if cfg.correct_terms {
+                log::debug!("纠错 开始");
+            }
             let (text, corrected) = if cfg.correct_terms {
                 let t_fix = Instant::now();
                 let url = cfg.llm_url.as_deref().unwrap_or(correct::DEFAULT_URL);
@@ -1637,9 +1665,17 @@ fn finish(state: State, store: &store::Store, asr: &dyn engine::AsrEngine) -> Re
                 (raw_text.clone(), false)
             };
 
+            if cfg.correct_terms {
+                log::debug!("纠错 结束 {:.0}ms", t_correct.elapsed().as_secs_f32() * 1000.0);
+                if let Some(r) = itr.as_mut() {
+                    r.correct_ms = Some(input_timings::ms(t_correct.elapsed()));
+                }
+            }
+
             println!("\n{text}\n");
             // 派生数据落盘。失败只记日志——raw 还在，随时可以重算，
             // 不值得为它中断上屏
+            let t_store = Instant::now();
             match store.write_transcript(&committed.content_hash, &text) {
                 Ok(p) => log::debug!("转写已存 {}", p.display()),
                 Err(e) => log::error!("写转写文件失败（不影响剪贴板与上屏）: {e:#}"),
@@ -1663,6 +1699,9 @@ fn finish(state: State, store: &store::Store, asr: &dyn engine::AsrEngine) -> Re
             //
             // 和纠错一样：这一层的任何失败都不能挡住上屏，所以它在
             // 剪贴板与上屏**之前**做完，失败只记日志。
+            let routes_a = t_store.elapsed();
+            log::debug!("标签 开始");
+            let t_label = Instant::now();
             let classified = if cfg.correct_terms {
                 // 复用纠错的开关：两者都要边车，分开设两个开关只会让
                 // 「为什么没生效」多一种可能。边车没起时 classify 自己会落 unknown。
@@ -1675,6 +1714,11 @@ fn finish(state: State, store: &store::Store, asr: &dyn engine::AsrEngine) -> Re
                 // 没明说的落 unknown，记录本身仍然要写。
                 label::explicit_only(&text)
             };
+            log::debug!("标签 结束 {:.0}ms", t_label.elapsed().as_secs_f32() * 1000.0);
+            if let Some(r) = itr.as_mut() {
+                r.label_ms = Some(input_timings::ms(t_label.elapsed()));
+            }
+            let t_routes_b = Instant::now();
             let route = route::Route::new(
                 &committed.content_hash,
                 classified.label,
@@ -1720,11 +1764,23 @@ fn finish(state: State, store: &store::Store, asr: &dyn engine::AsrEngine) -> Re
                     log::error!("加入投递队列失败，这条不会自动重试（可跑 --replay-kb 补投）: {e:#}");
                 }
             }
+            if let Some(r) = itr.as_mut() {
+                r.routes_kb_ms = Some(input_timings::ms(routes_a + t_routes_b.elapsed()));
+            }
             // —— 翻译输入（输入法模式的输出属性）——
             //
             // 只改「上屏的是哪段文字」：转写文件 / routes / kb / 指令表看到的永远是原文。
             // **任何失败都退回原文**（`translate::text_to_deliver` 保证），日志写原因。
+            let t_translate = Instant::now();
             let delivered = deliver_text(store, &cfg, &committed.content_hash, &text);
+            if let Some(r) = itr.as_mut() {
+                // 没开翻译时 `deliver_text` 只是复制字符串，不记（省略比记一个 0 诚实）。
+                if cfg.input_translate != config::InputTranslate::Off {
+                    r.translate_ms = Some(input_timings::ms(t_translate.elapsed()));
+                }
+            }
+            log::debug!("上屏 开始（距松键 {:.0}ms）", t_release.elapsed().as_secs_f32() * 1000.0);
+            let t_deliver = Instant::now();
             // 先进剪贴板再谈上屏。上屏失败还能手动 ⌘V，顺序反过来就没有退路了。
             match copy_to_clipboard(&delivered.text) {
                 Ok(()) => {
@@ -1746,8 +1802,14 @@ fn finish(state: State, store: &store::Store, asr: &dyn engine::AsrEngine) -> Re
                 }
                 Err(e) => log::error!("写剪贴板失败: {e:#}"),
             }
+            log::debug!("上屏 结束 {:.0}ms", t_deliver.elapsed().as_secs_f32() * 1000.0);
+            if let Some(r) = itr.as_mut() {
+                r.deliver_ms = Some(input_timings::ms(t_deliver.elapsed()));
+                r.set_delivered(t_release.elapsed());
+            }
 
             // 用户已经拿到文字了，这一步慢一点、失败了都不影响他。
+            let t_index = Instant::now();
             if let Some(sink) = sink {
                 // 索引每次现开：SQLite 连接开销是微秒级，而把一个
                 // `Connection`（非 Sync）一路穿过状态机会让线程模型变复杂。
@@ -1756,6 +1818,10 @@ fn finish(state: State, store: &store::Store, asr: &dyn engine::AsrEngine) -> Re
                     .map_err(|e| log::error!("索引打不开（可用 --reindex 重建）: {e:#}"))
                     .ok();
                 deliver::attempt(store, &sink, &route, ix.as_ref());
+            }
+            if let Some(mut r) = itr.take() {
+                r.index_ms = Some(input_timings::ms(t_index.elapsed()));
+                r.finish("ok");
             }
 
             // —— 语音指令表（本地快路径）——
@@ -1844,11 +1910,17 @@ fn finish(state: State, store: &store::Store, asr: &dyn engine::AsrEngine) -> Re
             }
         }
         Ok(_) => {
+            if let Some(r) = itr.take() {
+                r.finish("empty");
+            }
             timings::finish("empty");
             log::warn!("转写结果为空（这段音频可能没有语音）")
         }
         // raw 已经安全落盘，转写失败只是丢了一次派生结果，可以重跑
         Err(e) => {
+            if let Some(r) = itr.take() {
+                r.finish("failed");
+            }
             timings::finish("asr_failed");
             log::error!("转写失败（raw 音频已保留，可重试）: {e:#}")
         }

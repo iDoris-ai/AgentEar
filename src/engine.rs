@@ -464,6 +464,7 @@ impl AsrEngine for Dispatch {
         // FU-31：Qwen3 失败（模型文件缺失 / 服务起不来 / 超时）时退回 SenseVoice，这一轮不丢字。
         if let (Err(e), Ok(b)) = (&r, &self.builtin) {
             if should_fall_back_to_builtin(self.selected(), self.pinned.is_some()) {
+                crate::input_timings::note_fallback();
                 log::warn!("Qwen3-ASR 转写失败，这一轮退回 SenseVoice：{e:#}");
                 return b
                     .transcribe(wav, lang)

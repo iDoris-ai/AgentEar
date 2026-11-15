@@ -180,17 +180,18 @@ impl Asr {
 
     fn transcribe_sensevoice(&self, wav: &Path) -> Result<Transcript> {
         let (model, vad) = self.resolve_sensevoice_pair()?;
-        let out = Command::new(&self.bin)
-            .arg("-m")
-            .arg(&model)
-            .arg("--vad")
-            .arg(&vad)
-            .arg("-a")
-            .arg(wav)
-            // 必须保留标记：`<|zh|>` / `<|en|>` 是区分「转写结果」与「日志」的唯一
-            // 可靠判据。曾经按「有没有汉字」来判，把英文/日文/泰文结果全当日志丢了。
-            .arg("--keep-tags")
-            .output()
+        let out = crate::input_timings::run_probed(
+            Command::new(&self.bin)
+                .arg("-m")
+                .arg(&model)
+                .arg("--vad")
+                .arg(&vad)
+                .arg("-a")
+                .arg(wav)
+                // 必须保留标记：`<|zh|>` / `<|en|>` 是区分「转写结果」与「日志」的唯一
+                // 可靠判据。曾经按「有没有汉字」来判，把英文/日文/泰文结果全当日志丢了。
+                .arg("--keep-tags"),
+        )
             .with_context(|| format!("启动 {} 失败", self.bin.display()))?;
 
         if !out.status.success() {
@@ -258,8 +259,7 @@ impl Asr {
         if !thai_prompt.is_empty() {
             cmd.arg("--prompt").arg(&thai_prompt);
         }
-        let out = cmd
-            .output()
+        let out = crate::input_timings::run_probed(&mut cmd)
             .with_context(|| format!("启动 {} 失败", self.whisper.display()))?;
 
         if !out.status.success() {
