@@ -17,8 +17,8 @@
 //!    release 上（`speech-runtime-<版本>` 这个 tag），`RUNTIME_URL` 指向那里，
 //!    不再指向 `soniqo/speech-swift` 的 release。
 //!    同一份补丁还把 Qwen3 的 `maxTokens` 从 448 改成 6144，盖住设置里最长的
-//!    15 分钟。短句遇到 EOS 会提前停。[`SPEECH_VERSION`] 为 `.2`，对应的 tarball
-//!    已发布在 `speech-runtime-v0.0.28-agentear.2`。
+//!    15 分钟。短句遇到 EOS 会提前停。[`SPEECH_VERSION`] 为 `.3`（`.3` 起认 `AGENTEAR_OFFLINE`，FU-31），对应的 tarball
+//!    已发布在 `speech-runtime-v0.0.28-agentear.3`。
 //! 2. **模型权重**：0.6B / 1.7B 两档，**直接从 Hugging Face 下载**，
 //!    钉在某个 commit（`resolve/<revision>/`），逐文件 sha256 校验，
 //!    按 speech 认的布局 `$QWEN3_ASR_CACHE_DIR/qwen3-speech/models/<org>/<repo>/`
@@ -77,17 +77,17 @@ use crate::download::{self, Fail, FileLock, State};
 /// 所以改它会让所有现有安装（不管是不是真的换了上游版本）都判定为「没装」、
 /// 重新下载——升级时这正是想要的效果：旧版本号对应的运行时有那个内存泄漏，
 /// 不该被新代码当成「已经装好」。
-pub const SPEECH_VERSION: &str = "v0.0.28-agentear.2";
+pub const SPEECH_VERSION: &str = "v0.0.28-agentear.3";
 /// 上游 pinned 的基线 tag/commit（`patches/speech-swift-v0.0.28-agentear.patch`
 /// 打在这个 tag 上）。只用于日志和文档，不参与安装判据。
 pub const UPSTREAM_TAG: &str = "v0.0.28";
 /// 我们自己发布的运行时 tarball——**不是**上游 `soniqo/speech-swift` 的 release。
 /// 由 `scripts/build-speech-runtime.sh` 产出，发布在 AgentEar 自己的 GitHub
-/// release 上（tag `speech-runtime-v0.0.28-agentear.2`）。
-const RUNTIME_URL: &str = "https://github.com/iDoris-ai/AgentEar/releases/download/speech-runtime-v0.0.28-agentear.2/speech-macos-arm64-v0.0.28-agentear.2.tar.gz";
+/// release 上（tag `speech-runtime-v0.0.28-agentear.3`）。
+const RUNTIME_URL: &str = "https://github.com/iDoris-ai/AgentEar/releases/download/speech-runtime-v0.0.28-agentear.3/speech-macos-arm64-v0.0.28-agentear.3.tar.gz";
 /// 2026-11-10 实测（`scripts/build-speech-runtime.sh` 的输出，`shasum -a 256`）。
-const RUNTIME_SHA256: &str = "266e3aafdc736bffd205e2f14c4061a442e8600956bc12e8b1efb2ced8415fda";
-const RUNTIME_BYTES: u64 = 99_535_412;
+const RUNTIME_SHA256: &str = "f95a980040518ee2dc831d78892d2497045ecf7587641fe26110265ba537b1c0";
+const RUNTIME_BYTES: u64 = 99_567_593;
 /// 解包后体积（实测 `du -sk` ≈ 382.9 MB），磁盘预检用，往上取整留余量。
 const RUNTIME_UNPACKED_BYTES: u64 = 420_000_000;
 /// 常驻服务的 Metal 缓存上限（MB），传给打了补丁的 `speech-server`
@@ -809,6 +809,13 @@ pub fn speech_command(bin: &Path) -> Command {
     // （`--transcribe` 走的那条 CLI 路径）如果有一天也走到打了补丁的二进制，
     // 不该因为少设了这个变量而表现不一致。
     cmd.env("AGENTEAR_MLX_CACHE_MB", AGENTEAR_MLX_CACHE_MB.to_string());
+    // FU-31：模型是 AgentEar 按钉死的 commit + 逐文件 sha 装好的，不需要也不该有「检查更新」。
+    // 上游加载库每次先联网问 HuggingFace Hub，再看本地缓存够不够；沙箱禁了出站 TCP，
+    // 系统返回的是 POSIX `Operation not permitted`，上游不把它当离线，重试约 2 分钟才报错
+    //（jason 机器上逐次 CLI 和常驻服务各卡约 118 s）。打了补丁的 speech-server 认这个变量：
+    // 缓存完整就直接加载、一个请求都不发；不完整立刻报错（含 `AGENTEAR_OFFLINE`）。
+    // 官方 `speech` CLI 不认它，所以一次性转写也走补丁版服务，不再用 CLI。
+    cmd.env("AGENTEAR_OFFLINE", "1");
     cmd
 }
 
@@ -840,83 +847,29 @@ fn smoke_wav() -> Result<PathBuf> {
     Ok(wav)
 }
 
-/// 跑一个子进程，超时就杀。speech 在布局不对时会重试约 2 分钟才报错，
-/// 冒烟不能陪它等那么久。
-fn output_with_timeout(mut cmd: Command, limit: Duration) -> Result<std::process::Output> {
-    let mut child = cmd
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .context("启动 speech 失败")?;
-    // 输出不大（几行），但为防管道写满卡死，还是在单独线程里读
-    let mut so = child.stdout.take();
-    let mut se = child.stderr.take();
-    let t_out = std::thread::spawn(move || {
-        let mut v = Vec::new();
-        if let Some(p) = so.as_mut() {
-            use std::io::Read;
-            let _ = p.read_to_end(&mut v);
-        }
-        v
-    });
-    let t_err = std::thread::spawn(move || {
-        let mut v = Vec::new();
-        if let Some(p) = se.as_mut() {
-            use std::io::Read;
-            let _ = p.read_to_end(&mut v);
-        }
-        v
-    });
-    let start = Instant::now();
-    let status = loop {
-        if let Some(s) = child.try_wait().context("等待 speech 失败")? {
-            break s;
-        }
-        if start.elapsed() > limit {
-            let _ = child.kill();
-            let _ = child.wait();
-            bail!("speech 超过 {limit:?} 没结束，已中止");
-        }
-        std::thread::sleep(Duration::from_millis(100));
-    };
-    Ok(std::process::Output {
-        status,
-        stdout: t_out.join().unwrap_or_default(),
-        stderr: t_err.join().unwrap_or_default(),
-    })
-}
-
 /// 安装冒烟：用刚装好的运行时、在断网沙箱里转写一小段音频。
 /// **过了才写安装记录**——一个「文件都在但加载不了」的安装比没装还糟。
+///
+/// FU-31：走补丁版 speech-server（认 `AGENTEAR_OFFLINE`），不走官方 `speech` CLI——
+/// CLI 会先联网问 Hub，在断网沙箱里卡约 2 分钟（冒烟的 120 s 超时正好踩线）。
+/// 这时安装记录还没写，`is_ready` 为假，所以绕过那道检查；转完立刻停掉这次拉起的服务。
 fn smoke(m: Qwen3Model) -> Result<()> {
-    let bin = speech_bin().context("数据目录未初始化")?;
     let wav = smoke_wav()?;
-    let mut cmd = speech_command(&bin);
-    cmd.args(["transcribe", "--engine", "qwen3", "-m", m.cli_size(), "--"]).arg(&wav);
-    let out = output_with_timeout(cmd, Duration::from_secs(120))?;
-    if !out.status.success() {
-        bail!(
-            "speech 返回 {:?}: {}",
-            out.status.code(),
-            String::from_utf8_lossy(&out.stderr).trim()
-        );
-    }
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    let t = crate::engine::parse_speech_output(&stdout)?;
+    let spawned_by_us = server_pid().is_none();
+    let r = transcribe_on_server_inner(m, &wav, None, "", false, false);
+    stop_ephemeral_server(spawned_by_us, "安装冒烟结束");
+    let t = r?;
     log::info!("{} 冒烟通过：{:?}", m.label(), t.text);
     Ok(())
 }
 
-/// 一次性 `speech transcribe` CLI 的解码上限固定是上游的 448 个 token，
-/// **且没有任何参数能改**（`speech transcribe --help` 里的 `--max-tokens` 只对 MOSS 引擎
-/// 生效，对 qwen3 传了会被忽略——2026-11-11 在 v0.0.28 官方包上用 353 秒录音实测，
-/// 加 `--max-tokens 50` 前后输出字节数一样）。448 个 token 大约是 1–3 分钟的话
-///（282 秒的真实录音要 736 个）。所以**录音超过这个时长的一次性转写改走临时
-/// 拉起的 speech-server**（补丁版，上限 6144），转完即停，见 [`transcribe_long_oneshot`]。
-/// 取 60 s：短于它的绝大多数录音在 448 内，继续走 CLI，行为一个字节不变。
-pub const ONESHOT_LONG_WAV_SECS: f64 = 60.0;
+// 一次性 `speech transcribe` CLI 的解码上限固定是上游的 448 个 token，
+// **且没有任何参数能改**（`--max-tokens` 只对 MOSS 引擎生效，对 qwen3 传了会被忽略，
+// 2026-11-11 实测）；而且官方 CLI 不认 `AGENTEAR_OFFLINE`，每次加载都先联网问 Hub，
+// 在断网沙箱里卡约 2 分钟（FU-31）。所以**不管录音多长，一次性转写都走临时拉起的
+// 补丁版 speech-server**（上限 6144、认离线开关），转完即停，见 [`transcribe_long_oneshot`]。
 
-/// WAV 时长（秒）。读不了头就返回 `None`，调用方按「短」处理（走原来的 CLI）。
+/// WAV 时长（秒）。读不了头就返回 `None`，调用方按「未知」处理。
 pub fn wav_secs(wav: &Path) -> Option<f64> {
     let r = hound::WavReader::open(wav).ok()?;
     let spec = r.spec();
@@ -924,11 +877,6 @@ pub fn wav_secs(wav: &Path) -> Option<f64> {
         return None;
     }
     Some(r.duration() as f64 / spec.sample_rate as f64)
-}
-
-/// 一次性路径要不要改走服务：只看时长，纯函数，便于钉住阈值。
-pub fn oneshot_needs_server(secs: Option<f64>) -> bool {
-    secs.is_some_and(|s| s > ONESHOT_LONG_WAV_SECS)
 }
 
 /// 单次请求的 curl 超时（秒）。常驻服务原来固定 120 s：15 分钟的录音在
@@ -939,10 +887,9 @@ fn request_timeout_secs(audio_secs: Option<f64>) -> u64 {
     base.max(scaled).ceil() as u64
 }
 
-/// 长录音的一次性转写：临时拉起（或复用已有的）补丁版 speech-server 转写。
+/// 一次性转写（FU-31 起不分长短）：临时拉起（或复用已有的）补丁版 speech-server 转写。
 /// 常驻开关**关着**时转完立刻停掉服务，内存行为与「逐次」一致，只是冷启动换成
-/// 服务启动；常驻开着就保留给空闲回收。**调用方负责失败时退回 CLI**（会被截断，
-/// 但不丢整轮）。
+/// 服务启动；常驻开着就保留给空闲回收。**调用方负责失败时退回 SenseVoice**。
 pub fn transcribe_long_oneshot(
     m: Qwen3Model,
     wav: &Path,
@@ -954,7 +901,7 @@ pub fn transcribe_long_oneshot(
     let spawned_by_us = server_pid().is_none();
     let r = server_transcribe(m, wav, language, context);
     if !crate::config::get().qwen3_resident {
-        stop_ephemeral_server(spawned_by_us, "长录音一次性转写结束");
+        stop_ephemeral_server(spawned_by_us, "一次性转写结束");
     }
     r
 }
@@ -1239,7 +1186,7 @@ fn await_exit(s: &mut Server) {
 /// 实测占 3.1 GiB，「换模型」不该让内存叠加。
 /// 返回 `(端口, 服务 pid)`。pid 用来认「回来时还是不是同一个服务」——端口会被系统复用，pid 在
 /// `Child` 被回收前不会。
-fn ensure_server_locked(slot: &mut Option<Server>, m: Qwen3Model) -> Result<(u16, u32)> {
+fn ensure_server_locked(slot: &mut Option<Server>, m: Qwen3Model, require_ready: bool) -> Result<(u16, u32)> {
     if let Some(s) = slot.as_mut() {
         let alive = matches!(s.child.try_wait(), Ok(None));
         if alive && s.model == m {
@@ -1259,7 +1206,7 @@ fn ensure_server_locked(slot: &mut Option<Server>, m: Qwen3Model) -> Result<(u16
         }
         *slot = None;
     }
-    if !is_ready(m) {
+    if require_ready && !is_ready(m) {
         bail!("{} 还没装好，不能起常驻服务", m.label());
     }
     let bin = server_bin().context("数据目录未初始化")?;
@@ -1335,9 +1282,21 @@ fn transcribe_on_server(
     context: &str,
     rewarm: bool,
 ) -> Result<crate::asr::Transcript> {
+    transcribe_on_server_inner(m, wav, language, context, rewarm, true)
+}
+
+/// `require_ready`：只有安装冒烟传 `false`（那时安装记录还没写）。
+fn transcribe_on_server_inner(
+    m: Qwen3Model,
+    wav: &Path,
+    language: Option<&str>,
+    context: &str,
+    rewarm: bool,
+    require_ready: bool,
+) -> Result<crate::asr::Transcript> {
     let (port, server) = {
         let mut slot = SERVER.lock().unwrap_or_else(|e| e.into_inner());
-        ensure_server_locked(&mut slot, m)?
+        ensure_server_locked(&mut slot, m, require_ready)?
     };
     let mut cmd = Command::new("/usr/bin/curl");
     let max_time = request_timeout_secs(wav_secs(wav));
@@ -1399,14 +1358,29 @@ fn transcribe_on_server(
     }
     let out = out.context("调用 speech-server 失败")?;
     if !out.status.success() {
+        let err = String::from_utf8_lossy(&out.stderr);
+        let body = String::from_utf8_lossy(&out.stdout);
+        if is_offline_miss(&err, &body) {
+            bail!(
+                "Qwen3-ASR 模型文件缺失或不完整（AGENTEAR_OFFLINE，服务不联网补下）：{}{}",
+                err.trim(),
+                body.trim()
+            );
+        }
         bail!(
             "speech-server 请求失败（curl {:?}）：{}{}",
             out.status.code(),
-            String::from_utf8_lossy(&out.stderr).trim(),
-            String::from_utf8_lossy(&out.stdout).trim()
+            err.trim(),
+            body.trim()
         );
     }
     parse_server_json(&String::from_utf8_lossy(&out.stdout))
+}
+
+/// 服务回的 500 是不是「离线下找不到模型文件」（补丁抛的 `AGENTEAR_OFFLINE: model files missing`，
+/// 或上游联网失败的 `failedToDownload`）。纯函数，便于钉住。
+fn is_offline_miss(stderr: &str, body: &str) -> bool {
+    [stderr, body].iter().any(|t| t.contains("AGENTEAR_OFFLINE") || t.contains("failedToDownload"))
 }
 
 fn parse_server_json(body: &str) -> Result<crate::asr::Transcript> {
@@ -1819,6 +1793,24 @@ mod tests {
     }
 
     #[test]
+    fn speech_command_always_sets_the_offline_env() {
+        let cmd = speech_command(Path::new("/tmp/does-not-matter"));
+        let val = cmd
+            .get_envs()
+            .find(|(k, _)| *k == std::ffi::OsStr::new("AGENTEAR_OFFLINE"))
+            .and_then(|(_, v)| v)
+            .map(|v| v.to_string_lossy().to_string());
+        assert_eq!(val.as_deref(), Some("1"), "FU-31：每个 speech 进程都不许联网问 Hub");
+    }
+
+    #[test]
+    fn offline_miss_is_recognised_in_stderr_or_body() {
+        assert!(is_offline_miss("", r#"{"error":"AGENTEAR_OFFLINE: model files missing for x"}"#));
+        assert!(is_offline_miss("failedToDownload(\"x\")", ""));
+        assert!(!is_offline_miss("curl: (28) timed out", "{}"));
+    }
+
+    #[test]
     fn ephemeral_server_is_only_stopped_when_ours_and_idle() {
         assert!(should_stop_ephemeral(true, 0));
         assert!(!should_stop_ephemeral(true, 1), "别的请求还在用，不能杀");
@@ -1827,10 +1819,7 @@ mod tests {
     }
 
     #[test]
-    fn long_wav_threshold_and_timeout() {
-        assert!(!oneshot_needs_server(None), "读不出时长按短处理，走原 CLI");
-        assert!(!oneshot_needs_server(Some(ONESHOT_LONG_WAV_SECS)));
-        assert!(oneshot_needs_server(Some(ONESHOT_LONG_WAV_SECS + 0.1)));
+    fn request_timeout_scales_with_audio() {
         assert_eq!(request_timeout_secs(None), 120);
         assert_eq!(request_timeout_secs(Some(30.0)), 120);
         assert_eq!(request_timeout_secs(Some(900.0)), 510, "15 分钟档不能被 120 s 掐断");

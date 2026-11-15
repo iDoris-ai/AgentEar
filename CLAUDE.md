@@ -64,6 +64,13 @@ M1 完成；**知识库投递 + 全文检索默认开（v0.4.2）**；M2 理解�
   （`qwen3::read/write/clear_recovering_marker` + `qwen3::recovery_decision`
   这个纯函数判断要不要重试/要不要真的发起下载）。一次性 CLI 子命令遇到这种
   空档只记标记、不发起下载（`RecoveryAction::Note`），交给下一次守护进程启动。
+- ⚠️ **上游加载库每次先联网问 Hub，沙箱下 EPERM 不被当成离线，会卡约 2 分钟（FU-31，v0.29.2 修）**：
+  speech-swift 的 `HuggingFaceDownloader.downloadWeights` 无条件先 `fetchManifest`，之后才看本地缓存；
+  沙箱禁了出站 TCP，系统返回 POSIX `Operation not permitted`，上游只认几种 `URLError`，于是重试 5 次后抛
+  `failedToDownload`（实测约 118 s）。运行时 `speech-runtime-v0.0.28-agentear.3` 的补丁让它认 `AGENTEAR_OFFLINE=1`
+  （`speech_command` 无条件设）：缓存完整就不发请求，不完整立刻报错。**官方 `speech` CLI 不认这个变量**，所以一次性转写
+  一律走临时拉起的补丁版 speech-server（不再分长短、没有 CLI 退路），失败退回 SenseVoice（`Dispatch`，日志写原因）。
+  模型是我们按 pin 死的 commit 装的，不该有「检查更新」；**不要再把 CLI 加回 Qwen3 的转写路径**。
 - GGUF 路线（llama.cpp）另开 **T3.5.7** 评准确率，没做。
 
 **M3 实时对话（ADR-0007）：V1 的通话链路已随 v0.6.0 发布；v0.7.0 给了它产品入口。**
@@ -575,7 +582,7 @@ ADR-0003 的**组织档适配器（memos）还没做**，等真有企业需求�
 clippy **刻意不加 `-D warnings`**（既有 13 条警告，加了会让 CI 长期红，
 而长期红的 CI 等于没有 CI）。CI **不需要 `vendor/`**（实测移走后 203 全绿）。
 
-### 输入法模式的分段耗时与系统快照（FU-31，jason 2026-11-14「转写时快时慢」）
+### 输入法模式的分段耗时与系统快照（FU-32，jason 2026-11-14「转写时快时慢」）
 
 - **起因**：同一段 20 秒录音同一个二进制，重跑 7.7 / 6.3 / 27 s，SenseVoice 正常约 1 s；怀疑是机器负载/内存（load 113 / 10 核、swap 几乎满）而不是 AgentEar，但日志里没有分段数据，**没法证明**。
 - **每一轮输入法模式**往 `derived/timings.jsonl` 追加一行 `"kind":"input"`（对话模式的老记录不动；`--timings` 的对话那一节忽略 input 行），并打一行 INFO：`⏱ 输入轮 总 … = 提交 + ASR（拉起 / 解码）+ 纠错 + 标签 + 落库 + 上屏 | 其他 … 索引(上屏后) … | 录音 … | load x/N核 swap a/bG 压力 p`。各环节在 DEBUG 级别另有开始/结束打点（`RUST_LOG=debug`）。代码 `src/input_timings.rs`，段的口径写在该文件顶部——**看数字前先读那段**。
