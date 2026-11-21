@@ -2556,6 +2556,8 @@ fn set_mode(mode: config::TalkMode) {
         },
         mode.as_str()
     );
+    // 进出对话模式都换一个新的助手 conversation_id（同一次对话内才复用）。
+    host::reset_conversation();
     match mode {
         config::TalkMode::InputMethod => {
             if talk::stop_playback() {
@@ -2750,7 +2752,11 @@ fn turn_error(e: &anyhow::Error) -> host::HostError {
 /// 这一轮推理走哪条路（记进分段耗时）：附着时一律经宿主，否则看配置。
 fn llm_via(cfg: &config::Config) -> &str {
     if host::attached() {
-        "agent24"
+        if host::link().grants_assistant() {
+            "agent24_assistant"
+        } else {
+            "agent24"
+        }
     } else if cfg.talk_llm_engine == "mock" {
         "mock"
     } else {

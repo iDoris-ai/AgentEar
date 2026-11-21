@@ -107,3 +107,35 @@ P1 可由两边并行开发，但只能用 fake host/module 和暂定 fixtures�
    Agent24 以 vendored 副本 + 记录 commit 的方式引用；error.code = wire ErrorKind 18 个 + AgentEar 自有 4 个。
 
 补记（2026-09-27，v0.26.1）：AgentEar 的附着 token 由 macOS 钥匙串改存 `<数据目录>/agent24/token`（0600）——自签证书下钥匙串分区按 cdhash 认 app，每次升级都弹密码框；A3 威胁模型不防同 UID，两者等价。
+
+
+## 8. 助手回调（`_a24/assistant/chat`）
+
+> 约定 v1 由 Agent24 侧给出，**对方还在开发，AgentEar 这边只对着假宿主和假内核 socket 测过，没有真 agent24d 联调**。
+
+**规则（jason 定）**：
+- 没连接 Agent24：行为一个字节都不变。
+- 已连接且宿主**支持并授予**助手能力：双击对话改调助手接口，**不再**调 `_a24/model/complete`，也**不再**拼 AgentEar 自己的 system 提示 / 天气事实 / `/no_think`。
+- 支持但未授予、或不支持：完全保持现状（走 `model/complete`，或无模型授权那条分支）。选择顺序是 `grants_assistant()` 先于 `grants_models()`（`host::llm_engine`）。
+
+**授权**：清单 `assets/agent24/domain-os.yml` 的 `kernel_capabilities` 写成 `[events, models, assistant]`，握手 `capabilities` 同步带 `assistant`；宿主支持并授予时 `initialize` 结果 `offer.provides` 含 `_a24/assistant/` 前缀（`a3::PROVIDES_ASSISTANT`，`A3Host::grants_assistant`）。没授予时 AgentEar **一帧都不发**，本地直接 `forbidden`；宿主侧若仍收到调用也会回 `forbidden`。
+⚠️ 清单字节变了，**已配对用户的 manifest digest 随之变化**，下次连接会走一次 `manifest_mismatch` → 自动代跑 `attach add` 轮换；轮换能否自动成功取决于宿主是否把「多声明一个能力」算作放宽（A3 §3.5），未验证。
+
+**入参**（宿主 `deny_unknown_fields`，只发这三个键，`request_id` 省略）：
+
+| 字段 | 说明 |
+|---|---|
+| `text` | 用户转写，1..=4000 字节。超长在**字符边界截断**并写日志（不报错）；空转写不调用 |
+| `lang` | `zh-CN` / `en-US` / `th-TH`，随本轮语种 |
+| `conversation_id` | `conv-` + 24 位随机十六进制（29 字符，合 `[A-Za-z0-9_-]{1,64}`），不含用户内容 |
+
+`conversation_id` 的生命周期（`host::conversation_id` / `reset_conversation`）：一次对话内每轮复用同一个；附着建立、断开、切进或切出对话模式（`set_mode`）时换新。
+
+**返回**：非流式 `{text, session_id, run_id, request_id}`，`text` 纯文本（约定 ≤8000 字节），由 AgentEar 的 TTS 朗读；宿主不会再用 `speak` 重复播报。字段缺失（`text`/`session_id`/`run_id`）一律报错；`request_id` 我们没发，不要求回传。超时 90 秒（`ASSISTANT_TIMEOUT`）；每个模块同时最多 1 个调用（宿主侧约束，AgentEar 对话本来就是串行的）。
+
+**失败码**：`forbidden` / `busy` / `unavailable`（message 带 iDoris reason，进 `cause`）/ `timeout` / `internal` 原样进 `HostError`（事件里 `error.code` 同名）。`invalid` 不在 `error.code` 闭集里，归 `internal`，原始值留在 `HostError::wire_kind`。`awaiting_approval` **不算失败**：这一轮念一句固定提示（中「需要在 Agent24 里确认一下。」/ 英 `This needs your confirmation in Agent24.` / 泰「ต้องยืนยันใน Agent24 ก่อน」），不发 error 事件。
+
+**与其它路径的关系**：
+- 翻译（`translate`）固定走 `talk_llm_url`，不受助手影响（有用例钉住）。
+- 助手路径**没有 tier / token 数据**（回包里没有），所以隐私自检 `check_tier` 与 `timings` 的 model/tier/token 字段都不记；`timings` 的 `llm_via` 记为 `agent24_assistant`。
+- 助手路径非流式，首字起播会比本机流式慢，与 `model/complete` 同。

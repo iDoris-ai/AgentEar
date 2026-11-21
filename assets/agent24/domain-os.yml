@@ -13,6 +13,6 @@ route_namespace: /api/v1/agentear
 event_module: agentear
 data_dir: ~/.agent24/os/agentear/
 impl_kind: attached_process
-kernel_capabilities: [events, models]
+kernel_capabilities: [events, models, assistant]
 model_access: local_only
 host_commands: [speak, stop_playback]
