@@ -138,6 +138,11 @@ pub fn idoris_privacy_header(configured: &str) -> &'static str {
 pub fn llm_engine(cfg: &crate::config::Config) -> Option<Arc<dyn LlmEngine>> {
     if attached() {
         let link = link();
+        // 宿主支持并授予了助手能力：双击对话改调 Agent24 助手接口，不再走 model/complete。
+        // 只看助手授权，不看模型授权——两者是独立的能力。没授予 / 不支持 = 下面原逻辑一字不变。
+        if link.grants_assistant() {
+            return Some(Arc::new(AssistantLlm::new(link)));
+        }
         if !link.grants_models() {
             return no_model_grant(cfg, link);
         }
@@ -305,6 +310,10 @@ pub struct HostError {
     pub retryable: bool,
     /// unavailable 时宿主给的原因（no_provider / request_rejected / …），展示用。
     pub cause: Option<String>,
+    /// 宿主 wire 上的原始 kind，**仅当它不在上面的闭集里时**才有（如助手回调的
+    /// `awaiting_approval` / `invalid`）。`kind` 已被归一成 `internal`，调用方要区分
+    /// 它们就看这里。
+    pub wire_kind: Option<String>,
 }
 
 impl HostError {
@@ -321,6 +330,7 @@ impl HostError {
             message: message.into(),
             retryable,
             cause: None,
+            wire_kind: None,
         }
     }
 
@@ -333,6 +343,9 @@ impl HostError {
             v["data"]["retryable"].as_bool().unwrap_or(false),
         );
         e.cause = v["data"]["cause"].as_str().map(str::to_string);
+        if e.kind != kind {
+            e.wire_kind = Some(kind.to_string());
+        }
         e
     }
 }
@@ -382,6 +395,20 @@ pub trait HostLink: Send + Sync {
     fn grants_models(&self) -> bool {
         true
     }
+    /// 宿主有没有授予**助手**能力（A3：握手 offer 里有没有 `_a24/assistant/`）。
+    /// 默认 false：不支持助手的宿主 / 实现，行为与助手能力出现之前完全一样。
+    fn grants_assistant(&self) -> bool {
+        false
+    }
+    /// `_a24/assistant/chat`（非流式）：把转写交给宿主的助手，拿回要念的纯文本。
+    /// 没授予时 `forbidden`。默认实现 = 不支持。
+    fn assistant_chat(
+        &self,
+        _req: &AssistantRequest,
+        _timeout: Duration,
+    ) -> std::result::Result<AssistantReply, HostError> {
+        Err(HostError::new("forbidden", "宿主未授予助手能力", false))
+    }
     /// `_a24/events/emit`，params = [`emit_params`]`(event)`。
     ///
     /// **只由后台投递线程调用**（见 [`emit`]）：同一 session 串行、等到应答再发下一条，
@@ -423,6 +450,13 @@ impl HostLink for NoHost {
     fn emit(&self, _event: &Value) -> std::result::Result<(), HostError> {
         Ok(())
     }
+    fn assistant_chat(
+        &self,
+        _req: &AssistantRequest,
+        _timeout: Duration,
+    ) -> std::result::Result<AssistantReply, HostError> {
+        Err(HostError::new("unavailable", "没有附着到 Agent24：助手接口现在不可用", true))
+    }
     fn model_complete(
         &self,
         _req: &ModelRequest,
@@ -455,6 +489,12 @@ pub struct FakeHost {
     pub model_delay_ms: AtomicU64,
     /// 被模块取消的请求（`$/cancelRequest` 的 request_id）。
     pub cancels: Mutex<Vec<String>>,
+    /// 假宿主是否「授予助手能力」。默认 false：现有用例的行为不变。
+    assistant_granted: AtomicBool,
+    /// 收到的每个 `_a24/assistant/chat` 的线上 params。
+    pub assistant_requests: Mutex<Vec<Value>>,
+    /// 预排的助手结果；排空后回显。
+    pub assistant_script: Mutex<VecDeque<std::result::Result<AssistantReply, HostError>>>,
     responder: Box<dyn Fn(&ModelRequest) -> ModelReply + Send + Sync>,
 }
 
@@ -476,6 +516,9 @@ impl FakeHost {
             emit_delay_ms: AtomicU64::new(0),
             model_delay_ms: AtomicU64::new(0),
             cancels: Mutex::new(Vec::new()),
+            assistant_granted: AtomicBool::new(false),
+            assistant_requests: Mutex::new(Vec::new()),
+            assistant_script: Mutex::new(VecDeque::new()),
             responder: Box::new(|req| ModelReply {
                 text: format!(
                     "（假宿主）收到：{}",
@@ -495,6 +538,15 @@ impl FakeHost {
 
     pub fn set_attached(&self, on: bool) {
         self.attached.store(on, Ordering::SeqCst);
+    }
+
+    /// 让假宿主「支持并授予」助手能力。
+    pub fn grant_assistant(&self, on: bool) {
+        self.assistant_granted.store(on, Ordering::SeqCst);
+    }
+
+    pub fn push_assistant_reply(&self, r: std::result::Result<AssistantReply, HostError>) {
+        self.assistant_script.lock().unwrap_or_else(|p| p.into_inner()).push_back(r);
     }
 
     pub fn events(&self) -> Vec<Value> {
@@ -549,6 +601,33 @@ impl HostLink for FakeHost {
         self.events.lock().unwrap_or_else(|p| p.into_inner()).push(event.clone());
         Ok(())
     }
+    fn grants_assistant(&self) -> bool {
+        self.assistant_granted.load(Ordering::SeqCst)
+    }
+    fn assistant_chat(
+        &self,
+        req: &AssistantRequest,
+        _timeout: Duration,
+    ) -> std::result::Result<AssistantReply, HostError> {
+        if !self.grants_assistant() {
+            return Err(HostError::new("forbidden", "宿主未授予助手能力", false));
+        }
+        self.assistant_requests
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .push(req.to_params());
+        if !self.attached() {
+            return Err(HostError::new("unavailable", "假宿主已断开", true));
+        }
+        if let Some(r) = self.assistant_script.lock().unwrap_or_else(|p| p.into_inner()).pop_front() {
+            return r;
+        }
+        Ok(AssistantReply {
+            text: format!("（假宿主助手）收到：{}", req.text),
+            session_id: "ses_fake".into(),
+            run_id: "run_fake".into(),
+        })
+    }
     fn model_complete(
         &self,
         req: &ModelRequest,
@@ -576,6 +655,183 @@ impl HostLink for FakeHost {
             return r;
         }
         Ok((self.responder)(req))
+    }
+}
+
+// ---------------------------------------------------------------- 助手回调
+
+/// 助手回调单次调用的模块侧等待上限（约定 v1：宿主 90 秒超时）。
+pub const ASSISTANT_TIMEOUT: Duration = Duration::from_secs(90);
+/// `text` 的字节上限（约定 v1：1..=4000）。
+pub const ASSISTANT_MAX_TEXT_BYTES: usize = 4000;
+/// 助手回包 `text` 的字节上限（约定 v1：≤8000，纯文本）。
+pub const ASSISTANT_MAX_REPLY_BYTES: usize = 8000;
+
+/// `_a24/assistant/chat` 的请求。
+///
+/// ⚠️ 宿主那边 `deny_unknown_fields`：**只能有 `text` / `lang` / `conversation_id`**
+/// （`request_id` 虽是可选，A3 下与 model/complete 一样省略，不发）。
+/// 不带 system 提示、不带天气事实、不带 `/no_think`——那些是 AgentEar 自己模型路径的东西。
+/// [`AssistantRequest::to_params`] 只产出这三个键，有用例钉住。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AssistantRequest {
+    pub text: String,
+    /// `zh-CN` | `en-US` | `th-TH`。
+    pub lang: &'static str,
+    /// `[A-Za-z0-9_-]{1,64}`，同一次对话内稳定，见 [`conversation_id`]。
+    pub conversation_id: String,
+}
+
+impl AssistantRequest {
+    pub fn to_params(&self) -> Value {
+        json!({
+            "text": self.text,
+            "lang": self.lang,
+            "conversation_id": self.conversation_id,
+        })
+    }
+}
+
+/// 把转写裁到宿主允许的 4000 字节以内：**在字符边界截断**，并返回是否截断了。
+///
+/// 选「截断 + 日志写明」而不是报错：4000 字节约 1300 个汉字，一次口述超过它很少见；
+/// 报错会让用户这一轮什么都听不到，而前面 4000 字节通常已足够让助手回答。
+pub fn clamp_assistant_text(text: &str) -> (&str, bool) {
+    if text.len() <= ASSISTANT_MAX_TEXT_BYTES {
+        return (text, false);
+    }
+    let mut end = ASSISTANT_MAX_TEXT_BYTES;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    (&text[..end], true)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AssistantReply {
+    pub text: String,
+    pub session_id: String,
+    pub run_id: String,
+}
+
+/// 解析 `_a24/assistant/chat` 的 result。`text` / `session_id` / `run_id` 缺失一律报错；
+/// `request_id` 我们没发，不要求回传。
+pub fn parse_assistant_result(v: &Value) -> std::result::Result<AssistantReply, HostError> {
+    let bad = |what: &str| HostError::new("internal", format!("宿主助手回包缺 {what}"), false);
+    Ok(AssistantReply {
+        text: v["text"].as_str().ok_or_else(|| bad("text"))?.to_string(),
+        session_id: v["session_id"].as_str().ok_or_else(|| bad("session_id"))?.to_string(),
+        run_id: v["run_id"].as_str().ok_or_else(|| bad("run_id"))?.to_string(),
+    })
+}
+
+/// 助手回调的 wire kind：`awaiting_approval` 不在 [`HOST_ERROR_KINDS`] 里，
+/// 由 [`HostError::wire_kind`] 保留。
+pub fn is_awaiting_approval(e: &HostError) -> bool {
+    e.wire_kind.as_deref() == Some("awaiting_approval")
+}
+
+/// 助手要用户去 Agent24 桌面端审批时念的那一句（中/英/泰）。
+pub fn awaiting_approval_hint(lang: TalkLang) -> &'static str {
+    match lang {
+        TalkLang::Zh => "需要在 Agent24 里确认一下。",
+        TalkLang::En => "This needs your confirmation in Agent24.",
+        TalkLang::Th => "ต้องยืนยันใน Agent24 ก่อน",
+    }
+}
+
+static CONVERSATION: Mutex<Option<String>> = Mutex::new(None);
+
+/// 新生成一个 conversation_id：`conv-` + 24 位十六进制随机数（29 字符，合 `[A-Za-z0-9_-]{1,64}`）。
+/// **不含任何用户内容。** 优先读 /dev/urandom，读不到时退回时间 + pid + 计数器的哈希。
+pub fn new_conversation_id() -> String {
+    use sha2::{Digest, Sha256};
+    let mut buf = [0u8; 12];
+    let ok = std::fs::File::open("/dev/urandom")
+        .and_then(|mut f| std::io::Read::read_exact(&mut f, &mut buf))
+        .is_ok();
+    if !ok {
+        let d = Sha256::digest(new_id("conv").as_bytes());
+        buf.copy_from_slice(&d[..12]);
+    }
+    let mut s = String::from("conv-");
+    for b in buf {
+        s.push_str(&format!("{b:02x}"));
+    }
+    s
+}
+
+/// 当前这次对话的 id（没有就懒生成）。同一次对话（进入对话模式 / 附着建立起，到切回输入法 /
+/// 断开为止）内每轮返回同一个值，宿主据此把多轮放进同一个 Agent24 会话。
+pub fn conversation_id() -> String {
+    CONVERSATION
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .get_or_insert_with(new_conversation_id)
+        .clone()
+}
+
+/// 结束当前对话：下一次取 [`conversation_id`] 会得到新的。
+/// 附着 / 断开、切进或切出对话模式时调用。
+pub fn reset_conversation() {
+    *CONVERSATION.lock().unwrap_or_else(|p| p.into_inner()) = None;
+}
+
+/// 经宿主助手接口（`_a24/assistant/chat`）的对话引擎。
+///
+/// 与 [`HostLlm`] 的区别：**忽略 AgentEar 的 system 提示**（人设、天气事实、字数限制都是宿主助手的事），
+/// 只把用户转写原样交给宿主；不加 `/no_think`；没有 tier / token 统计（回包里没有）。
+/// 非流式（`streams()` 为 false → 调用方走整句路径）。
+pub struct AssistantLlm {
+    link: Arc<dyn HostLink>,
+}
+
+impl AssistantLlm {
+    pub fn new(link: Arc<dyn HostLink>) -> Self {
+        Self { link }
+    }
+}
+
+impl LlmEngine for AssistantLlm {
+    fn name(&self) -> &'static str {
+        "agent24-assistant"
+    }
+
+    fn reply(&self, _system: &str, user: &str, lang: TalkLang) -> Result<String> {
+        let (text, clipped) = clamp_assistant_text(user);
+        if clipped {
+            log::warn!(
+                "转写 {} 字节超过助手接口的 {} 字节上限，已在字符边界截断后发送",
+                user.len(),
+                ASSISTANT_MAX_TEXT_BYTES
+            );
+        }
+        if text.trim().is_empty() {
+            return Err(HostError::new("internal", "转写为空，不调助手", false).into());
+        }
+        let req = AssistantRequest {
+            text: text.to_string(),
+            lang: talk_lang_bcp47(lang),
+            conversation_id: conversation_id(),
+        };
+        match self.link.assistant_chat(&req, ASSISTANT_TIMEOUT) {
+            Ok(r) => {
+                log::info!("宿主助手回答（会话 {}，run {}，{} 字节）", r.session_id, r.run_id, r.text.len());
+                if r.text.trim().is_empty() {
+                    return Err(HostError::new("internal", "宿主助手回了一段空回答", true).into());
+                }
+                if r.text.len() > ASSISTANT_MAX_REPLY_BYTES {
+                    log::warn!("宿主助手回答 {} 字节，超过约定的 {} 字节", r.text.len(), ASSISTANT_MAX_REPLY_BYTES);
+                }
+                Ok(r.text)
+            }
+            // 需要用户去桌面端审批：不是失败，念一句固定提示。
+            Err(e) if is_awaiting_approval(&e) => {
+                log::info!("宿主助手等待桌面审批（awaiting_approval）：这一轮念提示");
+                Ok(awaiting_approval_hint(lang).to_string())
+            }
+            Err(e) => Err(e.into()),
+        }
     }
 }
 
@@ -1173,6 +1429,7 @@ pub fn attach(link: Arc<dyn HostLink>) {
         GENERATION.fetch_add(1, Ordering::SeqCst);
     }
     *LINK.write().unwrap_or_else(|p| p.into_inner()) = Some(link);
+    reset_conversation();
     *STATE.lock().unwrap_or_else(|p| p.into_inner()) = AttachState::Attached;
     crate::tray::set_host_disconnected(false);
     *AWAITING.lock().unwrap_or_else(|p| p.into_inner()) = None;
@@ -1184,6 +1441,7 @@ pub fn attach(link: Arc<dyn HostLink>) {
 /// （它们是宿主的意图，宿主不在了就不该继续念）。
 pub fn detach(cfg: &crate::config::Config) -> AttachState {
     *LINK.write().unwrap_or_else(|p| p.into_inner()) = None;
+    reset_conversation();
     // 作废已入队未投递的事件（PR #96 评审）：只丢 `tx` 不够，缓冲里的照样会被投递到旧宿主。
     if let Some(old) = EMITTER.lock().unwrap_or_else(|p| p.into_inner()).take() {
         old.cancel();

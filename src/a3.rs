@@ -40,10 +40,11 @@ pub const EMIT_TIMEOUT: Duration = Duration::from_secs(10);
 /// 模块名（manifest 的 `name`）。
 pub const MODULE: &str = "agentear";
 /// 握手里声明的能力（仅提示；实际授予看 offer）。
-pub const CAPABILITIES: [&str; 2] = ["events", "models"];
+pub const CAPABILITIES: [&str; 3] = ["events", "models", "assistant"];
 /// offer 里的能力前缀。
 pub const PROVIDES_EVENTS: &str = "_a24/events/";
 pub const PROVIDES_MODEL: &str = "_a24/model/";
+pub const PROVIDES_ASSISTANT: &str = "_a24/assistant/";
 
 // ---------------------------------------------------------------- manifest
 
@@ -501,6 +502,19 @@ impl HostLink for A3Host {
 
     fn grants_models(&self) -> bool {
         self.conn.offer.has(PROVIDES_MODEL)
+    }
+
+    fn grants_assistant(&self) -> bool {
+        self.conn.offer.has(PROVIDES_ASSISTANT)
+    }
+
+    fn assistant_chat(&self, req: &host::AssistantRequest, timeout: Duration) -> Result<host::AssistantReply, HostError> {
+        if !self.grants_assistant() {
+            return Err(HostError::new("forbidden", "宿主未授予助手能力", false));
+        }
+        // 只发约定的三个键；request_id 与 model/complete 一样省略。
+        let v = self.conn.call("_a24/assistant/chat", req.to_params(), timeout)?;
+        host::parse_assistant_result(&v)
     }
 
     fn emit(&self, event: &Value) -> Result<(), HostError> {
