@@ -579,7 +579,7 @@ fn manifest_digest_is_the_raw_file_bytes_and_ignores_app_version() {
         !text.contains(env!("CARGO_PKG_VERSION")),
         "manifest 不许含 app 版本号——否则每次升级都改 digest、断一次配对"
     );
-    for must in ["name: agentear", "impl_kind: attached_process", "model_access: local_only", "host_commands: [speak, stop_playback]", "kernel_capabilities: [events, models]"] {
+    for must in ["name: agentear", "impl_kind: attached_process", "model_access: local_only", "host_commands: [speak, stop_playback]", "kernel_capabilities: [events, models, assistant]"] {
         assert!(text.contains(must), "manifest 缺 {must}");
     }
     let d = manifest_digest();
@@ -692,4 +692,59 @@ fn strip_nulls_recurses_into_array_elements() {
             "nested": {"c": [ {} ]}
         })
     );
+}
+
+// ---------------------------------------------------------------- 助手回调
+
+#[test]
+fn assistant_chat_wire_shape_and_errors() {
+    let p = sock_path("assistant");
+    let t = kernel(&p, 1, |_, mut k| {
+        k.accept_ok(&["_a24/events/", "_a24/assistant/"]);
+        let v = k.recv();
+        assert_eq!(v["method"], "_a24/assistant/chat");
+        let mut keys: Vec<&str> = v["params"].as_object().unwrap().keys().map(|s| s.as_str()).collect();
+        keys.sort();
+        assert_eq!(keys, ["conversation_id", "lang", "text"], "deny_unknown_fields：只发约定的三个键");
+        assert_eq!(v["params"]["conversation_id"], "conv-abc");
+        k.send(json!({"jsonrpc":"2.0","id":v["id"],"result":{"text":"好的","session_id":"ses_1","run_id":"run_1","request_id":null}}));
+        let v2 = k.recv();
+        k.send(json!({"jsonrpc":"2.0","id":v2["id"],"error":{"code":-32000,"message":"approve","data":{"kind":"awaiting_approval","retryable":false}}}));
+        let v3 = k.recv();
+        k.send(json!({"jsonrpc":"2.0","id":v3["id"],"result":{"text":"缺字段"}}));
+        k.wait_eof();
+    });
+    let conn = Conn::connect(&creds(&p), quiet_handler()).unwrap();
+    let h = A3Host { conn: conn.clone() };
+    assert!(h.grants_assistant() && !h.grants_models());
+    let req = host::AssistantRequest { text: "你好".into(), lang: "zh-CN", conversation_id: "conv-abc".into() };
+    let r = h.assistant_chat(&req, Duration::from_secs(5)).unwrap();
+    assert_eq!((r.text.as_str(), r.session_id.as_str(), r.run_id.as_str()), ("好的", "ses_1", "run_1"));
+    let e = h.assistant_chat(&req, Duration::from_secs(5)).unwrap_err();
+    assert!(host::is_awaiting_approval(&e), "awaiting_approval 的 wire kind 要保留：{e:?}");
+    let e = h.assistant_chat(&req, Duration::from_secs(5)).unwrap_err();
+    assert_eq!(e.kind, "internal", "回包缺字段一律报错");
+    conn.close();
+    t.join();
+}
+
+#[test]
+fn no_assistant_offer_means_forbidden_and_zero_frames() {
+    let p = sock_path("noassistant");
+    let frames = Arc::new(AtomicUsize::new(0));
+    let f2 = frames.clone();
+    let t = kernel(&p, 1, move |_, mut k| {
+        k.accept_ok(&["_a24/events/", "_a24/model/"]);
+        while read_frame(&mut k.r).ok().flatten().is_some() {
+            f2.fetch_add(1, Ordering::SeqCst);
+        }
+    });
+    let conn = Conn::connect(&creds(&p), quiet_handler()).unwrap();
+    let h = A3Host { conn: conn.clone() };
+    assert!(!h.grants_assistant());
+    let req = host::AssistantRequest { text: "x".into(), lang: "zh-CN", conversation_id: "conv-1".into() };
+    assert_eq!(h.assistant_chat(&req, Duration::from_secs(1)).unwrap_err().kind, "forbidden");
+    conn.close();
+    t.join();
+    assert_eq!(frames.load(Ordering::SeqCst), 0, "没授予助手就一帧都不该发");
 }

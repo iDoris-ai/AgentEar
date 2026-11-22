@@ -1289,3 +1289,391 @@ fn displaced_or_expired_entry_of_an_older_generation_is_not_sent() {
         "旧代的 proposal 不该发给新宿主：{ids:?}"
     );
 }
+
+// ---------------------------------------------------------------- 助手回调（_a24/assistant/chat）
+
+fn assistant_cfg() -> crate::config::Config {
+    crate::config::Config::default()
+}
+
+fn rpc_err(kind: &str) -> HostError {
+    HostError::from_rpc_error(&json!({"code": -32000, "message": "m", "data": {"kind": kind, "retryable": false}}))
+}
+
+/// 附着 + 授予助手 → 走助手：请求只有约定的三个键，没有 system / 天气 / /no_think，
+/// model/complete 一次都没调。
+#[test]
+fn granted_assistant_replaces_model_complete() {
+    let _g = global_lock();
+    reset_conversation();
+    let fake = Arc::new(FakeHost::new());
+    fake.grant_assistant(true);
+    attach(fake.clone());
+    let cfg = assistant_cfg();
+    let engines = talk::Engines::from_config(&cfg);
+    assert_eq!(engines.llm.name(), "agent24-assistant");
+    assert!(!engines.llm.streams(), "非流式，走整句路径");
+    let out = engines.llm.reply("SYSTEM-天气-晴", "今天几号", TalkLang::Zh).unwrap();
+    assert_eq!(out, "（假宿主助手）收到：今天几号");
+    assert!(fake.requests.lock().unwrap().is_empty(), "不再调 model/complete");
+    let sent = fake.assistant_requests.lock().unwrap().clone();
+    assert_eq!(sent.len(), 1);
+    let mut keys: Vec<&str> = sent[0].as_object().unwrap().keys().map(|k| k.as_str()).collect();
+    keys.sort();
+    assert_eq!(keys, ["conversation_id", "lang", "text"], "字段集合恰好是约定那几个");
+    assert_eq!(sent[0]["text"], "今天几号", "原样转写：没有 /no_think，没有拼 system");
+    assert_eq!(sent[0]["lang"], "zh-CN");
+    assert!(!sent[0].to_string().contains("SYSTEM-天气"));
+    let id = sent[0]["conversation_id"].as_str().unwrap();
+    assert!(!id.is_empty() && id.len() <= 64);
+    assert!(id.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-'));
+    detach(&cfg);
+}
+
+/// 语言按本轮语种传，三种都对。
+#[test]
+fn assistant_lang_follows_the_turn() {
+    let _g = global_lock(); // 共用全局助手互斥与等锁计数，与其它助手用例串行
+    let fake = Arc::new(FakeHost::new());
+    fake.grant_assistant(true);
+    let llm = AssistantLlm::new(fake.clone());
+    for (l, w) in [(TalkLang::Zh, "zh-CN"), (TalkLang::En, "en-US"), (TalkLang::Th, "th-TH")] {
+        llm.reply("s", "hi", l).unwrap();
+        assert_eq!(fake.assistant_requests.lock().unwrap().last().unwrap()["lang"], w);
+    }
+}
+
+/// conversation_id：同一次附着期间稳定，附着 / 断开后换新，且不含用户内容。
+#[test]
+fn conversation_id_is_stable_within_a_conversation_and_changes_across() {
+    let _g = global_lock();
+    reset_conversation();
+    let fake = Arc::new(FakeHost::new());
+    fake.grant_assistant(true);
+    let llm = AssistantLlm::new(fake.clone());
+    llm.reply("s", "秘密内容ABC", TalkLang::Zh).unwrap();
+    llm.reply("s", "第二轮", TalkLang::Zh).unwrap();
+    let ids: Vec<String> = fake
+        .assistant_requests
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|r| r["conversation_id"].as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(ids[0], ids[1], "同一次对话复用");
+    assert!(ids[0].starts_with("conv-") && ids[0].len() <= 64);
+    assert!(!ids[0].contains("ABC"), "id 里不放用户内容");
+    reset_conversation(); // 重新附着 / 断开
+    AssistantLlm::new(fake.clone()).reply("s", "新一轮", TalkLang::Zh).unwrap();
+    let third = fake.assistant_requests.lock().unwrap()[2]["conversation_id"].as_str().unwrap().to_string();
+    assert_ne!(third, ids[0], "换会话要换 id");
+    // 附着建立、断开重连也换新
+    attach(fake.clone());
+    let a = conversation_id();
+    attach(fake.clone());
+    assert_ne!(a, conversation_id(), "重新附着换新");
+    let b = conversation_id();
+    detach(&assistant_cfg());
+    assert_ne!(b, conversation_id(), "断开换新");
+}
+
+/// 附着但助手没授予 / 不支持 → 完全保持原样：走 model/complete（系统提示、/no_think 照旧）。
+#[test]
+fn not_granted_keeps_model_complete() {
+    let _g = global_lock();
+    let fake = Arc::new(FakeHost::new()); // 默认不授予助手，授予模型
+    attach(fake.clone());
+    let cfg = assistant_cfg();
+    let e = llm_engine(&cfg).expect("附着时由 host 接管");
+    assert_eq!(e.name(), "agent24", "仍是 HostLlm");
+    e.reply("SYS", "你好", TalkLang::Zh).unwrap();
+    assert!(fake.assistant_requests.lock().unwrap().is_empty());
+    let req = fake.requests.lock().unwrap()[0].clone();
+    assert_eq!(req["messages"][0]["content"], "SYS");
+    assert!(req["messages"][1]["content"].as_str().unwrap().ends_with("/no_think"));
+    detach(&cfg);
+}
+
+/// 没附着：llm_engine 与助手无关，默认配置仍走本机边车（返回 None）。
+#[test]
+fn no_attach_is_unchanged_and_nohost_reports_it() {
+    let _g = global_lock();
+    assert!(llm_engine(&assistant_cfg()).is_none());
+    let req = AssistantRequest { text: "x".into(), lang: "zh-CN", conversation_id: "conv-1".into() };
+    assert!(!NoHost.grants_assistant());
+    assert_eq!(NoHost.assistant_chat(&req, Duration::from_secs(1)).unwrap_err().kind, "unavailable");
+}
+
+/// 假宿主没授予时调助手 = forbidden，且没记请求。
+#[test]
+fn ungranted_fake_assistant_is_forbidden() {
+    let fake = FakeHost::new();
+    let req = AssistantRequest { text: "x".into(), lang: "zh-CN", conversation_id: "conv-1".into() };
+    assert_eq!(fake.assistant_chat(&req, Duration::from_secs(1)).unwrap_err().kind, "forbidden");
+    assert!(fake.assistant_requests.lock().unwrap().is_empty());
+}
+
+/// 每种失败码的映射：forbidden / busy / unavailable / timeout / internal 原样；
+/// invalid 归 internal 但保留 wire_kind；都不被当成成功。
+#[test]
+fn assistant_error_codes_map_through() {
+    let _g = global_lock(); // 共用全局助手互斥与等锁计数，与其它助手用例串行
+    let fake = Arc::new(FakeHost::new());
+    fake.grant_assistant(true);
+    let llm = AssistantLlm::new(fake.clone());
+    for kind in ["forbidden", "busy", "unavailable", "timeout", "internal"] {
+        fake.push_assistant_reply(Err(rpc_err(kind)));
+        let e = llm.reply("s", "u", TalkLang::Zh).unwrap_err();
+        assert_eq!(e.downcast_ref::<HostError>().unwrap().kind, kind);
+    }
+    fake.push_assistant_reply(Err(rpc_err("invalid")));
+    let e = llm.reply("s", "u", TalkLang::Zh).unwrap_err();
+    let h = e.downcast_ref::<HostError>().unwrap();
+    assert_eq!(h.kind, "internal", "invalid 不在 error.code 闭集里，归 internal");
+    assert_eq!(h.wire_kind.as_deref(), Some("invalid"));
+    // unavailable 带 reason
+    let mut u = rpc_err("unavailable");
+    u.cause = Some("no_provider".into());
+    fake.push_assistant_reply(Err(u));
+    let e = llm.reply("s", "u", TalkLang::Zh).unwrap_err();
+    assert_eq!(e.downcast_ref::<HostError>().unwrap().cause.as_deref(), Some("no_provider"));
+    // 空回答 = 失败
+    fake.push_assistant_reply(Ok(AssistantReply { text: "  ".into(), session_id: "s".into(), run_id: "r".into() }));
+    assert!(llm.reply("s", "u", TalkLang::Zh).is_err());
+}
+
+/// awaiting_approval 不是失败：念固定提示（按语种），正常朗读。
+#[test]
+fn awaiting_approval_speaks_the_fixed_hint() {
+    let _g = global_lock(); // 共用全局助手互斥与等锁计数，与其它助手用例串行
+    let fake = Arc::new(FakeHost::new());
+    fake.grant_assistant(true);
+    let llm = AssistantLlm::new(fake.clone());
+    for l in [TalkLang::Zh, TalkLang::En, TalkLang::Th] {
+        fake.push_assistant_reply(Err(rpc_err("awaiting_approval")));
+        assert_eq!(llm.reply("s", "u", l).unwrap(), awaiting_approval_hint(l));
+    }
+    for l in [TalkLang::Zh, TalkLang::En, TalkLang::Th] {
+        assert!(awaiting_approval_hint(l).contains("Agent24"));
+    }
+}
+
+/// 超 4000 字节：在字符边界截断后发送（不报错）；4000 以内原样。
+#[test]
+fn oversized_text_is_clamped_at_a_char_boundary() {
+    let _g = global_lock(); // 共用全局助手互斥与等锁计数，与其它助手用例串行
+    assert_eq!(clamp_assistant_text("abc"), ("abc", false));
+    let exact = "a".repeat(4000);
+    assert_eq!(clamp_assistant_text(&exact), (exact.as_str(), false));
+    let over = "a".repeat(4001);
+    assert_eq!(clamp_assistant_text(&over).0.len(), 4000);
+    let cjk = "汉".repeat(2000); // 6000 字节，每字 3 字节
+    let (c, clipped) = clamp_assistant_text(&cjk);
+    assert!(clipped && c.len() == 3999 && c.chars().all(|x| x == '汉'));
+    // 端到端：发出去的 text 不超过 4000 字节
+    let fake = Arc::new(FakeHost::new());
+    fake.grant_assistant(true);
+    AssistantLlm::new(fake.clone()).reply("s", &cjk, TalkLang::Zh).unwrap();
+    assert_eq!(fake.assistant_requests.lock().unwrap()[0]["text"].as_str().unwrap().len(), 3999);
+}
+
+/// 回包字段缺失一律报错。
+#[test]
+fn assistant_result_requires_its_fields() {
+    let ok = json!({"text": "hi", "session_id": "s", "run_id": "r", "request_id": "q"});
+    assert_eq!(parse_assistant_result(&ok).unwrap().text, "hi");
+    // request_id 我们没发，宿主不回也行
+    assert!(parse_assistant_result(&json!({"text": "hi", "session_id": "s", "run_id": "r"})).is_ok());
+    for k in ["text", "session_id", "run_id"] {
+        let mut v = ok.clone();
+        v.as_object_mut().unwrap().remove(k);
+        assert_eq!(parse_assistant_result(&v).unwrap_err().kind, "internal", "缺 {k}");
+    }
+    assert!(parse_assistant_result(&json!({"text": 1, "session_id": "s", "run_id": "r"})).is_err());
+}
+
+/// 翻译固定走 talk_llm_url：附着且授予助手时，翻译引擎仍是本机 OpenAI 兼容边车，不碰宿主。
+#[test]
+fn translate_does_not_use_the_assistant() {
+    let _g = global_lock();
+    let fake = Arc::new(FakeHost::new());
+    fake.grant_assistant(true);
+    attach(fake.clone());
+    let cfg = assistant_cfg();
+    let e = crate::translate::engine_for(&cfg, "你好").expect("非 mock 有引擎");
+    assert_eq!(e.name(), "openai_compat");
+    assert!(fake.assistant_requests.lock().unwrap().is_empty());
+    detach(&cfg);
+}
+
+// ---------------------------------------------------------------- 助手回调：评审修复
+
+fn rpc_err_reason(kind: &str, reason: &str) -> HostError {
+    HostError::from_rpc_error(&json!({
+        "code": -32000, "message": "m",
+        "data": {"kind": kind, "retryable": false, "reason": reason, "run_id": "r1", "session_id": "s1"}
+    }))
+}
+
+/// 轮询条件成立（最多 10 秒），不靠固定 sleep 排时序。
+fn wait_until(cond: impl Fn() -> bool) {
+    let t0 = Instant::now();
+    while !cond() {
+        assert!(t0.elapsed() < Duration::from_secs(10), "等待条件超时");
+        std::thread::sleep(Duration::from_millis(2));
+    }
+}
+
+/// W-1：真并发调用，宿主侧同一时刻最多 1 个在途。
+#[test]
+fn concurrent_assistant_calls_are_serialized() {
+    let _g = global_lock();
+    let fake = Arc::new(FakeHost::new());
+    fake.grant_assistant(true);
+    fake.assistant_delay_ms.store(150, Ordering::SeqCst);
+    let mut hs = Vec::new();
+    for i in 0..4 {
+        let f = fake.clone();
+        hs.push(std::thread::spawn(move || {
+            AssistantLlm::new(f).reply("s", &format!("q{i}"), TalkLang::Zh).unwrap()
+        }));
+    }
+    for h in hs {
+        h.join().unwrap();
+    }
+    assert_eq!(fake.assistant_requests.lock().unwrap().len(), 4);
+    assert_eq!(fake.assistant_max_inflight.load(Ordering::SeqCst), 1, "同一时刻最多 1 个在途");
+}
+
+/// W-1：等锁期间宿主断开 → 拿锁后重查，不发帧。
+#[test]
+fn assistant_rechecks_attachment_after_taking_the_gate() {
+    let _g = global_lock();
+    let fake = Arc::new(FakeHost::new());
+    fake.grant_assistant(true);
+    fake.assistant_delay_ms.store(1500, Ordering::SeqCst);
+    let f1 = fake.clone();
+    let first = std::thread::spawn(move || AssistantLlm::new(f1).reply("s", "第一个", TalkLang::Zh));
+    // 等到「第一个已进入宿主」（持着锁）再起第二个
+    wait_until(|| fake.assistant_inflight.load(Ordering::SeqCst) == 1);
+    let f2 = fake.clone();
+    let second = std::thread::spawn(move || AssistantLlm::new(f2).reply("s", "第二个", TalkLang::Zh));
+    // 等到「第二个已在等锁」再断开
+    wait_until(|| assistant_waiters() == 1);
+    fake.set_attached(false);
+    assert!(first.join().unwrap().is_ok());
+    let e = second.join().unwrap().unwrap_err();
+    assert_eq!(e.downcast_ref::<HostError>().unwrap().kind, "unavailable");
+    assert_eq!(fake.assistant_requests.lock().unwrap().len(), 1, "等锁的那个没有发出去");
+}
+
+/// W-2：本轮开始（引擎构造）时捕获 id，等待期间 id 被重置，本轮仍用旧 id。
+#[test]
+fn conversation_id_is_captured_at_turn_start() {
+    let _g = global_lock();
+    reset_conversation();
+    let fake = Arc::new(FakeHost::new());
+    fake.grant_assistant(true);
+    fake.assistant_delay_ms.store(200, Ordering::SeqCst);
+    let llm = AssistantLlm::new(fake.clone()); // 本轮开始
+    let before = conversation_id();
+    let t = std::thread::spawn(move || llm.reply("s", "你好", TalkLang::Zh));
+    std::thread::sleep(Duration::from_millis(50));
+    reset_conversation(); // 等待期间（断开 / 重新附着）
+    t.join().unwrap().unwrap();
+    assert_eq!(fake.assistant_requests.lock().unwrap()[0]["conversation_id"], before.as_str());
+    assert_ne!(conversation_id(), before);
+}
+
+/// W-3①：助手已授予、模型未授予 → `llm_engine` 层选助手。
+#[test]
+fn assistant_granted_without_models_selects_assistant() {
+    struct AssistantOnly(Arc<FakeHost>);
+    impl HostLink for AssistantOnly {
+        fn name(&self) -> &'static str {
+            "assistant-only"
+        }
+        fn attached(&self) -> bool {
+            true
+        }
+        fn grants_models(&self) -> bool {
+            false
+        }
+        fn grants_assistant(&self) -> bool {
+            true
+        }
+        fn emit(&self, e: &Value) -> std::result::Result<(), HostError> {
+            self.0.emit(e)
+        }
+        fn assistant_chat(
+            &self,
+            r: &AssistantRequest,
+            t: Duration,
+        ) -> std::result::Result<AssistantReply, HostError> {
+            self.0.assistant_chat(r, t)
+        }
+        fn model_complete(
+            &self,
+            _r: &ModelRequest,
+            _t: Duration,
+        ) -> std::result::Result<ModelReply, HostError> {
+            panic!("不该调 model/complete");
+        }
+    }
+    let _g = global_lock();
+    let fake = Arc::new(FakeHost::new());
+    fake.grant_assistant(true);
+    attach(Arc::new(AssistantOnly(fake.clone())));
+    let cfg = assistant_cfg();
+    assert_eq!(llm_engine(&cfg).expect("接管").name(), "agent24-assistant");
+    detach(&cfg);
+}
+
+/// W-3③：`llm_via` 在助手授权时是 agent24_assistant，未授权是 agent24，没附着看配置。
+#[test]
+fn llm_via_reports_the_assistant() {
+    let _g = global_lock();
+    let cfg = assistant_cfg();
+    let fake = Arc::new(FakeHost::new());
+    attach(fake.clone());
+    assert_eq!(crate::llm_via(&cfg), "agent24");
+    fake.grant_assistant(true);
+    assert_eq!(crate::llm_via(&cfg), "agent24_assistant");
+    detach(&cfg);
+    assert_eq!(crate::llm_via(&cfg), "sidecar");
+}
+
+/// Agent24 最终形式：`unavailable` + `data.reason = awaiting_approval` 也念提示、不算失败；
+/// 别的 reason 仍是失败。
+#[test]
+fn awaiting_approval_as_unavailable_reason_is_recognised() {
+    let _g = global_lock(); // 共用全局助手互斥与等锁计数，与其它助手用例串行
+    let fake = Arc::new(FakeHost::new());
+    fake.grant_assistant(true);
+    let llm = AssistantLlm::new(fake.clone());
+    for l in [TalkLang::Zh, TalkLang::En, TalkLang::Th] {
+        fake.push_assistant_reply(Err(rpc_err_reason("unavailable", "awaiting_approval")));
+        assert_eq!(llm.reply("s", "u", l).unwrap(), awaiting_approval_hint(l));
+    }
+    fake.push_assistant_reply(Err(rpc_err_reason("unavailable", "no_provider")));
+    let e = llm.reply("s", "u", TalkLang::Zh).unwrap_err();
+    assert_eq!(e.downcast_ref::<HostError>().unwrap().kind, "unavailable");
+    // reason 只在 unavailable 下才算审批
+    fake.push_assistant_reply(Err(rpc_err_reason("internal", "awaiting_approval")));
+    assert!(llm.reply("s", "u", TalkLang::Zh).is_err());
+}
+
+/// 宿主在「记忆没存进去（memory_persisted=false）」或「等不到完成事件」时回 internal：
+/// 当失败，不念；busy 也是失败。
+#[test]
+fn internal_and_busy_are_failures_and_nothing_is_spoken() {
+    let _g = global_lock(); // 共用全局助手互斥与等锁计数，与其它助手用例串行
+    let fake = Arc::new(FakeHost::new());
+    fake.grant_assistant(true);
+    let llm = AssistantLlm::new(fake.clone());
+    for (kind, reason) in [("internal", "memory_persisted=false"), ("internal", "no_completion_event"), ("busy", "")] {
+        fake.push_assistant_reply(Err(rpc_err_reason(kind, reason)));
+        let e = llm.reply("s", "u", TalkLang::Zh).unwrap_err();
+        assert_eq!(e.downcast_ref::<HostError>().unwrap().kind, kind);
+    }
+}
