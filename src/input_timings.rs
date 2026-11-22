@@ -31,8 +31,13 @@
 //! * `routes_kb`：写转写文件 + 写 routes + 知识库入队（都在上屏**之前**）。
 //! * `deliver`：剪贴板 + 上屏（不含翻译）；`translate`：翻译输入（没开则省略）。
 //! * `index`：上屏**之后**的知识库投递 + 索引（不计入 `release_to_delivered`）。
-//! * `release_to_delivered`：松键 → 上屏完成。`other` = 它减去上面各段之和（println、sanitize、
-//!   指令表预检等零碎）；**若 `other` 很大说明有没测到的环节**。
+//! * `release_to_delivered`：松键 → 上屏完成。`other` = 它减去上面各段之和（`key_to_commit` +
+//!   `asr_total` + 纠错 + 标签 + `routes_kb` + 翻译 + `deliver`；println、sanitize、没开纠错/翻译时
+//!   的空转等零碎都落在这里）；**若 `other` 很大说明有没测到的环节**。`other` 钳在 0 以下不为负。
+//!   日志行里「其他」写在算式内（总 = 各段 + 其他），`index` 单列在算式外。
+//! * `--timings` 的 `--last N`：对话一节与输入法一节**各自**取最近 N 轮（标题里写明）。
+//! * 旧格式输入法行（`mode:"input_method"`）：FU-32 之后与 `kind:"input"` 行重复，对话一节按时间戳去重，
+//!   更早的历史行保留并标「旧格式」。
 use serde::Serialize;
 use std::cell::Cell;
 use std::io::Read;
@@ -403,7 +408,9 @@ fn s(v: Option<u64>) -> String {
 }
 
 /// 日志里那一行：
-/// `⏱ 输入轮 总 X.XXs = 提交 a + ASR b（拉起 c / 解码 d）+ 纠错 e + 标签 f + 落库 g + 上屏 h | 录音 Ns | load 12.3/10核 swap 20.1/22.0G 压力 1`
+/// `⏱ 输入轮 总 X.XXs = 提交 a + ASR b（拉起 c / 解码 d）+ 纠错 e + 标签 f + 落库 g [+ 翻译] + 上屏 h + 其他 o | 索引(上屏后) i | 录音 Ns | load 12.3/10核 swap 20.1/22.0G 压力 1`
+/// 算式闭合：总 = 各串行段之和 + 其他（拉起 / 解码是 ASR 的内部拆分，不重复加）；索引在上屏之后，不在算式里。
+/// 注意 `其他 = max(0, 总 − 各段之和)`：若各段之和反而超过总（不该发生）会被钳成 0，而不是负数。
 pub fn summary_line(r: &InputRecord) -> String {
     let mut seg = format!(
         "提交 {} + ASR {}（拉起 {} / 解码 {}）+ 纠错 {} + 标签 {} + 落库 {}",
@@ -418,7 +425,7 @@ pub fn summary_line(r: &InputRecord) -> String {
     if r.translate_ms.is_some() {
         seg.push_str(&format!(" + 翻译 {}", s(r.translate_ms)));
     }
-    seg.push_str(&format!(" + 上屏 {}", s(r.deliver_ms)));
+    seg.push_str(&format!(" + 上屏 {} + 其他 {}", s(r.deliver_ms), s(r.other_ms)));
     let sys = &r.sys_start;
     let load = match (sys.load1, sys.ncpu) {
         (Some(l), Some(n)) => format!("load {l:.1}/{n}核"),
@@ -431,9 +438,8 @@ pub fn summary_line(r: &InputRecord) -> String {
     };
     let pressure = sys.pressure.map(|p| p.to_string()).unwrap_or_else(|| "—".into());
     format!(
-        "⏱ 输入轮 总 {}s = {seg} | 其他 {}s 索引(上屏后) {}s | 录音 {}s | {load} {swap} 压力 {pressure} | {}{}",
+        "⏱ 输入轮 总 {}s = {seg} | 索引(上屏后) {}s | 录音 {}s | {load} {swap} 压力 {pressure} | {}{}",
         s(r.release_to_delivered_ms),
-        s(r.other_ms),
         s(r.index_ms),
         s(r.record_ms),
         r.backend,
@@ -518,7 +524,11 @@ pub fn report(records: &[serde_json::Value], last_n: Option<usize>) -> String {
         Some(n) if n < all.len() => &all[all.len() - n..],
         _ => &all,
     };
-    let mut out = format!("\n== 输入法模式（共 {} 轮；毫秒，中位数 / p90 / 最大值；n = 有这一段数据的轮数）==\n", rs.len());
+    let scope = match last_n {
+        Some(n) => format!("--last {n}：本节（输入法）最近 {n} 轮，与对话一节各自独立计数、不分后端；"),
+        None => String::new(),
+    };
+    let mut out = format!("\n== 输入法模式（共 {} 轮；{scope}毫秒，中位数 / p90 / 最大值；n = 有这一段数据的轮数）==\n", rs.len());
     let mut by_backend: std::collections::BTreeMap<&str, Vec<&serde_json::Value>> = Default::default();
     for r in rs {
         by_backend.entry(r["backend"].as_str().unwrap_or("-")).or_default().push(r);
