@@ -855,9 +855,9 @@ fn smoke_wav() -> Result<PathBuf> {
 /// 这时安装记录还没写，`is_ready` 为假，所以绕过那道检查；转完立刻停掉这次拉起的服务。
 fn smoke(m: Qwen3Model) -> Result<()> {
     let wav = smoke_wav()?;
-    let spawned_by_us = server_pid().is_none();
+    let before = server_pid();
     let r = transcribe_on_server_inner(m, &wav, None, "", false, false);
-    stop_ephemeral_server(spawned_by_us, "安装冒烟结束");
+    stop_ephemeral_server(before, "安装冒烟结束");
     let t = r?;
     log::info!("{} 冒烟通过：{:?}", m.label(), t.text);
     Ok(())
@@ -898,10 +898,10 @@ pub fn transcribe_long_oneshot(
 ) -> Result<crate::asr::Transcript> {
     // 只收「这次临时拉起的」：调用前槽里已经有服务（常驻 / 预热 / 别的请求在用），
     // 那不是我们的，不动它（L1）。
-    let spawned_by_us = server_pid().is_none();
+    let before = server_pid();
     let r = server_transcribe(m, wav, language, context);
     if !crate::config::get().qwen3_resident {
-        stop_ephemeral_server(spawned_by_us, "一次性转写结束");
+        stop_ephemeral_server(before, "一次性转写结束");
     }
     r
 }
@@ -918,10 +918,22 @@ fn should_stop_ephemeral(spawned_by_us: bool, inflight: u32) -> bool {
 /// 一次性命令退出前由 `ServerGuard` 的 `stop_server` 统一 join。
 /// 注意「调用前槽里没有服务」到「我们拉起它」之间有一个很小的窗口，期间别处恰好
 /// 拉起同一个服务时我们会把它收掉——代价只是对方下一轮多付一次冷启动，不丢转写。
-fn stop_ephemeral_server(spawned_by_us: bool, why: &str) {
+fn stop_ephemeral_server(before: Option<i32>, why: &str) {
     let mut slot = SERVER.lock().unwrap_or_else(|e| e.into_inner());
+    stop_ephemeral_in(&mut slot, before, why);
+}
+
+/// FU-34：「是不是我们拉起的」按 **pid** 记归属——调用前槽里服务的 pid（`before`）和现在槽里的不是
+/// 同一个，就是这次请求（新拉起，或替换掉了别的模型的服务）造出来的。原来只看「调用前槽是不是空的」，
+/// 槽里本有别的模型的服务时，替换后的新服务被当成「不是我们的」，留到 600 s 空闲回收。
+fn spawned_since(before: Option<i32>, current: Option<i32>) -> bool {
+    current.is_some() && current != before
+}
+
+fn stop_ephemeral_in(slot: &mut Option<Server>, before: Option<i32>, why: &str) {
+    let current = slot.as_ref().map(|s| s.child.id() as i32);
     let inflight = slot.as_ref().map_or(0, |s| s.inflight);
-    if slot.is_some() && should_stop_ephemeral(spawned_by_us, inflight) {
+    if should_stop_ephemeral(spawned_since(before, current), inflight) {
         if let Some(mut s) = slot.take() {
             kill_server(&mut s, why);
         }
@@ -1182,6 +1194,20 @@ fn await_exit(s: &mut Server) {
 
 /// 确保有一个加载着 `m` 的常驻服务在跑，返回端口。
 ///
+/// FU-33：安装冒烟（`require_ready == false`）遇到「槽里是别的模型、而且还有请求在跑」时的信号：
+/// 冒烟不许把用户正在听写的服务杀掉，由调用方等它跑完再重试。
+#[derive(Debug)]
+struct ServerBusy;
+impl std::fmt::Display for ServerBusy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "槽里是别的模型的服务且还有请求在用")
+    }
+}
+impl std::error::Error for ServerBusy {}
+
+/// 冒烟等别的模型的在跑请求结束的上限。
+const SMOKE_BUSY_WAIT: Duration = Duration::from_secs(150);
+
 /// 已有服务但**模型不同**：先停掉旧的再起新的——两个模型同时在一个进程里
 /// 实测占 3.1 GiB，「换模型」不该让内存叠加。
 /// 返回 `(端口, 服务 pid)`。pid 用来认「回来时还是不是同一个服务」——端口会被系统复用，pid 在
@@ -1195,6 +1221,11 @@ fn ensure_server_locked(slot: &mut Option<Server>, m: Qwen3Model, require_ready:
             s.last_used = Instant::now();
             s.inflight += 1;
             return Ok((s.port, s.child.id()));
+        }
+        if alive && !require_ready && s.inflight > 0 {
+            // FU-33：只有安装冒烟走这里。别人（听写）在用的不同模型服务，冒烟不杀；
+            // 反方向（听写换模型）仍不看 inflight，见下。
+            return Err(ServerBusy.into());
         }
         if alive {
             // 不看 inflight：用户刚在设置里换了模型，旧模型上还没跑完的那个请求失败后会退回逐次调用
@@ -1294,9 +1325,18 @@ fn transcribe_on_server_inner(
     rewarm: bool,
     require_ready: bool,
 ) -> Result<crate::asr::Transcript> {
-    let (port, server) = {
-        let mut slot = SERVER.lock().unwrap_or_else(|e| e.into_inner());
-        ensure_server_locked(&mut slot, m, require_ready)?
+    let deadline = Instant::now() + SMOKE_BUSY_WAIT;
+    let (port, server) = loop {
+        let r = {
+            let mut slot = SERVER.lock().unwrap_or_else(|e| e.into_inner());
+            ensure_server_locked(&mut slot, m, require_ready)
+        };
+        match r {
+            Err(e) if e.is::<ServerBusy>() && Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(300));
+            }
+            other => break other?,
+        }
     };
     let mut cmd = Command::new("/usr/bin/curl");
     let max_time = request_timeout_secs(wav_secs(wav));
@@ -1652,6 +1692,44 @@ pub fn probe_runtime_contract() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn fake_server(model: Qwen3Model, inflight: u32) -> Server {
+        let child = Command::new("/bin/sleep").arg("30").stdin(Stdio::null()).spawn().expect("sleep");
+        Server { child, port: 1, model, last_used: Instant::now(), inflight }
+    }
+
+    /// FU-33：冒烟（require_ready=false）遇到别的模型、还有请求在跑的服务，不许杀，报 ServerBusy。
+    #[test]
+    fn smoke_does_not_kill_an_inflight_server_of_another_model() {
+        let mut slot = Some(fake_server(Qwen3Model::ALL[0], 1));
+        let other = *Qwen3Model::ALL.iter().find(|m| **m != Qwen3Model::ALL[0]).expect("至少两档");
+        let err = ensure_server_locked(&mut slot, other, false).unwrap_err();
+        assert!(err.is::<ServerBusy>(), "应报 ServerBusy：{err:#}");
+        let s = slot.as_mut().expect("在跑的服务必须还在槽里");
+        assert!(matches!(s.child.try_wait(), Ok(None)), "进程不能被杀");
+        let _ = s.child.kill();
+        let _ = s.child.wait();
+    }
+
+    /// FU-34：槽里本有别的服务（before = 旧 pid），请求替换成新服务后，新服务算「我们拉起的」。
+    #[test]
+    fn replacement_of_another_server_counts_as_spawned_by_us() {
+        let sv = fake_server(Qwen3Model::ALL[0], 0);
+        let new_pid = sv.child.id() as i32;
+        assert!(spawned_since(Some(new_pid + 1), Some(new_pid)), "pid 变了 = 我们造的");
+        assert!(spawned_since(None, Some(new_pid)), "原来没有 = 我们造的");
+        assert!(!spawned_since(Some(new_pid), Some(new_pid)), "还是原来那个 = 不是我们的");
+        let mut slot = Some(sv);
+        stop_ephemeral_in(&mut slot, Some(new_pid + 1), "test");
+        assert!(slot.is_none(), "替换出来的临时服务要被收掉");
+        let mut keep = Some(fake_server(Qwen3Model::ALL[0], 0));
+        let pid = keep.as_ref().unwrap().child.id() as i32;
+        stop_ephemeral_in(&mut keep, Some(pid), "test");
+        assert!(keep.is_some(), "原来就在槽里的不动");
+        let mut k = keep.take().unwrap();
+        let _ = k.child.kill();
+        let _ = k.child.wait();
+    }
 
     /// 真实 v0.0.28 `--help` 的节选（2026-11-10 在 runtime 里实跑取得）：全部具备 = 无缺口。
     const HELP_SRV: &str = "USAGE: speech-server [--host <host>] [--port <port>] [--preload]\n";
