@@ -439,8 +439,23 @@ pub const REPORT_FIELDS: &[&str] = &[
 /// 只报这三个数——仓库规矩：**不报一个好看的区间**。
 pub fn report(records: &[serde_json::Value], last_n: Option<usize>) -> String {
     // 输入法模式的 `"kind":"input"` 行有自己的一节（`input_timings::report`），这里跳过。
-    let records: Vec<serde_json::Value> =
-        records.iter().filter(|r| r["kind"] != crate::input_timings::KIND).cloned().collect();
+    // 旧格式的输入法行（`mode:"input_method"`、无 `kind`）：FU-32 之后每个输入法轮会同时写它和
+    // `kind:"input"` 行，按时间戳去重——不早于最早一条 `kind:"input"` 的旧格式行视为重复，丢掉；
+    // 更早的（FU-32 之前的历史）保留并在分组里标「旧格式」，别让老数据凭空消失。
+    let first_input_ts = records
+        .iter()
+        .filter(|r| r["kind"] == crate::input_timings::KIND)
+        .filter_map(|r| r["ts_ms"].as_u64())
+        .min();
+    let records: Vec<serde_json::Value> = records
+        .iter()
+        .filter(|r| r["kind"] != crate::input_timings::KIND)
+        .filter(|r| {
+            !(r["mode"] == "input_method"
+                && matches!((first_input_ts, r["ts_ms"].as_u64()), (Some(f), Some(t)) if t >= f))
+        })
+        .cloned()
+        .collect();
     let rs: Vec<&serde_json::Value> = match last_n {
         Some(n) if n < records.len() => records[records.len() - n..].iter().collect(),
         _ => records.iter().collect(),
@@ -450,9 +465,14 @@ pub fn report(records: &[serde_json::Value], last_n: Option<usize>) -> String {
         let via = r["llm_via"].as_str().unwrap_or("-");
         let model = r["model"].as_str().unwrap_or("-");
         let mode = r["mode"].as_str().unwrap_or("-");
-        groups.entry(format!("{mode} · {via} · {model}")).or_default().push(r);
+        let legacy = if mode == "input_method" { "（旧格式，仅 ASR 与总时长；新数据见「输入法模式」一节）" } else { "" };
+        groups.entry(format!("{mode}{legacy} · {via} · {model}")).or_default().push(r);
     }
-    let mut out = format!("共 {} 轮（中位数 / p90 / 最大值，毫秒；n = 有这一段数据的轮数）\n", rs.len());
+    let scope = match last_n {
+        Some(n) => format!("--last {n}：本节（对话）最近 {n} 轮，与「输入法模式」一节各自独立计数；"),
+        None => String::new(),
+    };
+    let mut out = format!("共 {} 轮（{scope}中位数 / p90 / 最大值，毫秒；n = 有这一段数据的轮数）\n", rs.len());
     for (k, g) in groups {
         out.push_str(&format!("\n[{k}] {} 轮\n", g.len()));
         for f in REPORT_FIELDS {
@@ -629,5 +649,25 @@ mod tests {
         assert!(r.contains("to_first_audio_ms     2000 /    4000 /    4000   n=2"), "{r}");
         let last1 = report(&recs, Some(1));
         assert!(last1.starts_with("共 1 轮"), "{last1}");
+        assert!(last1.lines().next().unwrap().contains("--last 1"), "标题要说明 --last 的范围：{last1}");
+        assert!(!report(&recs, None).lines().next().unwrap().contains("--last"));
+    }
+
+    /// FU-32 之后输入法轮会写两行（旧格式 + kind:"input"），对话一节不能再把它算一遍。
+    #[test]
+    fn legacy_input_rows_are_deduped_against_new_kind_rows() {
+        let recs: Vec<serde_json::Value> = vec![
+            serde_json::json!({"ts_ms":1,"mode":"input_method","asr_ms":10}), // FU-32 之前的历史
+            serde_json::json!({"ts_ms":100,"kind":"input","backend":"builtin"}),
+            serde_json::json!({"ts_ms":105,"mode":"input_method","asr_ms":10}), // 与上一行同一轮
+            serde_json::json!({"ts_ms":200,"mode":"conversation","total_ms":5}),
+        ];
+        let r = report(&recs, None);
+        assert!(r.starts_with("共 2 轮"), "重复的旧格式行没去掉：{r}");
+        assert!(r.contains("input_method（旧格式"), "历史旧格式行要保留并标明：{r}");
+        assert!(r.contains("[conversation · - · -] 1 轮"), "{r}");
+        // 没有任何 kind:"input" 行（老安装）：旧格式行全部保留。
+        let old_only = report(&recs[..1], None);
+        assert!(old_only.starts_with("共 1 轮"), "{old_only}");
     }
 }

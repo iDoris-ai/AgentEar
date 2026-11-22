@@ -110,6 +110,8 @@ fn bucket_boundaries() {
 fn summary_line_matches_documented_format() {
     let line = summary_line(&full_record());
     assert!(line.starts_with("⏱ 输入轮 总 6.50s = 提交 0.04 + ASR 6.30（拉起 0.90 / 解码 5.40）+ 纠错 0.01 + 标签 0.01 + 落库 0.02 + 上屏 0.06"), "{line}");
+    // 口径：总 = 各段之和 + 其他（算式闭合）；索引在上屏之后，单列、不在算式里。
+    assert!(line.contains("+ 上屏 0.06 + 其他 0.07 | 索引(上屏后) 0.03s | 录音"), "{line}");
     assert!(line.contains("| 录音 20.00s | load 12.3/10核 swap 20.1/22.0G 压力 1"), "{line}");
 }
 
@@ -240,4 +242,12 @@ fn run_probed_captures_output_and_first_byte() {
     let out = run_probed(Command::new("/bin/sh").arg("-c").arg("exit 3")).unwrap();
     assert_eq!(out.status.code(), Some(3));
     assert_eq!(take_probe().unwrap().first_byte_ms, None, "没输出 = 省略");
+}
+
+#[test]
+fn report_header_states_last_n_scope() {
+    let recs: Vec<Value> = (0..3).map(|i| rec(1000, 1.0, 1, i)).collect();
+    let out = report(&recs, Some(2));
+    assert!(out.contains("共 2 轮") && out.contains("--last 2"), "{out}");
+    assert!(!report(&recs, None).contains("--last"));
 }
