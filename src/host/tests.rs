@@ -1333,6 +1333,7 @@ fn granted_assistant_replaces_model_complete() {
 /// 语言按本轮语种传，三种都对。
 #[test]
 fn assistant_lang_follows_the_turn() {
+    let _g = global_lock(); // 共用全局助手互斥与等锁计数，与其它助手用例串行
     let fake = Arc::new(FakeHost::new());
     fake.grant_assistant(true);
     let llm = AssistantLlm::new(fake.clone());
@@ -1416,6 +1417,7 @@ fn ungranted_fake_assistant_is_forbidden() {
 /// invalid 归 internal 但保留 wire_kind；都不被当成成功。
 #[test]
 fn assistant_error_codes_map_through() {
+    let _g = global_lock(); // 共用全局助手互斥与等锁计数，与其它助手用例串行
     let fake = Arc::new(FakeHost::new());
     fake.grant_assistant(true);
     let llm = AssistantLlm::new(fake.clone());
@@ -1443,6 +1445,7 @@ fn assistant_error_codes_map_through() {
 /// awaiting_approval 不是失败：念固定提示（按语种），正常朗读。
 #[test]
 fn awaiting_approval_speaks_the_fixed_hint() {
+    let _g = global_lock(); // 共用全局助手互斥与等锁计数，与其它助手用例串行
     let fake = Arc::new(FakeHost::new());
     fake.grant_assistant(true);
     let llm = AssistantLlm::new(fake.clone());
@@ -1458,6 +1461,7 @@ fn awaiting_approval_speaks_the_fixed_hint() {
 /// 超 4000 字节：在字符边界截断后发送（不报错）；4000 以内原样。
 #[test]
 fn oversized_text_is_clamped_at_a_char_boundary() {
+    let _g = global_lock(); // 共用全局助手互斥与等锁计数，与其它助手用例串行
     assert_eq!(clamp_assistant_text("abc"), ("abc", false));
     let exact = "a".repeat(4000);
     assert_eq!(clamp_assistant_text(&exact), (exact.as_str(), false));
@@ -1511,6 +1515,15 @@ fn rpc_err_reason(kind: &str, reason: &str) -> HostError {
     }))
 }
 
+/// 轮询条件成立（最多 10 秒），不靠固定 sleep 排时序。
+fn wait_until(cond: impl Fn() -> bool) {
+    let t0 = Instant::now();
+    while !cond() {
+        assert!(t0.elapsed() < Duration::from_secs(10), "等待条件超时");
+        std::thread::sleep(Duration::from_millis(2));
+    }
+}
+
 /// W-1：真并发调用，宿主侧同一时刻最多 1 个在途。
 #[test]
 fn concurrent_assistant_calls_are_serialized() {
@@ -1538,14 +1551,16 @@ fn assistant_rechecks_attachment_after_taking_the_gate() {
     let _g = global_lock();
     let fake = Arc::new(FakeHost::new());
     fake.grant_assistant(true);
-    fake.assistant_delay_ms.store(300, Ordering::SeqCst);
+    fake.assistant_delay_ms.store(1500, Ordering::SeqCst);
     let f1 = fake.clone();
     let first = std::thread::spawn(move || AssistantLlm::new(f1).reply("s", "第一个", TalkLang::Zh));
-    std::thread::sleep(Duration::from_millis(80));
+    // 等到「第一个已进入宿主」（持着锁）再起第二个
+    wait_until(|| fake.assistant_inflight.load(Ordering::SeqCst) == 1);
     let f2 = fake.clone();
     let second = std::thread::spawn(move || AssistantLlm::new(f2).reply("s", "第二个", TalkLang::Zh));
-    std::thread::sleep(Duration::from_millis(80));
-    fake.set_attached(false); // 第二个还在等锁
+    // 等到「第二个已在等锁」再断开
+    wait_until(|| assistant_waiters() == 1);
+    fake.set_attached(false);
     assert!(first.join().unwrap().is_ok());
     let e = second.join().unwrap().unwrap_err();
     assert_eq!(e.downcast_ref::<HostError>().unwrap().kind, "unavailable");
@@ -1632,6 +1647,7 @@ fn llm_via_reports_the_assistant() {
 /// 别的 reason 仍是失败。
 #[test]
 fn awaiting_approval_as_unavailable_reason_is_recognised() {
+    let _g = global_lock(); // 共用全局助手互斥与等锁计数，与其它助手用例串行
     let fake = Arc::new(FakeHost::new());
     fake.grant_assistant(true);
     let llm = AssistantLlm::new(fake.clone());
@@ -1651,6 +1667,7 @@ fn awaiting_approval_as_unavailable_reason_is_recognised() {
 /// 当失败，不念；busy 也是失败。
 #[test]
 fn internal_and_busy_are_failures_and_nothing_is_spoken() {
+    let _g = global_lock(); // 共用全局助手互斥与等锁计数，与其它助手用例串行
     let fake = Arc::new(FakeHost::new());
     fake.grant_assistant(true);
     let llm = AssistantLlm::new(fake.clone());

@@ -501,7 +501,7 @@ pub struct FakeHost {
     pub assistant_script: Mutex<VecDeque<std::result::Result<AssistantReply, HostError>>>,
     /// 助手调用在宿主侧停留多久（测并发互斥）。
     pub assistant_delay_ms: AtomicU64,
-    assistant_inflight: AtomicU64,
+    pub(crate) assistant_inflight: AtomicU64,
     /// 宿主侧观察到的同时在途助手调用数的峰值。
     pub assistant_max_inflight: AtomicU64,
     responder: Box<dyn Fn(&ModelRequest) -> ModelReply + Send + Sync>,
@@ -783,8 +783,8 @@ pub fn new_conversation_id() -> String {
     s
 }
 
-/// 当前这次对话的 id（没有就懒生成）。同一次对话（进入对话模式 / 附着建立起，到切回输入法 /
-/// 断开为止）内每轮返回同一个值，宿主据此把多轮放进同一个 Agent24 会话。
+/// 当前这次附着的 id（没有就懒生成）。附着建立起到断开为止，每轮返回同一个值
+/// （**不随模式切换变**），宿主据此把多轮放进同一个 Agent24 会话。
 pub fn conversation_id() -> String {
     CONVERSATION
         .lock()
@@ -794,7 +794,7 @@ pub fn conversation_id() -> String {
 }
 
 /// 结束当前对话：下一次取 [`conversation_id`] 会得到新的。
-/// 附着 / 断开、切进或切出对话模式时调用。
+/// **只在 `attach` / `detach` 时调用**（双击热键每次都翻转模式，按模式换会让每轮都是新会话）。
 pub fn reset_conversation() {
     *CONVERSATION.lock().unwrap_or_else(|p| p.into_inner()) = None;
 }
@@ -806,8 +806,9 @@ pub fn reset_conversation() {
 /// 非流式（`streams()` 为 false → 调用方走整句路径）。
 pub struct AssistantLlm {
     link: Arc<dyn HostLink>,
-    /// 这一轮开始时捕获的 conversation_id：引擎每轮由 `Engines::from_config` 新建，
-    /// 所以等待期间 id 被重置（断开 / 重新附着）也不影响本轮请求。
+    /// 在 `AssistantLlm::new` 里读定的 conversation_id：引擎每轮在等边车之后由
+    /// `Engines::from_config` 新建，所以这一轮请求用的是构造时的值；由于不再随模式切换，
+    /// 同一次附着期间它不会变，只有断开 / 重新附着才换。
     conversation_id: String,
 }
 
@@ -820,6 +821,13 @@ impl AssistantLlm {
 /// 同一模块同时最多 1 个助手调用（约定 v1；多于 1 个宿主回 `busy`）。
 /// 在 [`AssistantLlm::reply`] 里拿锁，**拿到锁后重查附着与授权**再发。
 static ASSISTANT_GATE: Mutex<()> = Mutex::new(());
+/// 正在等 [`ASSISTANT_GATE`] 的调用数（测试用来确定性地知道「第二个已在等锁」）。
+static ASSISTANT_WAITERS: AtomicU64 = AtomicU64::new(0);
+
+#[cfg(test)]
+pub(crate) fn assistant_waiters() -> u64 {
+    ASSISTANT_WAITERS.load(Ordering::SeqCst)
+}
 
 impl LlmEngine for AssistantLlm {
     fn name(&self) -> &'static str {
@@ -844,7 +852,9 @@ impl LlmEngine for AssistantLlm {
             conversation_id: self.conversation_id.clone(),
         };
         let result = {
+            ASSISTANT_WAITERS.fetch_add(1, Ordering::SeqCst);
             let _gate = ASSISTANT_GATE.lock().unwrap_or_else(|p| p.into_inner());
+            ASSISTANT_WAITERS.fetch_sub(1, Ordering::SeqCst);
             // 等锁期间连接可能断了、授权可能没了：检查要放在拿锁之后。
             if !self.link.attached() {
                 Err(HostError::new("unavailable", "等待助手调用期间与 Agent24 的连接已断开", true))

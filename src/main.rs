@@ -4294,7 +4294,9 @@ mod host_wiring_tests {
 
 /// B-1：双击热键每次都翻转模式，但助手 conversation_id 只在附着 / 断开时换，
 /// 不随模式切换换。
-#[cfg(test)]
+// MAS（`app-store` 功能）没有对话模式：`mas::apply_limits` 强制 talk_mode=InputMethod，
+// 依赖对话模式的这个模块整体不在该构建下编译。
+#[cfg(all(test, not(feature = "app-store")))]
 mod conversation_id_lifecycle_tests {
     use super::*;
     use std::sync::Arc;

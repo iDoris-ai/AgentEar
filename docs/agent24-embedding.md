@@ -129,7 +129,7 @@ P1 可由两边并行开发，但只能用 fake host/module 和暂定 fixtures�
 | `lang` | `zh-CN` / `en-US` / `th-TH`，随本轮语种 |
 | `conversation_id` | `conv-` + 24 位随机十六进制（29 字符，合 `[A-Za-z0-9_-]{1,64}`），不含用户内容 |
 
-`conversation_id` 的生命周期（`host::conversation_id` / `reset_conversation`）：**同一次附着期间稳定**；只在附着建立 / 断开时换新（`host::attach` / `detach`）。**不随模式切换换**：双击热键每次激活都会翻转模式，若按模式换，每轮都是新会话。id 在本轮开始（`Engines::from_config` 构造 `AssistantLlm`）时捕获，等待期间被重置也不影响本轮。
+`conversation_id` 的生命周期（`host::conversation_id` / `reset_conversation`）：**同一次附着期间稳定**；只在附着建立 / 断开时换新（`host::attach` / `detach`）。**不随模式切换换**：双击热键每次激活都会翻转模式，若按模式换，每轮都是新会话。id 在 `AssistantLlm::new` 里读定（每轮等边车之后由 `Engines::from_config` 新建引擎时），这一轮请求用构造时的值；由于不随模式切换，同一次附着期间它不会变。
 
 **返回**：非流式 `{text, session_id, run_id, request_id}`，`text` 纯文本（约定 ≤8000 字节），由 AgentEar 的 TTS 朗读；宿主不会再用 `speak` 重复播报。字段缺失（`text`/`session_id`/`run_id`）一律报错；`request_id` 我们没发，不要求回传。超时 90 秒（`ASSISTANT_TIMEOUT`）；每个模块同时最多 1 个调用：AgentEar 侧用全局互斥强制（`AssistantLlm::reply` 持锁调用，**拿到锁后**再重查附着与授权才发帧）；宿主对并发多于 1 个返回 `busy`，正常情况不会发生，仍按失败处理。调用被 abort / 连接断开时宿主会取消对应 run。
 
