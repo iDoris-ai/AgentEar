@@ -26,7 +26,7 @@
 //! * `asr_total`：`asr.transcribe()` 调用前后。
 //! * `asr_spawn_to_first_byte`：**仅内置引擎（SenseVoice / whisper 泰语）有**——从调 `spawn()`
 //!   起到子进程第一次往 stdout / stderr 写出任何字节。它覆盖「fork+exec + 加载模型到第一行日志」，
-//!   机器忙、内存紧时这一段会变长。Qwen3（常驻 / 逐次 CLI）走的是别的路径，**这里拿不到，省略**，
+//!   机器忙、内存紧时这一段会变长。Qwen3（常驻 / 一次性补丁版服务）走的是别的路径，**这里拿不到，省略**，
 //!   只有 `asr_total`。`asr_decode = asr_total − asr_spawn_to_first_byte`（只在前者存在时算）。
 //! * `routes_kb`：写转写文件 + 写 routes + 知识库入队（都在上屏**之前**）。
 //! * `deliver`：剪贴板 + 上屏（不含翻译）；`translate`：翻译输入（没开则省略）。
@@ -197,7 +197,7 @@ pub fn take_probe() -> Option<AsrProbe> {
     PROBE.with(|p| p.take())
 }
 
-/// 引擎在这一轮发生了后端退回（如 Qwen3 常驻服务失败 → 逐次 CLI）时调。
+/// 引擎在这一轮发生了后端退回（如 Qwen3 转写失败 → 退回 SenseVoice / 泰语 whisper）时调。
 pub fn note_fallback() {
     FALLBACK.with(|f| f.set(true));
 }

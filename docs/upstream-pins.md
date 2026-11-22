@@ -60,11 +60,10 @@
 ## 2. 版本握手 / 能力探测
 
 - **Qwen3 运行时**（本任务新增）：`SpeechSwiftEngine::preflight` 在「安装记录对得上」之后，
-  还会真跑 `speech --help` / `speech transcribe --help` / `speech-server --help`
-  （套断网沙箱），要求 `transcribe` 子命令与 `--engine --model --language --context`
-  `--host --port` 都在（`qwen3::probe_runtime_contract`）。缺任何一个就**拒绝使用**，
+  还会真跑 `speech-server --help`（套断网沙箱），要求 `--host --port` 都在
+  （`qwen3::probe_runtime_contract`；FU-36 起不再探官方 `speech` / `speech transcribe`，
+  转写一律走 speech-server）。缺任何一个就**拒绝使用**，
   报错里写明缺什么和怎么修。成功后本进程内缓存；失败不缓存。
-  `required_flags_cover_what_transcribe_passes` 测试防止「代码开始传新参数而探测表没跟上」。
 - **PATH 上的老 `speech`（brew）**：原本就有同样的探测，未改。
 - 没做：输出格式（`Result:` 行）由 `parse_speech_output` 的单测与运行期报错兜底；
   speech-server 没有版本接口，所以不做运行期版本比对——版本由安装记录 + sha 决定。

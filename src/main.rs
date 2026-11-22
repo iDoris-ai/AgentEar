@@ -448,9 +448,9 @@ fn main() -> Result<()> {
         let saved = config::get();
         let combos: Vec<(&str, engine::AsrBackend, qwen3::Qwen3Model, bool)> = vec![
             ("sensevoice", engine::AsrBackend::Builtin, qwen3::Qwen3Model::Small, false),
-            ("qwen3-0.6b-cli", engine::AsrBackend::SpeechSwift, qwen3::Qwen3Model::Small, false),
+            ("qwen3-0.6b-oneshot", engine::AsrBackend::SpeechSwift, qwen3::Qwen3Model::Small, false),
             ("qwen3-0.6b-resident", engine::AsrBackend::SpeechSwift, qwen3::Qwen3Model::Small, true),
-            ("qwen3-1.7b-cli", engine::AsrBackend::SpeechSwift, qwen3::Qwen3Model::Large, false),
+            ("qwen3-1.7b-oneshot", engine::AsrBackend::SpeechSwift, qwen3::Qwen3Model::Large, false),
             ("qwen3-1.7b-resident", engine::AsrBackend::SpeechSwift, qwen3::Qwen3Model::Large, true),
         ];
         println!("combo\trun\tsecs\tchild_maxrss_mb\tserver_footprint_mb\ttext");
@@ -477,7 +477,15 @@ fn main() -> Result<()> {
                 for run in 1..=runs {
                     let t0 = Instant::now();
                     let wav = &wavs[(run - 1) % wavs.len()];
+                    input_timings::begin_asr();
                     let t = asr.transcribe(std::path::Path::new(wav), asr::AsrLang::Auto)?;
+                    // FU-36：Dispatch 在 Qwen3 失败时会静默退回 SenseVoice，那一行的数字就不是
+                    // 这个 combo 的了。如实标注为失败、不把 SenseVoice 的数字记在 Qwen3 名下。
+                    if backend == engine::AsrBackend::SpeechSwift && input_timings::take_fallback() {
+                        println!("{name}\t{run}\tFAILED\t-\t-\tQwen3 转写失败，Dispatch 已退回 SenseVoice，本 combo 无有效数据（原因见日志）");
+                        eprintln!("{name} 第 {run} 轮 Qwen3 失败（已退回 SenseVoice），跳过该 combo 余下轮次");
+                        break;
+                    }
                     let secs = t0.elapsed().as_secs_f64();
                     // 逐次调用的峰值：子进程的 ru_maxrss（macOS 单位是字节）。
                     // 它是「所有已回收子进程里最大的那个」，所以 combo 按内存从小到大排。

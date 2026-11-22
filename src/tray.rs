@@ -320,6 +320,19 @@ pub fn set_host_disconnected(on: bool) {
     HOST_DISCONNECTED.store(on, Ordering::Relaxed);
 }
 
+/// Qwen3 转写失败、这一轮退回了内置引擎（FU-36）。菜单栏显示 ⚠，Qwen3 下一次成功后熄灭。
+/// 只存原子量，标题由主线程 0.5s 定时器统一刷新（与 `PENDING` 同一套路，不引入通知权限）。
+static ASR_FALLBACK: AtomicBool = AtomicBool::new(false);
+
+pub fn set_asr_fallback(on: bool) {
+    ASR_FALLBACK.store(on, Ordering::Relaxed);
+}
+
+#[cfg(test)]
+pub fn asr_fallback_active() -> bool {
+    ASR_FALLBACK.load(Ordering::Relaxed)
+}
+
 fn title(lang: Lang) -> String {
     let base = match STATUS.load(Ordering::Relaxed) {
         1 => format!("● {}s", SECS.load(Ordering::Relaxed)),
@@ -348,6 +361,11 @@ fn title(lang: Lang) -> String {
     // 比模式标记更要紧，所以放在模式标记之后、待确认标记之前。
     let base = if HOST_DISCONNECTED.load(Ordering::Relaxed) {
         format!("{base}🔌")
+    } else {
+        base
+    };
+    let base = if ASR_FALLBACK.load(Ordering::Relaxed) {
+        format!("{base}⚠")
     } else {
         base
     };
