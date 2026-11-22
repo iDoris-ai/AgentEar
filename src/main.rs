@@ -2556,8 +2556,6 @@ fn set_mode(mode: config::TalkMode) {
         },
         mode.as_str()
     );
-    // 进出对话模式都换一个新的助手 conversation_id（同一次对话内才复用）。
-    host::reset_conversation();
     match mode {
         config::TalkMode::InputMethod => {
             if talk::stop_playback() {
@@ -4291,5 +4289,64 @@ mod host_wiring_tests {
         let other = a(&["agentear", "--match-command", "x"]);
         assert!(!reconciles_asr_backend(&other));
         assert!(!needs_asr_preflight(&a(&["agentear", "--diagnose"])));
+    }
+}
+
+/// B-1：双击热键每次都翻转模式，但助手 conversation_id 只在附着 / 断开时换，
+/// 不随模式切换换。
+#[cfg(test)]
+mod conversation_id_lifecycle_tests {
+    use super::*;
+    use std::sync::Arc;
+
+    /// 照 `main` 循环里那段派发（`hotkey::intent` → `set_mode`）执行一个手势。
+    fn press(signal: hotkey::Signal, recording: &mut bool) {
+        match hotkey::intent(signal, *recording) {
+            hotkey::Intent::SwitchToConversation => set_mode(config::TalkMode::Conversation),
+            hotkey::Intent::End => *recording = false,
+            hotkey::Intent::Begin { set_conversation } => {
+                *recording = true;
+                if let Some(c) = set_conversation {
+                    set_mode(if c { config::TalkMode::Conversation } else { config::TalkMode::InputMethod });
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn mode_flips_from_double_taps_keep_the_conversation_id() {
+        let _g = host::test_guard();
+        let fake = Arc::new(host::FakeHost::new());
+        fake.grant_assistant(true);
+        host::attach(fake.clone());
+        let id = host::conversation_id();
+        config::update(|c| c.talk_mode = config::TalkMode::InputMethod);
+        let double = hotkey::Signal::Tap(hotkey::TapKind::Double);
+        let single = hotkey::Signal::Tap(hotkey::TapKind::Single);
+        let mut rec = false;
+        // 双击进对话：第一下是单击（切输入法、开始录），第二下在录音中 → 切对话。
+        press(single, &mut rec);
+        assert_eq!(config::get().talk_mode, config::TalkMode::InputMethod);
+        press(double, &mut rec);
+        assert_eq!(config::get().talk_mode, config::TalkMode::Conversation);
+        assert_eq!(host::conversation_id(), id, "第一次双击后 id 不变");
+        press(single, &mut rec); // 结束这一段
+        // 再来一次双击
+        press(single, &mut rec);
+        assert_eq!(config::get().talk_mode, config::TalkMode::InputMethod, "第一下又把模式切回输入法");
+        press(double, &mut rec);
+        assert_eq!(config::get().talk_mode, config::TalkMode::Conversation);
+        assert_eq!(host::conversation_id(), id, "连续两次双击 id 仍不变");
+        // 单次 Begin{双击, 未录音} 也不换
+        press(single, &mut rec);
+        press(double, &mut rec);
+        assert_eq!(host::conversation_id(), id);
+        // 断开 / 重新附着才换
+        host::detach(&config::get());
+        assert_ne!(host::conversation_id(), id, "断开后换新");
+        let id2 = host::conversation_id();
+        host::attach(fake);
+        assert_ne!(host::conversation_id(), id2, "重新附着换新");
+        host::detach(&config::get());
     }
 }

@@ -314,6 +314,8 @@ pub struct HostError {
     /// `awaiting_approval` / `invalid`）。`kind` 已被归一成 `internal`，调用方要区分
     /// 它们就看这里。
     pub wire_kind: Option<String>,
+    /// 宿主 `data.reason`（Agent24 助手接口的 `unavailable` 用它带 `awaiting_approval` 等）。
+    pub reason: Option<String>,
 }
 
 impl HostError {
@@ -331,6 +333,7 @@ impl HostError {
             retryable,
             cause: None,
             wire_kind: None,
+            reason: None,
         }
     }
 
@@ -343,6 +346,7 @@ impl HostError {
             v["data"]["retryable"].as_bool().unwrap_or(false),
         );
         e.cause = v["data"]["cause"].as_str().map(str::to_string);
+        e.reason = v["data"]["reason"].as_str().map(str::to_string);
         if e.kind != kind {
             e.wire_kind = Some(kind.to_string());
         }
@@ -495,6 +499,11 @@ pub struct FakeHost {
     pub assistant_requests: Mutex<Vec<Value>>,
     /// 预排的助手结果；排空后回显。
     pub assistant_script: Mutex<VecDeque<std::result::Result<AssistantReply, HostError>>>,
+    /// 助手调用在宿主侧停留多久（测并发互斥）。
+    pub assistant_delay_ms: AtomicU64,
+    assistant_inflight: AtomicU64,
+    /// 宿主侧观察到的同时在途助手调用数的峰值。
+    pub assistant_max_inflight: AtomicU64,
     responder: Box<dyn Fn(&ModelRequest) -> ModelReply + Send + Sync>,
 }
 
@@ -519,6 +528,9 @@ impl FakeHost {
             assistant_granted: AtomicBool::new(false),
             assistant_requests: Mutex::new(Vec::new()),
             assistant_script: Mutex::new(VecDeque::new()),
+            assistant_delay_ms: AtomicU64::new(0),
+            assistant_inflight: AtomicU64::new(0),
+            assistant_max_inflight: AtomicU64::new(0),
             responder: Box::new(|req| ModelReply {
                 text: format!(
                     "（假宿主）收到：{}",
@@ -619,6 +631,13 @@ impl HostLink for FakeHost {
         if !self.attached() {
             return Err(HostError::new("unavailable", "假宿主已断开", true));
         }
+        let now = self.assistant_inflight.fetch_add(1, Ordering::SeqCst) + 1;
+        self.assistant_max_inflight.fetch_max(now, Ordering::SeqCst);
+        let delay = self.assistant_delay_ms.load(Ordering::SeqCst);
+        if delay > 0 {
+            std::thread::sleep(Duration::from_millis(delay));
+        }
+        self.assistant_inflight.fetch_sub(1, Ordering::SeqCst);
         if let Some(r) = self.assistant_script.lock().unwrap_or_else(|p| p.into_inner()).pop_front() {
             return r;
         }
@@ -725,10 +744,13 @@ pub fn parse_assistant_result(v: &Value) -> std::result::Result<AssistantReply, 
     })
 }
 
-/// 助手回调的 wire kind：`awaiting_approval` 不在 [`HOST_ERROR_KINDS`] 里，
-/// 由 [`HostError::wire_kind`] 保留。
+/// 等待桌面审批，两种形式都认：
+/// - Agent24 最终实现（#1982）：`unavailable` + `data.reason = "awaiting_approval"`；
+/// - 约定 v1 初稿：wire kind 就是 `awaiting_approval`（不在 [`HOST_ERROR_KINDS`] 里，
+///   由 [`HostError::wire_kind`] 保留）。
 pub fn is_awaiting_approval(e: &HostError) -> bool {
     e.wire_kind.as_deref() == Some("awaiting_approval")
+        || (e.kind == "unavailable" && e.reason.as_deref() == Some("awaiting_approval"))
 }
 
 /// 助手要用户去 Agent24 桌面端审批时念的那一句（中/英/泰）。
@@ -784,13 +806,20 @@ pub fn reset_conversation() {
 /// 非流式（`streams()` 为 false → 调用方走整句路径）。
 pub struct AssistantLlm {
     link: Arc<dyn HostLink>,
+    /// 这一轮开始时捕获的 conversation_id：引擎每轮由 `Engines::from_config` 新建，
+    /// 所以等待期间 id 被重置（断开 / 重新附着）也不影响本轮请求。
+    conversation_id: String,
 }
 
 impl AssistantLlm {
     pub fn new(link: Arc<dyn HostLink>) -> Self {
-        Self { link }
+        Self { link, conversation_id: conversation_id() }
     }
 }
+
+/// 同一模块同时最多 1 个助手调用（约定 v1；多于 1 个宿主回 `busy`）。
+/// 在 [`AssistantLlm::reply`] 里拿锁，**拿到锁后重查附着与授权**再发。
+static ASSISTANT_GATE: Mutex<()> = Mutex::new(());
 
 impl LlmEngine for AssistantLlm {
     fn name(&self) -> &'static str {
@@ -812,9 +841,20 @@ impl LlmEngine for AssistantLlm {
         let req = AssistantRequest {
             text: text.to_string(),
             lang: talk_lang_bcp47(lang),
-            conversation_id: conversation_id(),
+            conversation_id: self.conversation_id.clone(),
         };
-        match self.link.assistant_chat(&req, ASSISTANT_TIMEOUT) {
+        let result = {
+            let _gate = ASSISTANT_GATE.lock().unwrap_or_else(|p| p.into_inner());
+            // 等锁期间连接可能断了、授权可能没了：检查要放在拿锁之后。
+            if !self.link.attached() {
+                Err(HostError::new("unavailable", "等待助手调用期间与 Agent24 的连接已断开", true))
+            } else if !self.link.grants_assistant() {
+                Err(HostError::new("forbidden", "宿主未授予助手能力", false))
+            } else {
+                self.link.assistant_chat(&req, ASSISTANT_TIMEOUT)
+            }
+        };
+        match result {
             Ok(r) => {
                 log::info!("宿主助手回答（会话 {}，run {}，{} 字节）", r.session_id, r.run_id, r.text.len());
                 if r.text.trim().is_empty() {

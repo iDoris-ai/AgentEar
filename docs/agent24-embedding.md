@@ -129,11 +129,11 @@ P1 可由两边并行开发，但只能用 fake host/module 和暂定 fixtures�
 | `lang` | `zh-CN` / `en-US` / `th-TH`，随本轮语种 |
 | `conversation_id` | `conv-` + 24 位随机十六进制（29 字符，合 `[A-Za-z0-9_-]{1,64}`），不含用户内容 |
 
-`conversation_id` 的生命周期（`host::conversation_id` / `reset_conversation`）：一次对话内每轮复用同一个；附着建立、断开、切进或切出对话模式（`set_mode`）时换新。
+`conversation_id` 的生命周期（`host::conversation_id` / `reset_conversation`）：**同一次附着期间稳定**；只在附着建立 / 断开时换新（`host::attach` / `detach`）。**不随模式切换换**：双击热键每次激活都会翻转模式，若按模式换，每轮都是新会话。id 在本轮开始（`Engines::from_config` 构造 `AssistantLlm`）时捕获，等待期间被重置也不影响本轮。
 
-**返回**：非流式 `{text, session_id, run_id, request_id}`，`text` 纯文本（约定 ≤8000 字节），由 AgentEar 的 TTS 朗读；宿主不会再用 `speak` 重复播报。字段缺失（`text`/`session_id`/`run_id`）一律报错；`request_id` 我们没发，不要求回传。超时 90 秒（`ASSISTANT_TIMEOUT`）；每个模块同时最多 1 个调用（宿主侧约束，AgentEar 对话本来就是串行的）。
+**返回**：非流式 `{text, session_id, run_id, request_id}`，`text` 纯文本（约定 ≤8000 字节），由 AgentEar 的 TTS 朗读；宿主不会再用 `speak` 重复播报。字段缺失（`text`/`session_id`/`run_id`）一律报错；`request_id` 我们没发，不要求回传。超时 90 秒（`ASSISTANT_TIMEOUT`）；每个模块同时最多 1 个调用：AgentEar 侧用全局互斥强制（`AssistantLlm::reply` 持锁调用，**拿到锁后**再重查附着与授权才发帧）；宿主对并发多于 1 个返回 `busy`，正常情况不会发生，仍按失败处理。调用被 abort / 连接断开时宿主会取消对应 run。
 
-**失败码**：`forbidden` / `busy` / `unavailable`（message 带 iDoris reason，进 `cause`）/ `timeout` / `internal` 原样进 `HostError`（事件里 `error.code` 同名）。`invalid` 不在 `error.code` 闭集里，归 `internal`，原始值留在 `HostError::wire_kind`。`awaiting_approval` **不算失败**：这一轮念一句固定提示（中「需要在 Agent24 里确认一下。」/ 英 `This needs your confirmation in Agent24.` / 泰「ต้องยืนยันใน Agent24 ก่อน」），不发 error 事件。
+**失败码**：`forbidden` / `busy` / `unavailable`（message 带 iDoris reason，进 `cause`）/ `timeout` / `internal` 原样进 `HostError`（事件里 `error.code` 同名）。`invalid` 不在 `error.code` 闭集里，归 `internal`，原始值留在 `HostError::wire_kind`。宿主在「记忆没存进去（`memory_persisted=false`）」或「等不到完成事件」时返回 `internal`：**是失败，不念回答**。等待审批有两种形式，**两种都认**：Agent24 最终实现（#1982）的 `unavailable` + `data.reason = "awaiting_approval"`（`data` 里还有 `run_id` / `session_id`，`HostError::reason`），以及 wire kind 直接是 `awaiting_approval`。它们**不算失败**：这一轮念一句固定提示（中「需要在 Agent24 里确认一下。」/ 英 `This needs your confirmation in Agent24.` / 泰「ต้องยืนยันใน Agent24 ก่อน」），不发 error 事件。
 
 **与其它路径的关系**：
 - 翻译（`translate`）固定走 `talk_llm_url`，不受助手影响（有用例钉住）。
