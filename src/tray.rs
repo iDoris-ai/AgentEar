@@ -328,6 +328,7 @@ pub fn set_asr_fallback(on: bool) {
     ASR_FALLBACK.store(on, Ordering::Relaxed);
 }
 
+#[cfg(test)]
 pub fn asr_fallback_active() -> bool {
     ASR_FALLBACK.load(Ordering::Relaxed)
 }
