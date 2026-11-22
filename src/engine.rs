@@ -241,7 +241,8 @@ impl AsrEngine for SpeechSwiftEngine {
         let ours = crate::qwen3::is_ready(m);
         // FU-31：我们自己的运行时一律走补丁版 speech-server（认 AGENTEAR_OFFLINE，
         // 不联网问 Hub）；官方 `speech` CLI 不认它，在断网沙箱里每次卡约 2 分钟，
-        // 所以**不再有 CLI 退路**。失败直接返回错误，由 `Dispatch` 退回 SenseVoice。
+        // 所以**不再有 CLI 退路**。失败直接返回错误，由 `Dispatch` 退回内置引擎
+        //（中英 SenseVoice / 泰语 whisper）。
         // 常驻开着：用常驻服务；关着：临时拉起、转完即停（不分录音长短）。
         if ours {
             return if cfg.qwen3_resident {
@@ -461,18 +462,42 @@ impl AsrEngine for Dispatch {
 
     fn transcribe(&self, wav: &Path, lang: AsrLang) -> Result<Transcript> {
         let r = self.current()?.transcribe(wav, lang);
-        // FU-31：Qwen3 失败（模型文件缺失 / 服务起不来 / 超时）时退回 SenseVoice，这一轮不丢字。
-        if let (Err(e), Ok(b)) = (&r, &self.builtin) {
-            if should_fall_back_to_builtin(self.selected(), self.pinned.is_some()) {
-                crate::input_timings::note_fallback();
-                log::warn!("Qwen3-ASR 转写失败，这一轮退回 SenseVoice：{e:#}");
-                return b
-                    .transcribe(wav, lang)
-                    .with_context(|| format!("Qwen3-ASR 失败（{e:#}），退回 SenseVoice 也失败"));
-            }
-        }
-        r
+        let b = self.builtin.as_ref().ok().map(|b| b as &dyn AsrEngine);
+        transcribe_with_fallback(r, self.selected(), self.pinned.is_some(), b, wav, lang)
     }
+}
+
+/// FU-31/36：Qwen3 失败（模型文件缺失 / 服务起不来 / 超时）时退回内置引擎，这一轮不丢字。
+/// 从 `Dispatch::transcribe` 抽出来，好用桩引擎驱动测试。
+///
+/// 退回目标按语种说准：泰语走 whisper（Thonburian），其余走 SenseVoice。
+/// 退回时在菜单栏亮 ⚠（`tray::set_asr_fallback`），Qwen3 下一次成功后熄灭——
+/// 否则 .3 运行时装好却加载不了的用户会一直静默用着 SenseVoice。
+fn transcribe_with_fallback(
+    r: Result<Transcript>,
+    selected: AsrBackend,
+    pinned: bool,
+    builtin: Option<&dyn AsrEngine>,
+    wav: &Path,
+    lang: AsrLang,
+) -> Result<Transcript> {
+    if selected != AsrBackend::SpeechSwift {
+        return r;
+    }
+    match (&r, builtin) {
+        (Ok(_), _) => crate::tray::set_asr_fallback(false),
+        (Err(e), Some(b)) if should_fall_back_to_builtin(selected, pinned) => {
+            let to = if lang == AsrLang::Thai { "泰语 whisper" } else { "SenseVoice" };
+            crate::input_timings::note_fallback();
+            crate::tray::set_asr_fallback(true);
+            log::warn!("Qwen3-ASR 转写失败，这一轮退回{to}（菜单栏显示 ⚠）：{e:#}");
+            return b
+                .transcribe(wav, lang)
+                .with_context(|| format!("Qwen3-ASR 失败（{e:#}），退回{to}也失败"));
+        }
+        _ => {}
+    }
+    r
 }
 
 pub fn build_dynamic(
@@ -499,6 +524,72 @@ mod tests {
     }
 
     use super::*;
+
+    /// 桩引擎：固定返回文字或失败，记录被调用次数。
+    struct Stub(std::result::Result<&'static str, &'static str>, std::sync::atomic::AtomicUsize);
+    impl Stub {
+        fn new(r: std::result::Result<&'static str, &'static str>) -> Self {
+            Stub(r, Default::default())
+        }
+        fn calls(&self) -> usize {
+            self.1.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+    impl AsrEngine for Stub {
+        fn name(&self) -> &'static str {
+            "stub"
+        }
+        fn supports(&self, _: AsrLang) -> bool {
+            true
+        }
+        fn preflight(&self, _: AsrLang) -> Result<()> {
+            Ok(())
+        }
+        fn transcribe(&self, _: &Path, _: AsrLang) -> Result<Transcript> {
+            self.1.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            match self.0 {
+                Ok(t) => Ok(Transcript { text: t.to_string(), lang: None }),
+                Err(e) => Err(anyhow::anyhow!(e)),
+            }
+        }
+    }
+
+    /// FU-36：驱动 `Dispatch` 的兜底（`transcribe_with_fallback` 就是它调的那一段）。
+    /// 失败 -> 退回内置并亮菜单栏 ⚠、记退回标记；成功 -> 灭 ⚠；锁死 / 选了内置 -> 不兜底；
+    /// 两边都失败 -> 错误里带两个原因。（托盘标志是全局的，所以放在同一条测试里顺序跑。）
+    #[test]
+    fn dispatch_fallback_behaviour() {
+        let wav = Path::new("x.wav");
+        let sv = Stub::new(Ok("来自内置"));
+        crate::tray::set_asr_fallback(false);
+        crate::input_timings::begin_asr();
+
+        let r = transcribe_with_fallback(Err(anyhow::anyhow!("加载失败")), AsrBackend::SpeechSwift, false, Some(&sv), wav, AsrLang::Auto);
+        assert_eq!(r.unwrap().text, "来自内置");
+        assert_eq!(sv.calls(), 1);
+        assert!(crate::tray::asr_fallback_active(), "兜底后必须给用户可见提示");
+        assert!(crate::input_timings::take_fallback());
+
+        let r = transcribe_with_fallback(Ok(Transcript { text: "来自qwen".into(), lang: None }), AsrBackend::SpeechSwift, false, Some(&sv), wav, AsrLang::Auto);
+        assert_eq!(r.unwrap().text, "来自qwen");
+        assert_eq!(sv.calls(), 1);
+        assert!(!crate::tray::asr_fallback_active(), "Qwen3 成功后提示要熄灭");
+
+        let r = transcribe_with_fallback(Err(anyhow::anyhow!("加载失败")), AsrBackend::SpeechSwift, true, Some(&sv), wav, AsrLang::Auto);
+        assert!(format!("{:#}", r.unwrap_err()).contains("加载失败"), "锁死：原错误原样返回");
+        assert_eq!(sv.calls(), 1);
+        assert!(!crate::tray::asr_fallback_active());
+
+        let r = transcribe_with_fallback(Err(anyhow::anyhow!("内置坏了")), AsrBackend::Builtin, false, Some(&sv), wav, AsrLang::Auto);
+        assert!(r.is_err());
+        assert_eq!(sv.calls(), 1);
+
+        let bad = Stub::new(Err("whisper 也挂了"));
+        let r = transcribe_with_fallback(Err(anyhow::anyhow!("加载失败")), AsrBackend::SpeechSwift, false, Some(&bad), wav, AsrLang::Thai);
+        let msg = format!("{:#}", r.unwrap_err());
+        assert!(msg.contains("加载失败") && msg.contains("whisper 也挂了") && msg.contains("泰语 whisper"), "{msg}");
+        crate::tray::set_asr_fallback(false);
+    }
 
     /// 验收判据之一：**未知后端名要给出可操作的错误**，
     /// 而不是静默退回默认让用户以为切成功了。
