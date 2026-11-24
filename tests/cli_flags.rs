@@ -88,3 +88,15 @@ fn unknown_flag_exits_2_without_starting_daemon() {
     assert!(is_empty_dir(&tmp), "未知参数不该创建 pid/run 等文件");
     let _ = std::fs::remove_dir_all(&tmp);
 }
+
+/// `--mas-probe-run <command> [args…]` 把其后的参数原样转发给子进程，
+/// 子进程的选项不在 KNOWN_FLAGS 里也不该在探针运行前被 early_cli 拒掉。
+#[cfg(feature = "mas-probe")]
+#[test]
+fn mas_probe_run_does_not_reject_forwarded_flags() {
+    let tmp = tmpdir("probe-run");
+    let o = run(&["--mas-probe-run", "/usr/bin/echo", "--nonsense"], &tmp);
+    assert!(!o.stderr.contains("未知参数"), "{}", o.stderr);
+    assert_ne!(o.code, Some(2), "{}", o.stderr);
+    let _ = std::fs::remove_dir_all(&tmp);
+}
