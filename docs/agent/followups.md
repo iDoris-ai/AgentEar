@@ -47,7 +47,7 @@
 - [x] FU-34 · C · src=PR#145 评审 Low–Medium · 2026-11-15 · 冒烟判「是不是我拉起的」用 `server_pid().is_none()`：槽里本有别的模型的服务时，冒烟替换它之后 `spawned_by_us=false`，新起的服务留到 600 s 空闲回收。修法：按 pid 记归属 · done=PR#152
 - [x] FU-35 · C · src=PR#145 评审 Low · 2026-11-15 · `Dispatch::transcribe` 失败后再调一次 `self.selected()`：用户在这一句转写中途切到 SenseVoice 时，托盘杀服务、请求失败，第二次读到的已是 Builtin，兜底被抑制，这一句丢掉。修法：请求前读一次快照 · done=PR#152
 - [x] FU-36 · C · src=PR#145 评审残留 · 2026-11-15 · ① 注释里还写「退回 CLI」；② 契约探针仍在查 `speech transcribe --help`，现在没人用；③ `--asr-bench` 的 `*-cli` 标签在未锁定后端时，Qwen3 失败会静默量到 SenseVoice 的数字；④ 缺一条驱动 `Dispatch` 兜底的行为测试；⑤ 兜底只写 `log::warn`：已装用户的 .3 运行时不跑冒烟，.3 加载不了时会一直静默用 SenseVoice（应有可见提示）；泰语兜底实际走 whisper，日志文案不准 · done=PR#150（#146 残留：done=PR#149）
-- [ ] FU-37 · A · src=v0.29.3 发版冒烟 · 2026-11-22 · `agentear --version` 曾被当成无参数启动成常驻守护进程，冒烟脚本一直挂着；已由 #153 修（`--version`/`--help`/未知参数立即退出）。教训：发版冒烟脚本里对任何可能不退出的命令必须加超时
+- [x] FU-37 · A · src=v0.29.3 发版冒烟 · 2026-11-22 · `agentear --version` 曾被当成无参数启动成常驻守护进程，冒烟脚本一直挂着；已由 #153 修（`--version`/`--help`/未知参数立即退出）。教训：发版冒烟脚本里对任何可能不退出的命令必须加超时
 - [ ] FU-38 · B · src=FU-37 · 2026-11-22 · 冒烟/发版脚本里的 `--version` 步骤及所有子命令调用都要用 `timeout` 包住；该脚本已随会话临时目录丢失。要把发版脚本落进仓库 `scripts/release-local.sh` 并过 `lint-shell.sh`
 - [ ] FU-39 · C · src=PR#148 评审遗留 · 2026-11-22 · ① W-4 的 8000 字节回复上限只告警不截断；② M4 拿锁后的授权重查冗余；③ 排队在锁后的一轮，用户打断时不丢弃；④ 助手路径没有 tier/token 隐私自检；⑤ 绑定知识库路径与 `awaiting_approval` 提示待 Agent24 0.7.0 e2e 补测
 - [ ] FU-40 · C · src=FU-24 · 2026-11-22 · FU-24 剩余项：泰语要求文件（Thai 转换依赖）未经完整转换重跑复测，待机器空闲（swap 有余量）再做
