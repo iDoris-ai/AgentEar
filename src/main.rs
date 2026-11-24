@@ -64,7 +64,72 @@ enum State {
     },
 }
 
+/// 本程序认识的所有 `--flag`（含只在子命令里被 `flag_value` 取值的那些）。
+/// 新增子命令/选项时必须同步这里，否则会被当成「未知参数」拒掉（exit 2）。
+const KNOWN_FLAGS: &[&str] = &[
+    "--a3-socket", "--a3-token-file", "--action", "--add-command", "--add-command-wav",
+    "--agent24-pair", "--agent24-startup", "--ask", "--asr-backend", "--asr-bench", "--body",
+    "--classify", "--commands", "--confirm", "--cue", "--cue-wav", "--debug-keys", "--diagnose",
+    "--fetch-qwen3", "--fetch-thai", "--gap-ms", "--help", "--hold", "--host", "--json", "--lang",
+    "--last", "--mas-probe", "--mas-probe-run", "--match-command", "--name", "--no-auto-paste",
+    "--no-stream", "--only", "--rate", "--reindex", "--repeat", "--replay-kb", "--reply",
+    "--run-command", "--runs", "--say", "--search", "--talk-turn", "--timings", "--to",
+    "--transcribe", "--translate", "--url", "--value", "--version",
+];
+
+const USAGE: &str = "用法: agentear [子命令]\n\
+无参数 = 启动常驻守护进程（Finder 启动 .app 也是无参数）。\n\
+\n\
+  --version, -V            打印版本\n\
+  --help, -h               打印本说明\n\
+  --diagnose               环境自检（权限、音频设备、ASR 依赖）\n\
+  --transcribe <wav>       离线转写（--lang th|auto）\n\
+  --talk-turn <wav>        完整一轮对话（ASR -> LLM -> TTS）\n\
+  --ask <文字> / --say <文字>   文字问答 / 只测 TTS\n\
+  --translate <文字> --to en|zh|th\n\
+  --classify <文字>        给文字分类\n\
+  --search <词> / --reindex / --replay-kb   知识库检索与重建\n\
+  --commands / --add-command / --match-command / --run-command   语音指令表\n\
+  --timings                分段耗时统计\n\
+  --fetch-thai / --fetch-qwen3 <0.6b|1.7b>  预下载模型\n\
+  --asr-bench <wav,...>    ASR 后端基准\n\
+  --cue <name>             试听提示音\n\
+  --debug-keys             打印修饰键事件\n";
+
+/// 在任何副作用（日志文件、数据目录、麦克风、热键）之前处理 `--version`/`--help`/未知 `--xxx`。
+/// 返回 `Some(退出码)` 表示应立即退出。单横线参数（如 Finder 注入的 `-psn_…`）不管。
+fn early_cli(args: &[String]) -> Option<i32> {
+    let rest = &args[1.min(args.len())..];
+    if rest.iter().any(|a| a == "--version" || a == "-V") {
+        println!("agentear {}", env!("CARGO_PKG_VERSION"));
+        return Some(0);
+    }
+    if rest.iter().any(|a| a == "--help" || a == "-h") {
+        print!("{USAGE}");
+        return Some(0);
+    }
+    for a in rest {
+        if let Some(body) = a.strip_prefix("--") {
+            if body.is_empty() {
+                continue;
+            }
+            let name = format!("--{}", body.split('=').next().unwrap_or(""));
+            if !KNOWN_FLAGS.contains(&name.as_str()) {
+                eprintln!("未知参数: {a}\n运行 agentear --help 查看用法");
+                return Some(2);
+            }
+        }
+    }
+    None
+}
+
 fn main() -> Result<()> {
+    {
+        let early: Vec<String> = std::env::args().collect();
+        if let Some(code) = early_cli(&early) {
+            std::process::exit(code);
+        }
+    }
     init_logging();
 
     let args: Vec<String> = std::env::args().collect();
