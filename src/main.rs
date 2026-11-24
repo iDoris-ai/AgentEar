@@ -100,6 +100,11 @@ const USAGE: &str = "用法: agentear [子命令]\n\
 /// 返回 `Some(退出码)` 表示应立即退出。单横线参数（如 Finder 注入的 `-psn_…`）不管。
 fn early_cli(args: &[String]) -> Option<i32> {
     let rest = &args[1.min(args.len())..];
+    // `--mas-probe-run <command> [args…]` 把其后的全部参数转发给子进程：从它开始的部分不归这里管。
+    let rest = match rest.iter().position(|a| a == "--mas-probe-run") {
+        Some(i) => &rest[..=i],
+        None => rest,
+    };
     if rest.iter().any(|a| a == "--version" || a == "-V") {
         println!("agentear {}", env!("CARGO_PKG_VERSION"));
         return Some(0);
@@ -4423,5 +4428,28 @@ mod conversation_id_lifecycle_tests {
         host::attach(fake);
         assert_ne!(host::conversation_id(), id2, "重新附着换新");
         host::detach(&config::get());
+    }
+}
+
+/// `early_cli`：`--mas-probe-run` 之后的参数是转发给子进程的，不归本程序的白名单管。
+#[cfg(test)]
+mod early_cli_tests {
+    use super::*;
+
+    fn a(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn mas_probe_run_forwards_args_unchecked() {
+        assert_eq!(early_cli(&a(&["agentear", "--mas-probe-run", "/usr/bin/echo", "--nonsense"])), None);
+        // 其后的 --version/--help 也属于子进程
+        assert_eq!(early_cli(&a(&["agentear", "--mas-probe-run", "/bin/x", "--version", "-h"])), None);
+    }
+
+    #[test]
+    fn flags_before_mas_probe_run_are_still_checked() {
+        assert_eq!(early_cli(&a(&["agentear", "--bogus", "--mas-probe-run", "/bin/x"])), Some(2));
+        assert_eq!(early_cli(&a(&["agentear", "--version", "--mas-probe-run", "/bin/x"])), Some(0));
     }
 }
