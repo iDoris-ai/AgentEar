@@ -434,7 +434,12 @@ impl Dispatch {
     }
 
     fn current(&self) -> Result<&dyn AsrEngine> {
-        match self.selected() {
+        self.engine_for(self.selected())
+    }
+
+    /// 按**给定的快照**取引擎（FU-35：一次转写只读一次 `selected()`）。
+    fn engine_for(&self, sel: AsrBackend) -> Result<&dyn AsrEngine> {
+        match sel {
             AsrBackend::Builtin => match &self.builtin {
                 Ok(b) => Ok(b),
                 Err(e) => bail!("内置 ASR 不可用：{e}"),
@@ -442,6 +447,23 @@ impl Dispatch {
             AsrBackend::SpeechSwift => Ok(&self.speech),
         }
     }
+}
+
+/// FU-35：转写 + 失败退回的核心。`select` 只在开头调一次，选引擎和判「要不要退回」用同一份快照。
+/// 原来失败后又读一次 `selected()`：用户在这一句转写中途切到 SenseVoice（托盘杀服务、请求失败），
+/// 第二次读到的已是 Builtin，退回被抑制，这一句丢掉。
+fn dispatch_transcribe<'a>(
+    select: &dyn Fn() -> AsrBackend,
+    pinned: bool,
+    engine_for: &dyn Fn(AsrBackend) -> Result<&'a dyn AsrEngine>,
+    builtin: Option<&dyn AsrEngine>,
+    wav: &Path,
+    lang: AsrLang,
+) -> Result<Transcript> {
+    let sel = select();
+    let r = engine_for(sel)?.transcribe(wav, lang);
+    // 退回判据与 tray 状态用同一份快照 `sel`（#150 的 `transcribe_with_fallback` 不再自己读配置）
+    transcribe_with_fallback(r, sel, pinned, builtin, wav, lang)
 }
 
 impl AsrEngine for Dispatch {
@@ -461,9 +483,14 @@ impl AsrEngine for Dispatch {
     }
 
     fn transcribe(&self, wav: &Path, lang: AsrLang) -> Result<Transcript> {
-        let r = self.current()?.transcribe(wav, lang);
-        let b = self.builtin.as_ref().ok().map(|b| b as &dyn AsrEngine);
-        transcribe_with_fallback(r, self.selected(), self.pinned.is_some(), b, wav, lang)
+        dispatch_transcribe(
+            &|| self.selected(),
+            self.pinned.is_some(),
+            &|sel| self.engine_for(sel),
+            self.builtin.as_ref().ok().map(|b| b as &dyn AsrEngine),
+            wav,
+            lang,
+        )
     }
 }
 
@@ -790,5 +817,38 @@ mod tests {
         assert!(!called.exists(), "preflight 本身不调用引擎二进制");
 
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// FU-35：转写中途用户切到 SenseVoice，`selected()` 第二次读会变成 Builtin 而抑制退回。
+    /// 一次转写只能读一次 `selected()`，且退回判据用那份快照。
+    #[test]
+    fn fallback_uses_the_selection_snapshot_not_a_second_read() {
+        use std::cell::Cell;
+        struct Fail;
+        impl AsrEngine for Fail {
+            fn name(&self) -> &'static str { "fail" }
+            fn supports(&self, _: AsrLang) -> bool { true }
+            fn preflight(&self, _: AsrLang) -> Result<()> { Ok(()) }
+            fn transcribe(&self, _: &Path, _: AsrLang) -> Result<Transcript> { bail!("服务被杀") }
+        }
+        struct Ok1;
+        impl AsrEngine for Ok1 {
+            fn name(&self) -> &'static str { "ok" }
+            fn supports(&self, _: AsrLang) -> bool { true }
+            fn preflight(&self, _: AsrLang) -> Result<()> { Ok(()) }
+            fn transcribe(&self, _: &Path, _: AsrLang) -> Result<Transcript> {
+                Ok(Transcript { text: "兜住了".into(), lang: None })
+            }
+        }
+        let reads = Cell::new(0u32);
+        // 第一次读 = SpeechSwift；之后用户切走，再读就是 Builtin
+        let select = || {
+            reads.set(reads.get() + 1);
+            if reads.get() == 1 { AsrBackend::SpeechSwift } else { AsrBackend::Builtin }
+        };
+        let (fail, ok) = (Fail, Ok1);
+        let r = dispatch_transcribe(&select, false, &|_| Ok(&fail as &dyn AsrEngine), Some(&ok), Path::new("x.wav"), AsrLang::Auto);
+        assert_eq!(r.unwrap().text, "兜住了", "这一句必须退回 SenseVoice，不能丢");
+        assert_eq!(reads.get(), 1, "一次转写只读一次 selected()");
     }
 }
